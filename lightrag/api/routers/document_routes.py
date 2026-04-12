@@ -3,7 +3,9 @@ This module contains all document-related routes for the LightRAG API.
 """
 
 import asyncio
+import mimetypes
 import time
+from collections import defaultdict
 from uuid import uuid4
 from functools import lru_cache
 from lightrag.utils import logger, get_pinyin_sort_key, performance_timing_log
@@ -25,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from lightrag import LightRAG
 from lightrag.base import DeletionResult, DocProcessingStatus, DocStatus
+from lightrag.lightrag import _build_multimodal_rebuild_status_record
 from lightrag.utils import (
     generate_track_id,
     compute_mdhash_id,
@@ -86,6 +89,30 @@ router = APIRouter(
 temp_prefix = "__tmp__"
 UNKNOWN_FILE_SOURCE = "unknown_source"
 LEGACY_EMPTY_FILE_PATH_SENTINELS = {"", "no-file-path"}
+DOCUMENT_SCAN_STATE_NAMESPACE = "document_scan_state"
+DIRECT_IMAGE_EXTENSIONS: dict[str, str] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".bmp": "image/bmp",
+}
+DOCUMENT_SCAN_SKIP_STATUSES = frozenset(
+    {
+        DocStatus.PENDING.value,
+        DocStatus.PROCESSING.value,
+        DocStatus.PREPROCESSED.value,
+        DocStatus.PROCESSED.value,
+    }
+)
+MULTIMODAL_UPLOAD_TAKEOVER_STATUSES = frozenset(
+    {
+        DocStatus.PREPROCESSED.value,
+        DocStatus.PROCESSED.value,
+        DocStatus.FAILED.value,
+    }
+)
 
 
 def normalize_file_path(file_path: str | None) -> str:
@@ -145,6 +172,182 @@ def sanitize_filename(filename: str, input_dir: Path) -> str:
     return clean_name
 
 
+def _coerce_doc_status_value(status: Any) -> str | None:
+    """Normalize enum/string status values to lowercase strings."""
+    if isinstance(status, DocStatus):
+        return status.value
+    if isinstance(status, str):
+        return status.replace("DocStatus.", "").strip().lower()
+    return None
+
+
+def _should_skip_scan_for_status(status: Any) -> bool:
+    """Return True when a file is already in-flight or completed."""
+    normalized_status = _coerce_doc_status_value(status)
+    return normalized_status in DOCUMENT_SCAN_SKIP_STATUSES
+
+
+def _is_multimodal_pipeline_enabled(rag: LightRAG) -> bool:
+    return (
+        rag.image_embedding_func is not None
+        and rag.images_vdb is not None
+        and rag.image_blob_store is not None
+        and rag.image_metadata is not None
+    )
+
+
+def _get_status_doc_field(status_doc: Any, field_name: str, default: Any = None) -> Any:
+    """Read a field from either a doc-status dict or dataclass-like object."""
+    if status_doc is None:
+        return default
+    if isinstance(status_doc, dict):
+        return status_doc.get(field_name, default)
+    return getattr(status_doc, field_name, default)
+
+
+async def _find_tracked_document_by_file_path(
+    rag: LightRAG, file_path: str
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Return the best tracked document matching a logical file path.
+
+    ``get_doc_by_file_path`` does not expose the document id, so for workflows
+    like in-place multimodal rebuild we need to scan the tracked documents and
+    pick the most suitable candidate. Prefer processed / failed documents, then
+    the most recently updated record.
+    """
+
+    normalized_target = normalize_file_path(file_path)
+    all_statuses = [
+        DocStatus.PROCESSED,
+        DocStatus.FAILED,
+        DocStatus.PREPROCESSED,
+        DocStatus.PROCESSING,
+        DocStatus.PENDING,
+    ]
+    docs = await rag.doc_status.get_docs_by_statuses(all_statuses)
+    if not docs:
+        fallback = await rag.doc_status.get_doc_by_file_path(file_path)
+        return None, fallback
+
+    status_rank = {
+        DocStatus.PROCESSED.value: 50,
+        DocStatus.FAILED.value: 40,
+        DocStatus.PREPROCESSED.value: 30,
+        DocStatus.PROCESSING.value: 20,
+        DocStatus.PENDING.value: 10,
+    }
+    candidates: list[tuple[int, str, str, dict[str, Any]]] = []
+    for doc_id, status_doc in docs.items():
+        candidate_file_path = normalize_file_path(_extract_doc_status_file_path(status_doc))
+        if candidate_file_path != normalized_target:
+            continue
+
+        candidate_dict = (
+            dict(status_doc)
+            if isinstance(status_doc, dict)
+            else {
+                "file_path": _extract_doc_status_file_path(status_doc),
+                "status": _get_status_doc_field(status_doc, "status"),
+                "track_id": _get_status_doc_field(status_doc, "track_id"),
+                "updated_at": _get_status_doc_field(status_doc, "updated_at"),
+                "created_at": _get_status_doc_field(status_doc, "created_at"),
+                "metadata": _get_status_doc_field(status_doc, "metadata", {}),
+                "error_msg": _get_status_doc_field(status_doc, "error_msg"),
+            }
+        )
+        normalized_status = _coerce_doc_status_value(candidate_dict.get("status"))
+        candidates.append(
+            (
+                status_rank.get(normalized_status or "", 0),
+                str(candidate_dict.get("updated_at") or candidate_dict.get("created_at") or ""),
+                doc_id,
+                candidate_dict,
+            )
+        )
+
+    if not candidates:
+        fallback = await rag.doc_status.get_doc_by_file_path(file_path)
+        return None, fallback
+
+    candidates.sort(reverse=True)
+    _, _, doc_id, candidate_dict = candidates[0]
+    return doc_id, candidate_dict
+
+
+async def _ensure_pipeline_not_busy(
+    rag: LightRAG,
+    *,
+    detail: str = (
+        "Pipeline is busy. Please wait for the current task to finish before "
+        "rebuilding multimodal data."
+    ),
+) -> None:
+    from lightrag.kg.shared_storage import get_namespace_data, get_namespace_lock
+
+    pipeline_status = await get_namespace_data("pipeline_status", workspace=rag.workspace)
+    pipeline_status_lock = get_namespace_lock("pipeline_status", workspace=rag.workspace)
+    async with pipeline_status_lock:
+        if pipeline_status.get("busy", False):
+            raise HTTPException(status_code=409, detail=detail)
+
+
+def _is_direct_image_extension(ext: str) -> bool:
+    return ext.lower() in DIRECT_IMAGE_EXTENSIONS
+
+
+def _guess_image_mime_type(file_path: Path) -> str:
+    ext = file_path.suffix.lower()
+    guessed = DIRECT_IMAGE_EXTENSIONS.get(ext)
+    if guessed:
+        return guessed
+    return mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+
+
+async def _get_document_scan_state(rag: LightRAG):
+    from lightrag.kg.shared_storage import get_namespace_data, get_namespace_lock
+
+    scan_state = await get_namespace_data(
+        DOCUMENT_SCAN_STATE_NAMESPACE, workspace=rag.workspace
+    )
+    scan_state_lock = get_namespace_lock(
+        DOCUMENT_SCAN_STATE_NAMESPACE, workspace=rag.workspace
+    )
+    return scan_state, scan_state_lock
+
+
+async def _claim_input_file(
+    rag: LightRAG, filename: str, owner: str
+) -> tuple[bool, str | None]:
+    """Claim an input filename so scan/upload workers cannot process it twice."""
+    scan_state, scan_state_lock = await _get_document_scan_state(rag)
+    async with scan_state_lock:
+        claimed_files = dict(scan_state.get("claimed_files") or {})
+        existing_owner = claimed_files.get(filename)
+        if existing_owner and existing_owner != owner:
+            return False, existing_owner
+
+        claimed_files[filename] = owner
+        scan_state["claimed_files"] = claimed_files
+        return True, existing_owner
+
+
+async def _release_input_file_claim(
+    rag: LightRAG, filename: str, owner: str | None = None
+) -> None:
+    """Release a previously claimed input filename."""
+    scan_state, scan_state_lock = await _get_document_scan_state(rag)
+    async with scan_state_lock:
+        claimed_files = dict(scan_state.get("claimed_files") or {})
+        existing_owner = claimed_files.get(filename)
+        if existing_owner is None:
+            return
+        if owner is not None and existing_owner != owner:
+            return
+
+        claimed_files.pop(filename, None)
+        scan_state["claimed_files"] = claimed_files
+
+
 class ScanResponse(BaseModel):
     """Response model for document scanning operation
 
@@ -197,6 +400,40 @@ class ReprocessResponse(BaseModel):
                 "status": "reprocessing_started",
                 "message": "Reprocessing of failed documents has been initiated in background",
                 "track_id": "",
+            }
+        }
+    )
+
+
+class RebuildMultimodalRequest(BaseModel):
+    """Request model for rebuilding multimodal data for one PDF document."""
+
+    reuse_cache: bool = Field(
+        default=True,
+        description=(
+            "Reuse cached image captions / embeddings whenever the extracted "
+            "image blob hash matches an existing record."
+        ),
+    )
+
+
+class RebuildMultimodalResponse(BaseModel):
+    """Response model for multimodal rebuild operations."""
+
+    status: Literal["rebuild_started"] = Field(
+        description="Status of the rebuild operation"
+    )
+    message: str = Field(description="Human-readable message describing the rebuild")
+    track_id: str = Field(description="Tracking ID for the rebuild job")
+    doc_id: str = Field(description="Document identifier being rebuilt")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "status": "rebuild_started",
+                "message": "Multimodal rebuild has been initiated in the background",
+                "track_id": "rebuild_multimodal_20260412_190000_ab12cd",
+                "doc_id": "doc-123456",
             }
         }
     )
@@ -321,6 +558,20 @@ class InsertResponse(BaseModel):
     )
     message: str = Field(description="Message describing the operation result")
     track_id: str = Field(description="Tracking ID for monitoring processing status")
+    doc_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Document identifier associated with the operation. Present for "
+            "in-place replacement / takeover flows."
+        ),
+    )
+    operation_metadata: Optional[dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Optional structured metadata describing how the upload was "
+            "handled (for example, whether it reused an existing document)."
+        ),
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -328,6 +579,8 @@ class InsertResponse(BaseModel):
                 "status": "success",
                 "message": "File 'document.pdf' uploaded successfully. Processing will continue in background.",
                 "track_id": "upload_20250729_170612_abc123",
+                "doc_id": None,
+                "operation_metadata": None,
             }
         }
     )
@@ -842,6 +1095,7 @@ class DocumentManager:
             ".css",  # Cascading Style Sheets
             ".scss",  # Sassy CSS
             ".less",  # LESS CSS
+            *DIRECT_IMAGE_EXTENSIONS.keys(),
         ),
     ):
         # Store the base input directory and workspace
@@ -866,6 +1120,8 @@ class DocumentManager:
         for ext in self.supported_extensions:
             logger.debug(f"Scanning for {ext} files in {self.input_dir}")
             for file_path in self.input_dir.glob(f"*{ext}"):
+                if file_path.name.startswith(temp_prefix) or not file_path.is_file():
+                    continue
                 if file_path not in self.indexed_files:
                     new_files.append(file_path)
         return new_files
@@ -963,6 +1219,95 @@ def get_unique_filename_in_enqueued(target_dir: Path, original_name: str) -> str
     return f"{base_name}_{timestamp}{extension}"
 
 
+async def _move_file_to_enqueued_directory(file_path: Path) -> None:
+    """Move a successfully enqueued file out of the hot input directory."""
+    enqueued_dir = file_path.parent / "__enqueued__"
+    await asyncio.to_thread(enqueued_dir.mkdir, exist_ok=True)
+
+    unique_filename = get_unique_filename_in_enqueued(enqueued_dir, file_path.name)
+    target_path = enqueued_dir / unique_filename
+    await asyncio.to_thread(file_path.rename, target_path)
+    logger.debug(
+        f"Moved file to enqueued directory: {file_path.name} -> {unique_filename}"
+    )
+
+
+def _resolve_document_source_file(
+    doc_manager: DocumentManager, logical_file_path: str | None
+) -> Path | None:
+    """Resolve the actual on-disk source file for a tracked document."""
+    normalized = normalize_file_path(logical_file_path)
+    if normalized == UNKNOWN_FILE_SOURCE:
+        return None
+
+    logical_name = Path(normalized).name
+    search_dirs = [doc_manager.input_dir, doc_manager.input_dir / "__enqueued__"]
+
+    for base_dir in search_dirs:
+        candidate = base_dir / logical_name
+        if candidate.is_file():
+            return candidate
+
+    stem = Path(logical_name).stem
+    suffix = Path(logical_name).suffix
+    wildcard = f"{stem}*{suffix}"
+    fallback_candidates: list[Path] = []
+    for base_dir in search_dirs:
+        if not base_dir.exists():
+            continue
+        fallback_candidates.extend(
+            candidate for candidate in base_dir.glob(wildcard) if candidate.is_file()
+        )
+
+    if not fallback_candidates:
+        return None
+
+    fallback_candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return fallback_candidates[0]
+
+
+def _extract_doc_status_file_path(status_doc: Any) -> str | None:
+    """Read ``file_path`` from either a dataclass-like object or dict."""
+    if status_doc is None:
+        return None
+    if isinstance(status_doc, dict):
+        value = status_doc.get("file_path")
+    else:
+        value = getattr(status_doc, "file_path", None)
+    if isinstance(value, str):
+        value = value.strip()
+    return value or None
+
+
+async def _is_file_path_still_referenced(
+    rag: LightRAG,
+    file_path: str,
+    *,
+    excluding_doc_ids: set[str] | None = None,
+) -> bool:
+    """Return True when another tracked document still points at this file."""
+    normalized_target = normalize_file_path(file_path)
+    if normalized_target == UNKNOWN_FILE_SOURCE:
+        return False
+
+    excluding_doc_ids = excluding_doc_ids or set()
+    all_statuses = [
+        DocStatus.PENDING,
+        DocStatus.PROCESSING,
+        DocStatus.PREPROCESSED,
+        DocStatus.PROCESSED,
+        DocStatus.FAILED,
+    ]
+    docs = await rag.doc_status.get_docs_by_statuses(all_statuses)
+    for other_doc_id, status_doc in docs.items():
+        if other_doc_id in excluding_doc_ids:
+            continue
+        other_file_path = normalize_file_path(_extract_doc_status_file_path(status_doc))
+        if other_file_path == normalized_target:
+            return True
+    return False
+
+
 # Document processing helper functions (synchronous)
 # These functions run in thread pool via asyncio.to_thread() to avoid blocking the event loop
 
@@ -981,6 +1326,1328 @@ def _convert_with_docling(file_path: Path) -> str:
     converter = DocumentConverter()
     result = converter.convert(file_path)
     return result.document.export_to_markdown()
+
+
+def _normalize_pdf_bbox(
+    raw_bbox: Any,
+    *,
+    page_width: float | None = None,
+    page_height: float | None = None,
+) -> dict[str, Any] | None:
+    """Normalize docling / pymupdf bbox payloads to a top-left origin dict."""
+    if raw_bbox is None:
+        return None
+
+    def _get_number(*names: str) -> float | None:
+        for name in names:
+            value = getattr(raw_bbox, name, None)
+            if value is None and isinstance(raw_bbox, dict):
+                value = raw_bbox.get(name)
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                try:
+                    return float(value.strip())
+                except ValueError:
+                    continue
+        return None
+
+    left = _get_number("x0", "l", "left")
+    top = _get_number("y0", "t", "top")
+    right = _get_number("x1", "r", "right")
+    bottom = _get_number("y1", "b", "bottom")
+    coord_origin = getattr(raw_bbox, "coord_origin", None)
+    if coord_origin is None and isinstance(raw_bbox, dict):
+        coord_origin = raw_bbox.get("coord_origin")
+    coord_origin_text = str(coord_origin or "TOPLEFT").upper()
+
+    if (
+        coord_origin_text.endswith("BOTTOMLEFT")
+        and page_height is not None
+        and top is not None
+        and bottom is not None
+    ):
+        top, bottom = page_height - top, page_height - bottom
+
+    if left is None or top is None or right is None or bottom is None:
+        return None
+
+    y0 = min(top, bottom)
+    y1 = max(top, bottom)
+    x0 = min(left, right)
+    x1 = max(left, right)
+    return {
+        "x0": x0,
+        "y0": y0,
+        "x1": x1,
+        "y1": y1,
+        "width": max(0.0, x1 - x0),
+        "height": max(0.0, y1 - y0),
+        "page_width": page_width,
+        "page_height": page_height,
+        "coord_origin": "TOPLEFT",
+    }
+
+
+def _bbox_area_ratio(normalized_bbox: Any) -> float:
+    """Best-effort area ratio of one bbox against its source PDF page."""
+    if not isinstance(normalized_bbox, dict):
+        return 0.0
+
+    try:
+        width = float(normalized_bbox.get("width") or 0.0)
+        height = float(normalized_bbox.get("height") or 0.0)
+        page_width = float(normalized_bbox.get("page_width") or 0.0)
+        page_height = float(normalized_bbox.get("page_height") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if width <= 0 or height <= 0 or page_width <= 0 or page_height <= 0:
+        return 0.0
+
+    return max(0.0, min(1.0, (width * height) / (page_width * page_height)))
+
+
+def _should_add_page_raster_fallback(
+    *,
+    exact_picture_count: int,
+    exact_picture_coverage_ratio: float,
+    max_exact_picture_ratio: float,
+) -> bool:
+    """Decide whether a figure-heavy page still needs a full-page raster.
+
+    Docling exact-picture crops are great when they already capture the main
+    figure. For engineering PDFs, however, Docling may emit one or more small
+    crops from a page whose *real* answerable artifact is the whole page (for
+    example a full floor plan or vector-heavy drawing). In that case we keep a
+    page-level raster fallback as a recall safety net.
+    """
+    if exact_picture_count <= 0:
+        return True
+
+    if max_exact_picture_ratio >= 0.72 or exact_picture_coverage_ratio >= 0.75:
+        return False
+
+    if exact_picture_count >= 3 and exact_picture_coverage_ratio >= 0.15:
+        return False
+
+    if exact_picture_count >= 2 and exact_picture_coverage_ratio >= 0.18:
+        return False
+
+    if exact_picture_count == 1 and max_exact_picture_ratio >= 0.38:
+        return False
+
+    return True
+
+
+def _normalize_page_text_line(line: str) -> str:
+    import re
+
+    return re.sub(r"\s+", " ", str(line or "")).strip()
+
+
+def _extract_page_label_info(page_text: str) -> tuple[int | None, str | None]:
+    """Best-effort extraction of the printed / footer page label from page text."""
+    import re
+
+    if not page_text:
+        return None, None
+
+    lines = [
+        _normalize_page_text_line(line)
+        for line in str(page_text).splitlines()
+        if _normalize_page_text_line(line)
+    ]
+    if not lines:
+        return None, None
+
+    patterns: list[tuple[re.Pattern[str], int]] = [
+        (re.compile(r"^第\s*(\d{1,4})\s*页$"), 50),
+        (re.compile(r"^[Pp](?:age|\.)?\s*(\d{1,4})$"), 40),
+        (re.compile(r"^(\d{1,4})$"), 35),
+    ]
+    candidates: list[tuple[int, int, str]] = []
+    windowed_lines: list[tuple[int, str, bool]] = []
+    for index, line in enumerate(lines[:8]):
+        windowed_lines.append((index, line, False))
+    tail_start = max(0, len(lines) - 8)
+    for index in range(tail_start, len(lines)):
+        windowed_lines.append((index, lines[index], True))
+
+    seen_keys: set[tuple[int, str]] = set()
+    for index, line, is_tail in windowed_lines:
+        dedupe_key = (index, line)
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+        for pattern, base_score in patterns:
+            match = pattern.match(line)
+            if not match:
+                continue
+            try:
+                page_number = int(match.group(1))
+            except (TypeError, ValueError):
+                continue
+            if page_number <= 0:
+                continue
+            position_bonus = 18 if index <= 5 else 12
+            edge_bonus = 8 if is_tail else 6
+            short_line_bonus = 8 if len(line) <= 4 else 0
+            candidates.append(
+                (
+                    base_score + position_bonus + edge_bonus + short_line_bonus,
+                    page_number,
+                    line,
+                )
+            )
+
+    if not candidates:
+        return None, None
+
+    candidates.sort(reverse=True)
+    _score, printed_page, raw_label = candidates[0]
+    page_label = raw_label if raw_label else str(printed_page)
+    return printed_page, page_label
+
+
+def _format_page_reference_marker(page_ref: dict[str, Any] | None) -> str:
+    if not isinstance(page_ref, dict):
+        return "unknown"
+
+    physical_page = page_ref.get("source_page")
+    printed_page = page_ref.get("source_printed_page")
+    page_label = str(page_ref.get("source_page_label") or "").strip()
+
+    if physical_page is not None:
+        try:
+            physical_page_text = f"p.{int(physical_page)}"
+        except (TypeError, ValueError):
+            physical_page_text = f"p.{physical_page}"
+    else:
+        physical_page_text = "unknown"
+
+    if printed_page is not None:
+        try:
+            printed_page_text = str(int(printed_page))
+        except (TypeError, ValueError):
+            printed_page_text = str(printed_page)
+        if printed_page_text and printed_page_text != str(physical_page):
+            return f"{physical_page_text}/页码{printed_page_text}"
+
+    if page_label and page_label != str(physical_page):
+        return f"{physical_page_text}/页标{page_label}"
+
+    return physical_page_text
+
+
+def _bbox_area(normalized_bbox: Any) -> float:
+    if not isinstance(normalized_bbox, dict):
+        return 0.0
+    try:
+        width = float(normalized_bbox.get("width") or 0.0)
+        height = float(normalized_bbox.get("height") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if width <= 0 or height <= 0:
+        return 0.0
+    return width * height
+
+
+def _bbox_overlap_ratio_on_smaller(a: Any, b: Any) -> float:
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return 0.0
+
+    try:
+        ax0 = float(a.get("x0"))
+        ay0 = float(a.get("y0"))
+        ax1 = float(a.get("x1"))
+        ay1 = float(a.get("y1"))
+        bx0 = float(b.get("x0"))
+        by0 = float(b.get("y0"))
+        bx1 = float(b.get("x1"))
+        by1 = float(b.get("y1"))
+    except (TypeError, ValueError):
+        return 0.0
+
+    inter_w = max(0.0, min(ax1, bx1) - max(ax0, bx0))
+    inter_h = max(0.0, min(ay1, by1) - max(ay0, by0))
+    inter_area = inter_w * inter_h
+    if inter_area <= 0:
+        return 0.0
+
+    smaller_area = min(_bbox_area(a), _bbox_area(b))
+    if smaller_area <= 0:
+        return 0.0
+
+    return max(0.0, min(1.0, inter_area / smaller_area))
+
+
+def _rounded_bbox_signature(
+    normalized_bbox: Any,
+    *,
+    quantum: float = 8.0,
+) -> tuple[int, int, int, int] | None:
+    if not isinstance(normalized_bbox, dict):
+        return None
+    try:
+        return (
+            int(round(float(normalized_bbox.get("x0")) / quantum)),
+            int(round(float(normalized_bbox.get("y0")) / quantum)),
+            int(round(float(normalized_bbox.get("x1")) / quantum)),
+            int(round(float(normalized_bbox.get("y1")) / quantum)),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _candidate_pixel_count(item: dict[str, Any]) -> int:
+    pil_size = item.get("pil_size")
+    if (
+        isinstance(pil_size, (tuple, list))
+        and len(pil_size) >= 2
+        and isinstance(pil_size[0], (int, float))
+        and isinstance(pil_size[1], (int, float))
+    ):
+        return max(0, int(pil_size[0])) * max(0, int(pil_size[1]))
+    return 0
+
+
+def _multimodal_extraction_priority(item: dict[str, Any]) -> int:
+    mode = str(item.get("extraction_mode") or "").strip()
+    return {
+        "pymupdf_native_image": 500,
+        "pymupdf_image_block": 450,
+        "docling_picture": 400,
+        "page_raster_recall_fallback": 150,
+        "page_raster_fallback": 100,
+    }.get(mode, 0)
+
+
+def _prefer_richer_text(current: Any, candidate: Any) -> Any:
+    current_text = str(current or "").strip()
+    candidate_text = str(candidate or "").strip()
+    if candidate_text and len(candidate_text) > len(current_text):
+        return candidate
+    return current
+
+
+def _merge_context_chunks(
+    current: Any, candidate: Any
+) -> list[dict[str, Any]] | None:
+    merged: list[dict[str, Any]] = []
+    seen_chunk_ids: set[str] = set()
+    for source in (current, candidate):
+        if not isinstance(source, list):
+            continue
+        for chunk in source:
+            if not isinstance(chunk, dict):
+                continue
+            chunk_id = str(chunk.get("chunk_id") or "").strip()
+            key = chunk_id or str(chunk)
+            if key in seen_chunk_ids:
+                continue
+            seen_chunk_ids.add(key)
+            merged.append(chunk)
+    return merged or None
+
+
+def _should_keep_precise_candidate(candidate: dict[str, Any]) -> bool:
+    bbox = candidate.get("bbox")
+    bbox_ratio = _bbox_area_ratio(bbox)
+    pixel_count = _candidate_pixel_count(candidate)
+    display_width = 0.0
+    display_height = 0.0
+    if isinstance(bbox, dict):
+        try:
+            display_width = float(bbox.get("width") or 0.0)
+            display_height = float(bbox.get("height") or 0.0)
+        except (TypeError, ValueError):
+            display_width = 0.0
+            display_height = 0.0
+
+    if pixel_count <= 0:
+        return False
+    if display_width < 48 and display_height < 48:
+        return False
+    if bbox_ratio < 0.002 and pixel_count < 12_000:
+        return False
+    if bbox_ratio < 0.005 and pixel_count < 24_000:
+        return False
+    return True
+
+
+def _multimodal_candidates_look_duplicate(
+    existing: dict[str, Any],
+    candidate: dict[str, Any],
+) -> bool:
+    try:
+        if int(existing.get("page_no")) != int(candidate.get("page_no")):
+            return False
+    except (TypeError, ValueError):
+        if existing.get("page_no") != candidate.get("page_no"):
+            return False
+
+    existing_bbox = existing.get("bbox")
+    candidate_bbox = candidate.get("bbox")
+    overlap_ratio = _bbox_overlap_ratio_on_smaller(existing_bbox, candidate_bbox)
+    bbox_signatures_match = (
+        _rounded_bbox_signature(existing_bbox) is not None
+        and _rounded_bbox_signature(existing_bbox)
+        == _rounded_bbox_signature(candidate_bbox)
+    )
+
+    existing_hash = existing.get("_content_hash")
+    candidate_hash = candidate.get("_content_hash")
+    if existing_hash and candidate_hash and existing_hash == candidate_hash:
+        if bbox_signatures_match or overlap_ratio >= 0.88:
+            return True
+        if existing_bbox is None and candidate_bbox is None:
+            return True
+
+    existing_xref = existing.get("native_xref")
+    candidate_xref = candidate.get("native_xref")
+    if (
+        existing_xref is not None
+        and candidate_xref is not None
+        and str(existing_xref) == str(candidate_xref)
+        and (bbox_signatures_match or overlap_ratio >= 0.72)
+    ):
+        return True
+
+    if bbox_signatures_match and overlap_ratio >= 0.90:
+        return True
+
+    return overlap_ratio >= 0.97
+
+
+def _merge_multimodal_candidate(
+    preferred: dict[str, Any],
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    preferred["caption_hint"] = _prefer_richer_text(
+        preferred.get("caption_hint"), candidate.get("caption_hint")
+    )
+    preferred["page_text_excerpt"] = _prefer_richer_text(
+        preferred.get("page_text_excerpt"), candidate.get("page_text_excerpt")
+    )
+    preferred["context_text"] = _prefer_richer_text(
+        preferred.get("context_text"), candidate.get("context_text")
+    )
+    if preferred.get("bbox") is None and candidate.get("bbox") is not None:
+        preferred["bbox"] = candidate.get("bbox")
+    if _candidate_pixel_count(candidate) > _candidate_pixel_count(preferred):
+        preferred["pil_size"] = candidate.get("pil_size")
+    if preferred.get("page_size") is None and candidate.get("page_size") is not None:
+        preferred["page_size"] = candidate.get("page_size")
+    if preferred.get("source_printed_page") is None and candidate.get(
+        "source_printed_page"
+    ) is not None:
+        preferred["source_printed_page"] = candidate.get("source_printed_page")
+    if not preferred.get("source_page_label") and candidate.get("source_page_label"):
+        preferred["source_page_label"] = candidate.get("source_page_label")
+    if preferred.get("native_xref") is None and candidate.get("native_xref") is not None:
+        preferred["native_xref"] = candidate.get("native_xref")
+    if not preferred.get("native_ext") and candidate.get("native_ext"):
+        preferred["native_ext"] = candidate.get("native_ext")
+
+    merged_context_chunks = _merge_context_chunks(
+        preferred.get("context_chunks"), candidate.get("context_chunks")
+    )
+    if merged_context_chunks is not None:
+        preferred["context_chunks"] = merged_context_chunks
+        preferred["context_chunk_ids"] = [
+            str(chunk.get("chunk_id"))
+            for chunk in merged_context_chunks
+            if isinstance(chunk, dict) and chunk.get("chunk_id")
+        ]
+    elif not preferred.get("context_chunk_ids") and candidate.get("context_chunk_ids"):
+        preferred["context_chunk_ids"] = candidate.get("context_chunk_ids")
+
+    merged_modes = list(
+        dict.fromkeys(
+            [
+                *(
+                    preferred.get("merged_extraction_modes")
+                    if isinstance(preferred.get("merged_extraction_modes"), list)
+                    else []
+                ),
+                str(preferred.get("extraction_mode") or "").strip(),
+                *(
+                    candidate.get("merged_extraction_modes")
+                    if isinstance(candidate.get("merged_extraction_modes"), list)
+                    else []
+                ),
+                str(candidate.get("extraction_mode") or "").strip(),
+            ]
+        )
+    )
+    preferred["merged_extraction_modes"] = [mode for mode in merged_modes if mode]
+    return preferred
+
+
+def _dedupe_precise_candidates(
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not candidates:
+        return []
+
+    sortable = [dict(candidate) for candidate in candidates if isinstance(candidate, dict)]
+    sortable.sort(
+        key=lambda item: (
+            -_multimodal_extraction_priority(item),
+            -_bbox_area_ratio(item.get("bbox")),
+            -_candidate_pixel_count(item),
+        )
+    )
+
+    deduped: list[dict[str, Any]] = []
+    for candidate in sortable:
+        img_bytes = candidate.get("bytes")
+        if img_bytes and not candidate.get("_content_hash"):
+            candidate["_content_hash"] = compute_mdhash_id(img_bytes, prefix="img-")
+
+        merged = False
+        for existing in deduped:
+            if _multimodal_candidates_look_duplicate(existing, candidate):
+                _merge_multimodal_candidate(existing, candidate)
+                merged = True
+                break
+        if not merged:
+            deduped.append(candidate)
+
+    deduped.sort(
+        key=lambda item: (
+            item.get("page_no") if item.get("page_no") is not None else 10**9,
+            -_bbox_area_ratio(item.get("bbox")),
+            -_candidate_pixel_count(item),
+            -_multimodal_extraction_priority(item),
+        )
+    )
+    return deduped
+
+
+def _cap_precise_candidates_per_page(
+    candidates: list[dict[str, Any]],
+    *,
+    max_per_page: int = 8,
+) -> list[dict[str, Any]]:
+    if max_per_page <= 0:
+        return []
+
+    grouped: dict[int | None, list[dict[str, Any]]] = defaultdict(list)
+    for candidate in candidates:
+        grouped[candidate.get("page_no")].append(candidate)
+
+    limited: list[dict[str, Any]] = []
+    for page_candidates in grouped.values():
+        page_candidates.sort(
+            key=lambda item: (
+                -_bbox_area_ratio(item.get("bbox")),
+                -_candidate_pixel_count(item),
+                -_multimodal_extraction_priority(item),
+            )
+        )
+        limited.extend(page_candidates[:max_per_page])
+
+    limited.sort(
+        key=lambda item: (
+            item.get("page_no") if item.get("page_no") is not None else 10**9,
+            item.get("page_picture_index")
+            if item.get("page_picture_index") is not None
+            else item.get("picture_index", 0),
+        )
+    )
+    return limited
+
+
+def _collect_precise_picture_page_stats(
+    candidates: list[dict[str, Any]],
+) -> tuple[set[int], dict[int, int], dict[int, float], dict[int, float]]:
+    precise_pages: set[int] = set()
+    counts_by_page: dict[int, int] = {}
+    coverage_by_page: dict[int, float] = {}
+    max_ratio_by_page: dict[int, float] = {}
+
+    for candidate in candidates:
+        page_no = candidate.get("page_no")
+        try:
+            page_no_int = int(page_no)
+        except (TypeError, ValueError):
+            continue
+        precise_pages.add(page_no_int)
+        counts_by_page[page_no_int] = counts_by_page.get(page_no_int, 0) + 1
+        bbox_ratio = _bbox_area_ratio(candidate.get("bbox"))
+        coverage_by_page[page_no_int] = coverage_by_page.get(page_no_int, 0.0) + bbox_ratio
+        max_ratio_by_page[page_no_int] = max(
+            max_ratio_by_page.get(page_no_int, 0.0),
+            bbox_ratio,
+        )
+
+    return precise_pages, counts_by_page, coverage_by_page, max_ratio_by_page
+
+
+def _image_mime_type_from_ext(ext: str | None) -> str:
+    ext_text = str(ext or "").strip().lower().lstrip(".")
+    if not ext_text:
+        return "image/png"
+    if ext_text in {"jpg", "jpeg"}:
+        return "image/jpeg"
+    if ext_text in {"jp2", "jpx"}:
+        return "image/jp2"
+    if ext_text in {"tif", "tiff"}:
+        return "image/tiff"
+    if ext_text == "bmp":
+        return "image/bmp"
+    if ext_text == "gif":
+        return "image/gif"
+    if ext_text == "webp":
+        return "image/webp"
+    guessed = mimetypes.guess_type(f"image.{ext_text}")[0]
+    return guessed or f"image/{ext_text}"
+
+
+def _count_candidates_by_mode(candidates: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        mode = str(candidate.get("extraction_mode") or "unknown").strip() or "unknown"
+        counts[mode] = counts.get(mode, 0) + 1
+    return counts
+
+
+def _format_mode_counts(counts: dict[str, int]) -> str:
+    if not counts:
+        return "none"
+    return ", ".join(f"{mode}={count}" for mode, count in sorted(counts.items()))
+
+def _build_page_context_excerpt(
+    pages_text: list[str],
+    page_index: int,
+    *,
+    page_refs: list[dict[str, Any]] | None = None,
+    current_limit: int = 1200,
+    neighbor_limit: int = 300,
+) -> tuple[str, str]:
+    """Build a current-page excerpt plus a surrounding context window."""
+    if not (0 <= page_index < len(pages_text)):
+        return "", ""
+
+    current_text = (pages_text[page_index] or "").strip()
+    current_excerpt = current_text[:current_limit]
+
+    context_sections: list[str] = []
+    prev_index = page_index - 1
+    next_index = page_index + 1
+    prev_marker = _format_page_reference_marker(
+        page_refs[prev_index] if page_refs and 0 <= prev_index < len(page_refs) else None
+    )
+    current_marker = _format_page_reference_marker(
+        page_refs[page_index] if page_refs and 0 <= page_index < len(page_refs) else None
+    )
+    next_marker = _format_page_reference_marker(
+        page_refs[next_index] if page_refs and 0 <= next_index < len(page_refs) else None
+    )
+    if prev_index >= 0:
+        prev_text = (pages_text[prev_index] or "").strip()
+        if prev_text:
+            context_sections.append(
+                f"[上一页末尾 {prev_marker}]\n{prev_text[-neighbor_limit:]}"
+            )
+    if current_excerpt:
+        context_sections.append(f"[当前页 {current_marker}]\n{current_excerpt}")
+    if next_index < len(pages_text):
+        next_text = (pages_text[next_index] or "").strip()
+        if next_text:
+            context_sections.append(
+                f"[下一页开头 {next_marker}]\n{next_text[:neighbor_limit]}"
+            )
+
+    return current_excerpt, "\n\n".join(context_sections).strip()
+
+
+def _extract_pymupdf_native_images(
+    fitz_doc: Any,
+    *,
+    pages_text: list[str],
+    page_sizes: dict[int, tuple[float, float]],
+    page_refs: list[dict[str, Any]],
+    start_page_index: int = 0,
+    end_page_index: int | None = None,
+) -> list[dict[str, Any]]:
+    if fitz_doc is None:
+        return []
+
+    native_candidates: list[dict[str, Any]] = []
+    end_page = end_page_index if end_page_index is not None else fitz_doc.page_count
+    per_page_picture_count: dict[int, int] = {}
+
+    for page_idx in range(start_page_index, min(end_page, fitz_doc.page_count)):
+        page = fitz_doc.load_page(page_idx)
+        page_no = page_idx + 1
+        local_index = page_idx - start_page_index
+        page_ref = (
+            page_refs[local_index]
+            if 0 <= local_index < len(page_refs)
+            else {"source_page": page_no}
+        )
+        page_text_excerpt, context_text = _build_page_context_excerpt(
+            pages_text,
+            local_index,
+            page_refs=page_refs,
+        )
+        caption_hint = ""
+        if 0 <= local_index < len(pages_text):
+            caption_hint = (pages_text[local_index] or "").strip()[:200]
+
+        try:
+            page_images = page.get_images(full=True) or []
+        except Exception as e:
+            logger.debug(
+                f"[multimodal] pymupdf get_images failed for {page_no=} "
+                f"on {getattr(fitz_doc, 'name', '<memory-pdf>')}: {e}"
+            )
+            continue
+
+        for image_entry in page_images:
+            try:
+                xref = int(image_entry[0])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if xref <= 0:
+                continue
+
+            try:
+                extracted_image = fitz_doc.extract_image(xref)
+            except Exception as e:
+                logger.debug(
+                    f"[multimodal] pymupdf extract_image failed for "
+                    f"{page_no=} {xref=}: {e}"
+                )
+                continue
+
+            if not isinstance(extracted_image, dict):
+                continue
+            img_bytes = extracted_image.get("image")
+            if not img_bytes:
+                continue
+
+            try:
+                rects = page.get_image_rects(xref) or []
+            except Exception as e:
+                logger.debug(
+                    f"[multimodal] pymupdf get_image_rects failed for "
+                    f"{page_no=} {xref=}: {e}"
+                )
+                rects = []
+
+            if not rects:
+                rects = [page.rect]
+
+            for occurrence_index, rect in enumerate(rects):
+                raw_rect = rect[0] if isinstance(rect, tuple) else rect
+                page_width, page_height = page_sizes.get(
+                    page_no, (float(page.rect.width), float(page.rect.height))
+                )
+                normalized_bbox = _normalize_pdf_bbox(
+                    {
+                        "x0": float(raw_rect.x0),
+                        "y0": float(raw_rect.y0),
+                        "x1": float(raw_rect.x1),
+                        "y1": float(raw_rect.y1),
+                        "coord_origin": "TOPLEFT",
+                    },
+                    page_width=page_width,
+                    page_height=page_height,
+                )
+                candidate = {
+                    "bytes": img_bytes,
+                    "mime_type": _image_mime_type_from_ext(extracted_image.get("ext")),
+                    "page_no": page_no,
+                    "source_printed_page": page_ref.get("source_printed_page"),
+                    "source_page_label": page_ref.get("source_page_label"),
+                    "bbox": normalized_bbox,
+                    "caption_hint": caption_hint,
+                    "picture_index": len(native_candidates),
+                    "page_picture_index": per_page_picture_count.get(page_no, 0),
+                    "pil_size": (
+                        int(extracted_image.get("width") or 0),
+                        int(extracted_image.get("height") or 0),
+                    ),
+                    "page_size": (page_width, page_height),
+                    "page_text_excerpt": page_text_excerpt,
+                    "context_text": context_text,
+                    "extraction_mode": "pymupdf_native_image",
+                    "native_xref": xref,
+                    "native_occurrence_index": occurrence_index,
+                    "native_ext": str(extracted_image.get("ext") or "").strip() or None,
+                }
+                if not _should_keep_precise_candidate(candidate):
+                    continue
+                native_candidates.append(candidate)
+                per_page_picture_count[page_no] = (
+                    per_page_picture_count.get(page_no, 0) + 1
+                )
+
+    return native_candidates
+
+
+def _extract_pymupdf_image_blocks(
+    fitz_doc: Any,
+    *,
+    pages_text: list[str],
+    page_sizes: dict[int, tuple[float, float]],
+    page_refs: list[dict[str, Any]],
+    start_page_index: int = 0,
+    end_page_index: int | None = None,
+) -> list[dict[str, Any]]:
+    if fitz_doc is None:
+        return []
+
+    block_candidates: list[dict[str, Any]] = []
+    end_page = end_page_index if end_page_index is not None else fitz_doc.page_count
+    per_page_picture_count: dict[int, int] = {}
+
+    for page_idx in range(start_page_index, min(end_page, fitz_doc.page_count)):
+        page = fitz_doc.load_page(page_idx)
+        page_no = page_idx + 1
+        local_index = page_idx - start_page_index
+        page_ref = (
+            page_refs[local_index]
+            if 0 <= local_index < len(page_refs)
+            else {"source_page": page_no}
+        )
+        page_text_excerpt, context_text = _build_page_context_excerpt(
+            pages_text,
+            local_index,
+            page_refs=page_refs,
+        )
+        caption_hint = ""
+        if 0 <= local_index < len(pages_text):
+            caption_hint = (pages_text[local_index] or "").strip()[:200]
+
+        try:
+            blocks = page.get_text("dict").get("blocks", []) or []
+        except Exception as e:
+            logger.debug(
+                f"[multimodal] pymupdf get_text(dict) failed for {page_no=}: {e}"
+            )
+            continue
+
+        for block in blocks:
+            if not isinstance(block, dict) or block.get("type") != 1:
+                continue
+            img_bytes = block.get("image")
+            if not isinstance(img_bytes, (bytes, bytearray)) or not img_bytes:
+                continue
+
+            page_width, page_height = page_sizes.get(
+                page_no, (float(page.rect.width), float(page.rect.height))
+            )
+            bbox = block.get("bbox")
+            normalized_bbox = _normalize_pdf_bbox(
+                {
+                    "x0": bbox[0],
+                    "y0": bbox[1],
+                    "x1": bbox[2],
+                    "y1": bbox[3],
+                    "coord_origin": "TOPLEFT",
+                }
+                if isinstance(bbox, (tuple, list)) and len(bbox) == 4
+                else bbox,
+                page_width=page_width,
+                page_height=page_height,
+            )
+            candidate = {
+                "bytes": bytes(img_bytes),
+                "mime_type": _image_mime_type_from_ext(block.get("ext")),
+                "page_no": page_no,
+                "source_printed_page": page_ref.get("source_printed_page"),
+                "source_page_label": page_ref.get("source_page_label"),
+                "bbox": normalized_bbox,
+                "caption_hint": caption_hint,
+                "picture_index": len(block_candidates),
+                "page_picture_index": per_page_picture_count.get(page_no, 0),
+                "pil_size": (
+                    int(block.get("width") or 0),
+                    int(block.get("height") or 0),
+                ),
+                "page_size": (page_width, page_height),
+                "page_text_excerpt": page_text_excerpt,
+                "context_text": context_text,
+                "extraction_mode": "pymupdf_image_block",
+                "native_ext": str(block.get("ext") or "").strip() or None,
+            }
+            if not _should_keep_precise_candidate(candidate):
+                continue
+            block_candidates.append(candidate)
+            per_page_picture_count[page_no] = per_page_picture_count.get(page_no, 0) + 1
+
+    return block_candidates
+
+
+def _extract_docling_picture_candidates(
+    file_path: Path,
+    *,
+    pages_text: list[str],
+    page_sizes: dict[int, tuple[float, float]],
+    page_refs: list[dict[str, Any]],
+    page_range: tuple[int, int] | None,
+    raster_dpi: int,
+) -> list[dict[str, Any]]:
+    if not _is_docling_available():
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    try:
+        from docling.datamodel.base_models import InputFormat  # type: ignore
+        from docling.datamodel.pipeline_options import PdfPipelineOptions  # type: ignore
+        from docling.document_converter import (  # type: ignore
+            DocumentConverter,
+            PdfFormatOption,
+        )
+
+        pipeline_options = PdfPipelineOptions()
+        pipeline_options.generate_picture_images = True
+        pipeline_options.images_scale = max(1.0, raster_dpi / 72.0)
+        converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+            }
+        )
+        convert_kwargs: dict[str, Any] = {}
+        if page_range is not None:
+            convert_kwargs["page_range"] = page_range
+
+        result = converter.convert(file_path, **convert_kwargs)
+        docling_doc = result.document
+        base_physical_page = (
+            int(page_refs[0].get("source_page"))
+            if page_refs and page_refs[0].get("source_page") is not None
+            else 1
+        )
+        per_page_picture_count: dict[int, int] = {}
+
+        for global_picture_index, picture in enumerate(docling_doc.pictures):
+            try:
+                pil = picture.get_image(docling_doc)
+            except Exception as picture_error:
+                logger.debug(
+                    f"[multimodal] docling get_image failed for "
+                    f"{file_path.name} picture {global_picture_index}: {picture_error}"
+                )
+                continue
+
+            if pil is None:
+                continue
+
+            page_no = None
+            normalized_bbox = None
+            prov_items = list(getattr(picture, "prov", None) or [])
+            for prov in prov_items:
+                prov_page = getattr(prov, "page_no", None)
+                if prov_page is None:
+                    continue
+                try:
+                    page_no = int(prov_page)
+                except (TypeError, ValueError):
+                    page_no = None
+                page_size = page_sizes.get(page_no or -1)
+                normalized_bbox = _normalize_pdf_bbox(
+                    getattr(prov, "bbox", None),
+                    page_width=page_size[0] if page_size else None,
+                    page_height=page_size[1] if page_size else None,
+                )
+                if page_no is not None:
+                    break
+
+            if page_no is None:
+                continue
+
+            local_index = max(0, page_no - base_physical_page)
+            page_ref = (
+                page_refs[local_index]
+                if 0 <= local_index < len(page_refs)
+                else {"source_page": page_no}
+            )
+            page_text_excerpt, context_text = _build_page_context_excerpt(
+                pages_text,
+                local_index,
+                page_refs=page_refs,
+            )
+            caption_hint = ""
+            try:
+                caption_hint = str(picture.caption_text(docling_doc) or "").strip()
+            except Exception:
+                caption_hint = ""
+            if not caption_hint and 0 <= local_index < len(pages_text):
+                caption_hint = (pages_text[local_index] or "").strip()[:200]
+
+            buffer = BytesIO()
+            pil.save(buffer, format="PNG")
+            candidate = {
+                "bytes": buffer.getvalue(),
+                "mime_type": "image/png",
+                "page_no": page_no,
+                "source_printed_page": page_ref.get("source_printed_page"),
+                "source_page_label": page_ref.get("source_page_label"),
+                "bbox": normalized_bbox,
+                "caption_hint": caption_hint,
+                "picture_index": global_picture_index,
+                "page_picture_index": per_page_picture_count.get(page_no, 0),
+                "pil_size": pil.size,
+                "page_size": page_sizes.get(page_no),
+                "page_text_excerpt": page_text_excerpt,
+                "context_text": context_text,
+                "extraction_mode": "docling_picture",
+            }
+            if not _should_keep_precise_candidate(candidate):
+                continue
+            candidates.append(candidate)
+            per_page_picture_count[page_no] = per_page_picture_count.get(page_no, 0) + 1
+    except Exception as e:
+        logger.warning(
+            f"[multimodal] docling picture extraction failed for "
+            f"{file_path.name}: {type(e).__name__}: {e}"
+        )
+        return []
+
+    return candidates
+
+def _convert_with_docling_multimodal(
+    file_path: Path,
+    page_range: tuple[int, int] | None = None,
+    max_images: int = 256,
+    raster_dpi: int = 144,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Extract PDF text plus multimodal figures with source-page/bbox fidelity.
+
+    Architecture:
+        1. Extract per-page text with pypdf, filling gaps via PyMuPDF text.
+        2. Build page references that preserve BOTH physical PDF page numbers
+           and printed / footer page labels when they differ.
+        3. Collect precise figure candidates from three routes:
+             - Docling semantic crops
+             - PyMuPDF native embedded-image extraction
+             - PyMuPDF image blocks from page text dicts
+        4. Deduplicate / rank precise candidates BEFORE they can flow into the
+           downstream image-caption / embedding / chunk-augmentation pipeline.
+        5. Add full-page raster fallbacks only on figure-heavy pages whose
+           precise-figure coverage is insufficient.
+    """
+    import re
+
+    pages_text: list[str] = []
+    page_sizes: dict[int, tuple[float, float]] = {}
+    page_refs: list[dict[str, Any]] = []
+    fitz_doc = None
+    start_p = (page_range[0] - 1) if page_range else 0
+    end_p = 0
+    extraction_truncated = False
+
+    try:
+        import fitz  # type: ignore
+
+        fitz_doc = fitz.open(file_path)
+        end_p = page_range[1] if page_range else fitz_doc.page_count
+        for i in range(start_p, min(end_p, fitz_doc.page_count)):
+            rect = fitz_doc.load_page(i).rect
+            page_sizes[i + 1] = (float(rect.width), float(rect.height))
+    except Exception as e:
+        logger.warning(
+            f"[multimodal] failed to read PDF geometry for {file_path.name}: {e}"
+        )
+
+    try:
+        from pypdf import PdfReader  # type: ignore
+
+        reader = PdfReader(str(file_path))
+        end_p = page_range[1] if page_range else max(end_p, len(reader.pages))
+        for i in range(start_p, min(end_p, len(reader.pages))):
+            pages_text.append(reader.pages[i].extract_text() or "")
+    except Exception as e:
+        logger.warning(
+            f"[multimodal] pypdf text extraction failed for {file_path.name}: {e}"
+        )
+
+    if fitz_doc is not None:
+        fitz_end = min(end_p or fitz_doc.page_count, fitz_doc.page_count)
+        for i in range(start_p, fitz_end):
+            try:
+                fitz_text = fitz_doc.load_page(i).get_text("text") or ""
+            except Exception:
+                fitz_text = ""
+            local_idx = i - start_p
+            if local_idx < len(pages_text):
+                if not str(pages_text[local_idx] or "").strip() and fitz_text.strip():
+                    pages_text[local_idx] = fitz_text
+            else:
+                pages_text.append(fitz_text)
+
+    if not pages_text and page_sizes:
+        pages_text = [""] * len(page_sizes)
+
+    full_text = "\n".join(pages_text)
+
+    if not full_text.strip() and _is_docling_available():
+        try:
+            from docling.document_converter import DocumentConverter  # type: ignore
+
+            converter = DocumentConverter()
+            ckw: dict[str, Any] = {}
+            if page_range is not None:
+                ckw["page_range"] = page_range
+            result = converter.convert(file_path, **ckw)
+            full_text = result.document.export_to_markdown()
+            if full_text.strip() and not any(text.strip() for text in pages_text):
+                logger.info(
+                    f"[multimodal] docling text fallback extracted "
+                    f"{len(full_text):,} chars from {file_path.name}"
+                )
+        except Exception as e2:
+            logger.warning(f"[multimodal] docling text fallback failed: {e2}")
+
+    for local_index, page_text in enumerate(pages_text):
+        physical_page_no = start_p + local_index + 1
+        printed_page, page_label = _extract_page_label_info(page_text)
+        page_refs.append(
+            {
+                "source_page": physical_page_no,
+                "source_printed_page": printed_page,
+                "source_page_label": page_label,
+            }
+        )
+
+    precise_raw_candidates: list[dict[str, Any]] = []
+    precise_raw_candidates.extend(
+        _extract_docling_picture_candidates(
+            file_path,
+            pages_text=pages_text,
+            page_sizes=page_sizes,
+            page_refs=page_refs,
+            page_range=page_range,
+            raster_dpi=raster_dpi,
+        )
+    )
+    if fitz_doc is not None:
+        precise_raw_candidates.extend(
+            _extract_pymupdf_native_images(
+                fitz_doc,
+                pages_text=pages_text,
+                page_sizes=page_sizes,
+                page_refs=page_refs,
+                start_page_index=start_p,
+                end_page_index=(page_range[1] if page_range else None),
+            )
+        )
+        precise_raw_candidates.extend(
+            _extract_pymupdf_image_blocks(
+                fitz_doc,
+                pages_text=pages_text,
+                page_sizes=page_sizes,
+                page_refs=page_refs,
+                start_page_index=start_p,
+                end_page_index=(page_range[1] if page_range else None),
+            )
+        )
+
+    precise_candidates = _cap_precise_candidates_per_page(
+        _dedupe_precise_candidates(precise_raw_candidates),
+        max_per_page=8,
+    )
+    raw_mode_counts = _count_candidates_by_mode(precise_raw_candidates)
+
+    (
+        precise_picture_pages,
+        precise_picture_counts_by_page,
+        precise_picture_coverage_by_page,
+        precise_picture_max_ratio_by_page,
+    ) = _collect_precise_picture_page_stats(precise_candidates)
+
+    figure_pattern = re.compile(
+        r"图\s*\d+[\.\-]\d+"
+        r"|图\s*\d+"
+        r"|(?:示意|流程|平面|立面|剖面|结构|布置|施工|工艺|安装|节点|大样|应急路线|绿化|总平面|管线|配筋|详图)"
+        r"|附图"
+        r"|Figure\s+\d+"
+        r"|Fig\.\s*\d+",
+        re.IGNORECASE,
+    )
+
+    figure_page_indices: list[int] = []
+    for local_idx, text in enumerate(pages_text):
+        abs_idx = start_p + local_idx
+        stripped = str(text or "").strip()
+        is_figure_page = False
+        if figure_pattern.search(stripped):
+            is_figure_page = True
+        elif len(stripped) <= 80:
+            is_figure_page = True
+        elif fitz_doc is not None and abs_idx < fitz_doc.page_count:
+            try:
+                page = fitz_doc.load_page(abs_idx)
+                if len(page.get_images(full=True) or []) >= 1:
+                    is_figure_page = True
+                elif len(stripped) < 1400 and len(page.get_drawings()) >= 20:
+                    is_figure_page = True
+            except Exception:
+                pass
+        if is_figure_page:
+            figure_page_indices.append(abs_idx)
+
+    logger.info(
+        f"[multimodal] {file_path.name}: {len(pages_text)} pages scanned, "
+        f"{len(figure_page_indices)} figure-heavy pages detected"
+    )
+
+    page_raster_candidates: list[dict[str, Any]] = []
+    max_page_raster_fallbacks = max(8, min(48, max_images // 3 if max_images > 0 else 16))
+    try:
+        if fitz_doc is None:
+            import fitz  # type: ignore
+
+            fitz_doc = fitz.open(file_path)
+
+        matrix = fitz.Matrix(raster_dpi / 72, raster_dpi / 72)
+        fallback_rank = 0
+        for page_idx in figure_page_indices:
+            if len(page_raster_candidates) >= max_page_raster_fallbacks:
+                break
+            page_no = page_idx + 1
+            if page_idx >= fitz_doc.page_count:
+                continue
+
+            exact_picture_count = precise_picture_counts_by_page.get(page_no, 0)
+            exact_picture_coverage_ratio = precise_picture_coverage_by_page.get(page_no, 0.0)
+            max_exact_picture_ratio = precise_picture_max_ratio_by_page.get(page_no, 0.0)
+            if not _should_add_page_raster_fallback(
+                exact_picture_count=exact_picture_count,
+                exact_picture_coverage_ratio=exact_picture_coverage_ratio,
+                max_exact_picture_ratio=max_exact_picture_ratio,
+            ):
+                continue
+
+            page = fitz_doc.load_page(page_idx)
+            pix = page.get_pixmap(matrix=matrix, alpha=False)
+            local_idx = page_idx - start_p
+            page_ref = (
+                page_refs[local_idx]
+                if 0 <= local_idx < len(page_refs)
+                else {"source_page": page_no}
+            )
+            page_text_excerpt, context_text = _build_page_context_excerpt(
+                pages_text,
+                local_idx,
+                page_refs=page_refs,
+            )
+            hint = ""
+            if 0 <= local_idx < len(pages_text):
+                hint = (pages_text[local_idx] or "").strip()[:200]
+
+            page_raster_candidates.append(
+                {
+                    "bytes": pix.tobytes("png"),
+                    "mime_type": "image/png",
+                    "page_no": page_no,
+                    "source_printed_page": page_ref.get("source_printed_page"),
+                    "source_page_label": page_ref.get("source_page_label"),
+                    "bbox": _normalize_pdf_bbox(
+                        {
+                            "x0": 0.0,
+                            "y0": 0.0,
+                            "x1": float(page.rect.width),
+                            "y1": float(page.rect.height),
+                            "coord_origin": "TOPLEFT",
+                        },
+                        page_width=float(page.rect.width),
+                        page_height=float(page.rect.height),
+                    ),
+                    "caption_hint": hint,
+                    "picture_index": 100000 + fallback_rank,
+                    "page_picture_index": 0,
+                    "pil_size": (pix.width, pix.height),
+                    "page_size": (float(page.rect.width), float(page.rect.height)),
+                    "page_text_excerpt": page_text_excerpt,
+                    "context_text": context_text,
+                    "extraction_mode": (
+                        "page_raster_recall_fallback"
+                        if page_no in precise_picture_pages
+                        else "page_raster_fallback"
+                    ),
+                }
+            )
+            fallback_rank += 1
+    except ImportError:
+        logger.warning(
+            "[multimodal] pymupdf not installed; skipping page raster fallback."
+        )
+    except Exception as e:
+        logger.warning(
+            f"[multimodal] page raster fallback failed for "
+            f"{file_path.name}: {type(e).__name__}: {e}"
+        )
+    finally:
+        if fitz_doc is not None:
+            try:
+                fitz_doc.close()
+            except Exception:
+                pass
+
+    raw_mode_counts.update(_count_candidates_by_mode(page_raster_candidates))
+    extracted = [*precise_candidates, *page_raster_candidates]
+    if len(extracted) > max_images:
+        extraction_truncated = True
+        extracted.sort(
+            key=lambda item: (
+                -_multimodal_extraction_priority(item),
+                -_bbox_area_ratio(item.get("bbox")),
+                -_candidate_pixel_count(item),
+                item.get("page_no") if item.get("page_no") is not None else 10**9,
+            )
+        )
+        extracted = extracted[:max_images]
+
+    if extraction_truncated:
+        logger.warning(
+            f"[multimodal] {file_path.name}: image extraction hit max_images="
+            f"{max_images}. Some PDF figures may not have been extracted."
+        )
+
+    extracted.sort(
+        key=lambda item: (
+            item.get("page_no") if item.get("page_no") is not None else 10**9,
+            1 if str(item.get("extraction_mode") or "").startswith("page_raster") else 0,
+            float((item.get("bbox") or {}).get("y0") or 0.0)
+            if isinstance(item.get("bbox"), dict)
+            else 0.0,
+            float((item.get("bbox") or {}).get("x0") or 0.0)
+            if isinstance(item.get("bbox"), dict)
+            else 0.0,
+            -_multimodal_extraction_priority(item),
+        )
+    )
+    per_page_picture_counts: dict[int, int] = {}
+    for picture_index, item in enumerate(extracted):
+        page_no = item.get("page_no")
+        item["picture_index"] = picture_index
+        try:
+            page_no_int = int(page_no)
+        except (TypeError, ValueError):
+            page_no_int = None
+        if page_no_int is not None:
+            page_picture_index = per_page_picture_counts.get(page_no_int, 0)
+            per_page_picture_counts[page_no_int] = page_picture_index + 1
+            item["page_picture_index"] = page_picture_index
+        item.pop("_content_hash", None)
+
+    logger.info(
+        f"[multimodal] {file_path.name}: candidate modes raw="
+        f"{_format_mode_counts(raw_mode_counts)}; unique="
+        f"{_format_mode_counts(_count_candidates_by_mode(extracted))}"
+    )
+    logger.info(
+        f"[multimodal] Result for {file_path.name}: "
+        f"{len(full_text):,} chars text, {len(extracted)} multimodal figures"
+    )
+    return full_text, extracted
 
 
 def _extract_pdf_pypdf(file_bytes: bytes, password: str = None) -> str:
@@ -1247,6 +2914,14 @@ async def pipeline_enqueue_file(
 
     try:
         content = ""
+        handled_by_direct_image_insert = False
+        # Phase 5: when a file parser extracts embedded images (currently
+        # only the PDF multimodal path via docling), it populates this
+        # list of image info dicts. Non-None here means the post-
+        # extraction enqueue branch routes to ``ainsert_document_with_images``
+        # instead of ``apipeline_enqueue_documents``. None preserves the
+        # text-only enqueue path unchanged.
+        extracted_images: Optional[List[Dict[str, Any]]] = None
         ext = file_path.suffix.lower()
         file_size = 0
 
@@ -1304,268 +2979,341 @@ async def pipeline_enqueue_file(
 
         # Process based on file type
         try:
-            match ext:
-                case (
-                    ".txt"
-                    | ".md"
-                    | ".mdx"
-                    | ".html"
-                    | ".htm"
-                    | ".tex"
-                    | ".json"
-                    | ".xml"
-                    | ".yaml"
-                    | ".yml"
-                    | ".rtf"
-                    | ".odt"
-                    | ".epub"
-                    | ".csv"
-                    | ".log"
-                    | ".conf"
-                    | ".ini"
-                    | ".properties"
-                    | ".sql"
-                    | ".bat"
-                    | ".sh"
-                    | ".c"
-                    | ".h"
-                    | ".cpp"
-                    | ".hpp"
-                    | ".py"
-                    | ".java"
-                    | ".js"
-                    | ".ts"
-                    | ".swift"
-                    | ".go"
-                    | ".rb"
-                    | ".php"
-                    | ".css"
-                    | ".scss"
-                    | ".less"
+            if _is_direct_image_extension(ext):
+                if (
+                    rag.image_embedding_func is None
+                    or rag.images_vdb is None
+                    or rag.image_blob_store is None
                 ):
-                    try:
-                        # Try to decode as UTF-8 (offloaded to thread to avoid blocking the event loop)
-                        content = await asyncio.to_thread(file.decode, "utf-8")
-
-                        # Validate content
-                        if not content or len(content.strip()) == 0:
-                            error_files = [
-                                {
-                                    "file_path": str(file_path.name),
-                                    "error_description": "[File Extraction]Empty file content",
-                                    "original_error": "File contains no content or only whitespace",
-                                    "file_size": file_size,
-                                }
-                            ]
-                            await rag.apipeline_enqueue_error_documents(
-                                error_files, track_id
-                            )
-                            logger.error(
-                                f"[File Extraction]Empty content in file: {file_path.name}"
-                            )
-                            return False, track_id
-
-                        # Check if content looks like binary data string representation
-                        if content.startswith("b'") or content.startswith('b"'):
-                            error_files = [
-                                {
-                                    "file_path": str(file_path.name),
-                                    "error_description": "[File Extraction]Binary data in text file",
-                                    "original_error": "File appears to contain binary data representation instead of text",
-                                    "file_size": file_size,
-                                }
-                            ]
-                            await rag.apipeline_enqueue_error_documents(
-                                error_files, track_id
-                            )
-                            logger.error(
-                                f"[File Extraction]File {file_path.name} appears to contain binary data representation instead of text"
-                            )
-                            return False, track_id
-
-                    except UnicodeDecodeError as e:
-                        error_files = [
-                            {
-                                "file_path": str(file_path.name),
-                                "error_description": "[File Extraction]UTF-8 encoding error, please convert it to UTF-8 before processing",
-                                "original_error": f"File is not valid UTF-8 encoded text: {str(e)}",
-                                "file_size": file_size,
-                            }
-                        ]
-                        await rag.apipeline_enqueue_error_documents(
-                            error_files, track_id
-                        )
-                        logger.error(
-                            f"[File Extraction]File {file_path.name} is not valid UTF-8 encoded text. Please convert it to UTF-8 before processing."
-                        )
-                        return False, track_id
-
-                case ".pdf":
-                    try:
-                        # Try DOCLING first if configured and available
-                        if (
-                            global_args.document_loading_engine == "DOCLING"
-                            and _is_docling_available()
-                        ):
-                            content = await asyncio.to_thread(
-                                _convert_with_docling, file_path
-                            )
-                        else:
-                            if (
-                                global_args.document_loading_engine == "DOCLING"
-                                and not _is_docling_available()
-                            ):
-                                logger.warning(
-                                    f"DOCLING engine configured but not available for {file_path.name}. Falling back to pypdf."
-                                )
-                            # Use pypdf (non-blocking via to_thread)
-                            content = await asyncio.to_thread(
-                                _extract_pdf_pypdf,
-                                file,
-                                global_args.pdf_decrypt_password,
-                            )
-                    except Exception as e:
-                        error_files = [
-                            {
-                                "file_path": str(file_path.name),
-                                "error_description": "[File Extraction]PDF processing error",
-                                "original_error": f"Failed to extract text from PDF: {str(e)}",
-                                "file_size": file_size,
-                            }
-                        ]
-                        await rag.apipeline_enqueue_error_documents(
-                            error_files, track_id
-                        )
-                        logger.error(
-                            f"[File Extraction]Error processing PDF {file_path.name}: {str(e)}"
-                        )
-                        return False, track_id
-
-                case ".docx":
-                    try:
-                        # Try DOCLING first if configured and available
-                        if (
-                            global_args.document_loading_engine == "DOCLING"
-                            and _is_docling_available()
-                        ):
-                            content = await asyncio.to_thread(
-                                _convert_with_docling, file_path
-                            )
-                        else:
-                            if (
-                                global_args.document_loading_engine == "DOCLING"
-                                and not _is_docling_available()
-                            ):
-                                logger.warning(
-                                    f"DOCLING engine configured but not available for {file_path.name}. Falling back to python-docx."
-                                )
-                            # Use python-docx (non-blocking via to_thread)
-                            content = await asyncio.to_thread(_extract_docx, file)
-                    except Exception as e:
-                        error_files = [
-                            {
-                                "file_path": str(file_path.name),
-                                "error_description": "[File Extraction]DOCX processing error",
-                                "original_error": f"Failed to extract text from DOCX: {str(e)}",
-                                "file_size": file_size,
-                            }
-                        ]
-                        await rag.apipeline_enqueue_error_documents(
-                            error_files, track_id
-                        )
-                        logger.error(
-                            f"[File Extraction]Error processing DOCX {file_path.name}: {str(e)}"
-                        )
-                        return False, track_id
-
-                case ".pptx":
-                    try:
-                        # Try DOCLING first if configured and available
-                        if (
-                            global_args.document_loading_engine == "DOCLING"
-                            and _is_docling_available()
-                        ):
-                            content = await asyncio.to_thread(
-                                _convert_with_docling, file_path
-                            )
-                        else:
-                            if (
-                                global_args.document_loading_engine == "DOCLING"
-                                and not _is_docling_available()
-                            ):
-                                logger.warning(
-                                    f"DOCLING engine configured but not available for {file_path.name}. Falling back to python-pptx."
-                                )
-                            # Use python-pptx (non-blocking via to_thread)
-                            content = await asyncio.to_thread(_extract_pptx, file)
-                    except Exception as e:
-                        error_files = [
-                            {
-                                "file_path": str(file_path.name),
-                                "error_description": "[File Extraction]PPTX processing error",
-                                "original_error": f"Failed to extract text from PPTX: {str(e)}",
-                                "file_size": file_size,
-                            }
-                        ]
-                        await rag.apipeline_enqueue_error_documents(
-                            error_files, track_id
-                        )
-                        logger.error(
-                            f"[File Extraction]Error processing PPTX {file_path.name}: {str(e)}"
-                        )
-                        return False, track_id
-
-                case ".xlsx":
-                    try:
-                        # Try DOCLING first if configured and available
-                        if (
-                            global_args.document_loading_engine == "DOCLING"
-                            and _is_docling_available()
-                        ):
-                            content = await asyncio.to_thread(
-                                _convert_with_docling, file_path
-                            )
-                        else:
-                            if (
-                                global_args.document_loading_engine == "DOCLING"
-                                and not _is_docling_available()
-                            ):
-                                logger.warning(
-                                    f"DOCLING engine configured but not available for {file_path.name}. Falling back to openpyxl."
-                                )
-                            # Use openpyxl (non-blocking via to_thread)
-                            content = await asyncio.to_thread(_extract_xlsx, file)
-                    except Exception as e:
-                        error_files = [
-                            {
-                                "file_path": str(file_path.name),
-                                "error_description": "[File Extraction]XLSX processing error",
-                                "original_error": f"Failed to extract text from XLSX: {str(e)}",
-                                "file_size": file_size,
-                            }
-                        ]
-                        await rag.apipeline_enqueue_error_documents(
-                            error_files, track_id
-                        )
-                        logger.error(
-                            f"[File Extraction]Error processing XLSX {file_path.name}: {str(e)}"
-                        )
-                        return False, track_id
-
-                case _:
                     error_files = [
                         {
                             "file_path": str(file_path.name),
-                            "error_description": f"[File Extraction]Unsupported file type: {ext}",
-                            "original_error": f"File extension {ext} is not supported",
+                            "error_description": "[File Extraction]Multimodal image pipeline not enabled",
+                            "original_error": "Image uploads require the multimodal pipeline to be configured on the server",
                             "file_size": file_size,
                         }
                     ]
                     await rag.apipeline_enqueue_error_documents(error_files, track_id)
                     logger.error(
-                        f"[File Extraction]Unsupported file type: {file_path.name} (extension {ext})"
+                        f"[File Extraction]Multimodal image pipeline not enabled for {file_path.name}"
                     )
                     return False, track_id
+
+                try:
+                    await rag.ainsert_image(
+                        file,
+                        file_path=file_path.name,
+                        mime_type=_guess_image_mime_type(file_path),
+                        extra_metadata={"source_kind": "direct_image_upload"},
+                        track_id=track_id,
+                    )
+                    handled_by_direct_image_insert = True
+                    logger.info(
+                        f"Successfully extracted and enqueued image file: {file_path.name}"
+                    )
+                except Exception as e:
+                    error_files = [
+                        {
+                            "file_path": str(file_path.name),
+                            "error_description": "[File Extraction]Image processing error",
+                            "original_error": f"Failed to ingest image: {str(e)}",
+                            "file_size": file_size,
+                        }
+                    ]
+                    await rag.apipeline_enqueue_error_documents(error_files, track_id)
+                    logger.error(
+                        f"[File Extraction]Error processing image {file_path.name}: {str(e)}"
+                    )
+                    return False, track_id
+            else:
+                match ext:
+                    case (
+                        ".txt"
+                        | ".md"
+                        | ".mdx"
+                        | ".html"
+                        | ".htm"
+                        | ".tex"
+                        | ".json"
+                        | ".xml"
+                        | ".yaml"
+                        | ".yml"
+                        | ".rtf"
+                        | ".odt"
+                        | ".epub"
+                        | ".csv"
+                        | ".log"
+                        | ".conf"
+                        | ".ini"
+                        | ".properties"
+                        | ".sql"
+                        | ".bat"
+                        | ".sh"
+                        | ".c"
+                        | ".h"
+                        | ".cpp"
+                        | ".hpp"
+                        | ".py"
+                        | ".java"
+                        | ".js"
+                        | ".ts"
+                        | ".swift"
+                        | ".go"
+                        | ".rb"
+                        | ".php"
+                        | ".css"
+                        | ".scss"
+                        | ".less"
+                    ):
+                        try:
+                            # Try to decode as UTF-8 (offloaded to thread to avoid blocking the event loop)
+                            content = await asyncio.to_thread(file.decode, "utf-8")
+
+                            # Validate content
+                            if not content or len(content.strip()) == 0:
+                                error_files = [
+                                    {
+                                        "file_path": str(file_path.name),
+                                        "error_description": "[File Extraction]Empty file content",
+                                        "original_error": "File contains no content or only whitespace",
+                                        "file_size": file_size,
+                                    }
+                                ]
+                                await rag.apipeline_enqueue_error_documents(
+                                    error_files, track_id
+                                )
+                                logger.error(
+                                    f"[File Extraction]Empty content in file: {file_path.name}"
+                                )
+                                return False, track_id
+
+                            # Check if content looks like binary data string representation
+                            if content.startswith("b'") or content.startswith('b"'):
+                                error_files = [
+                                    {
+                                        "file_path": str(file_path.name),
+                                        "error_description": "[File Extraction]Binary data in text file",
+                                        "original_error": "File appears to contain binary data representation instead of text",
+                                        "file_size": file_size,
+                                    }
+                                ]
+                                await rag.apipeline_enqueue_error_documents(
+                                    error_files, track_id
+                                )
+                                logger.error(
+                                    f"[File Extraction]File {file_path.name} appears to contain binary data representation instead of text"
+                                )
+                                return False, track_id
+
+                        except UnicodeDecodeError as e:
+                            error_files = [
+                                {
+                                    "file_path": str(file_path.name),
+                                    "error_description": "[File Extraction]UTF-8 encoding error, please convert it to UTF-8 before processing",
+                                    "original_error": f"File is not valid UTF-8 encoded text: {str(e)}",
+                                    "file_size": file_size,
+                                }
+                            ]
+                            await rag.apipeline_enqueue_error_documents(
+                                error_files, track_id
+                            )
+                            logger.error(
+                                f"[File Extraction]File {file_path.name} is not valid UTF-8 encoded text. Please convert it to UTF-8 before processing."
+                            )
+                            return False, track_id
+
+                    case ".pdf":
+                        try:
+                            # Phase 5+: when the multimodal pipeline is wired up
+                            # on this LightRAG instance, always run the richer
+                            # PDF converter. It now degrades gracefully across
+                            # Docling semantic crops, PyMuPDF native embedded
+                            # images, PyMuPDF image blocks, and finally page
+                            # raster fallback — so docling availability is no
+                            # longer a hard requirement for multimodal ingest.
+                            multimodal_ready = (
+                                rag.image_embedding_func is not None
+                                and rag.images_vdb is not None
+                                and rag.image_blob_store is not None
+                                and rag.image_metadata is not None
+                            )
+                            if multimodal_ready:
+                                (
+                                    content,
+                                    extracted_images,
+                                ) = await asyncio.to_thread(
+                                    _convert_with_docling_multimodal, file_path
+                                )
+                                logger.info(
+                                    f"[File Extraction] PDF multimodal: "
+                                    f"{file_path.name} -> {len(extracted_images)} embedded images"
+                                )
+                            # Try DOCLING first if configured and available
+                            elif (
+                                global_args.document_loading_engine == "DOCLING"
+                                and _is_docling_available()
+                            ):
+                                content = await asyncio.to_thread(
+                                    _convert_with_docling, file_path
+                                )
+                            else:
+                                if (
+                                    global_args.document_loading_engine == "DOCLING"
+                                    and not _is_docling_available()
+                                ):
+                                    logger.warning(
+                                        f"DOCLING engine configured but not available for {file_path.name}. Falling back to pypdf."
+                                    )
+                                # Use pypdf (non-blocking via to_thread)
+                                content = await asyncio.to_thread(
+                                    _extract_pdf_pypdf,
+                                    file,
+                                    global_args.pdf_decrypt_password,
+                                )
+                        except Exception as e:
+                            error_files = [
+                                {
+                                    "file_path": str(file_path.name),
+                                    "error_description": "[File Extraction]PDF processing error",
+                                    "original_error": f"Failed to extract text from PDF: {str(e)}",
+                                    "file_size": file_size,
+                                }
+                            ]
+                            await rag.apipeline_enqueue_error_documents(
+                                error_files, track_id
+                            )
+                            logger.error(
+                                f"[File Extraction]Error processing PDF {file_path.name}: {str(e)}"
+                            )
+                            return False, track_id
+
+                    case ".docx":
+                        try:
+                            # Try DOCLING first if configured and available
+                            if (
+                                global_args.document_loading_engine == "DOCLING"
+                                and _is_docling_available()
+                            ):
+                                content = await asyncio.to_thread(
+                                    _convert_with_docling, file_path
+                                )
+                            else:
+                                if (
+                                    global_args.document_loading_engine == "DOCLING"
+                                    and not _is_docling_available()
+                                ):
+                                    logger.warning(
+                                        f"DOCLING engine configured but not available for {file_path.name}. Falling back to python-docx."
+                                    )
+                                # Use python-docx (non-blocking via to_thread)
+                                content = await asyncio.to_thread(_extract_docx, file)
+                        except Exception as e:
+                            error_files = [
+                                {
+                                    "file_path": str(file_path.name),
+                                    "error_description": "[File Extraction]DOCX processing error",
+                                    "original_error": f"Failed to extract text from DOCX: {str(e)}",
+                                    "file_size": file_size,
+                                }
+                            ]
+                            await rag.apipeline_enqueue_error_documents(
+                                error_files, track_id
+                            )
+                            logger.error(
+                                f"[File Extraction]Error processing DOCX {file_path.name}: {str(e)}"
+                            )
+                            return False, track_id
+
+                    case ".pptx":
+                        try:
+                            # Try DOCLING first if configured and available
+                            if (
+                                global_args.document_loading_engine == "DOCLING"
+                                and _is_docling_available()
+                            ):
+                                content = await asyncio.to_thread(
+                                    _convert_with_docling, file_path
+                                )
+                            else:
+                                if (
+                                    global_args.document_loading_engine == "DOCLING"
+                                    and not _is_docling_available()
+                                ):
+                                    logger.warning(
+                                        f"DOCLING engine configured but not available for {file_path.name}. Falling back to python-pptx."
+                                    )
+                                # Use python-pptx (non-blocking via to_thread)
+                                content = await asyncio.to_thread(_extract_pptx, file)
+                        except Exception as e:
+                            error_files = [
+                                {
+                                    "file_path": str(file_path.name),
+                                    "error_description": "[File Extraction]PPTX processing error",
+                                    "original_error": f"Failed to extract text from PPTX: {str(e)}",
+                                    "file_size": file_size,
+                                }
+                            ]
+                            await rag.apipeline_enqueue_error_documents(
+                                error_files, track_id
+                            )
+                            logger.error(
+                                f"[File Extraction]Error processing PPTX {file_path.name}: {str(e)}"
+                            )
+                            return False, track_id
+
+                    case ".xlsx":
+                        try:
+                            # Try DOCLING first if configured and available
+                            if (
+                                global_args.document_loading_engine == "DOCLING"
+                                and _is_docling_available()
+                            ):
+                                content = await asyncio.to_thread(
+                                    _convert_with_docling, file_path
+                                )
+                            else:
+                                if (
+                                    global_args.document_loading_engine == "DOCLING"
+                                    and not _is_docling_available()
+                                ):
+                                    logger.warning(
+                                        f"DOCLING engine configured but not available for {file_path.name}. Falling back to openpyxl."
+                                    )
+                                # Use openpyxl (non-blocking via to_thread)
+                                content = await asyncio.to_thread(_extract_xlsx, file)
+                        except Exception as e:
+                            error_files = [
+                                {
+                                    "file_path": str(file_path.name),
+                                    "error_description": "[File Extraction]XLSX processing error",
+                                    "original_error": f"Failed to extract text from XLSX: {str(e)}",
+                                    "file_size": file_size,
+                                }
+                            ]
+                            await rag.apipeline_enqueue_error_documents(
+                                error_files, track_id
+                            )
+                            logger.error(
+                                f"[File Extraction]Error processing XLSX {file_path.name}: {str(e)}"
+                            )
+                            return False, track_id
+
+                    case _:
+                        error_files = [
+                            {
+                                "file_path": str(file_path.name),
+                                "error_description": f"[File Extraction]Unsupported file type: {ext}",
+                                "original_error": f"File extension {ext} is not supported",
+                                "file_size": file_size,
+                            }
+                        ]
+                        await rag.apipeline_enqueue_error_documents(
+                            error_files, track_id
+                        )
+                        logger.error(
+                            f"[File Extraction]Unsupported file type: {file_path.name} (extension {ext})"
+                        )
+                        return False, track_id
 
         except Exception as e:
             error_files = [
@@ -1582,10 +3330,34 @@ async def pipeline_enqueue_file(
             )
             return False, track_id
 
-        # Insert into the RAG queue
-        if content:
-            # Check if content contains only whitespace characters
-            if not content.strip():
+        if handled_by_direct_image_insert:
+            try:
+                await _move_file_to_enqueued_directory(file_path)
+            except Exception as move_error:
+                logger.error(
+                    f"Failed to move image file {file_path.name} to __enqueued__ directory: {move_error}"
+                )
+            return True, track_id
+
+        # Insert into the RAG queue.
+        # When the multimodal pipeline extracted images (extracted_images
+        # is a non-empty list), the document is valid even if the TEXT
+        # content is empty or whitespace-only — art books, drawing sets,
+        # and photo albums are essentially all-image PDFs.
+        has_images = bool(extracted_images)
+        has_text = bool(content and content.strip())
+
+        if has_text or has_images:
+            if not has_text and has_images:
+                # All-image document: use a minimal placeholder so the
+                # downstream text pipeline has something to chunk.
+                content = content or ""
+                logger.info(
+                    f"[File Extraction] {file_path.name}: text is empty/whitespace "
+                    f"but {len(extracted_images)} images were extracted — "
+                    f"proceeding with image-only ingest."
+                )
+            elif not has_text:
                 error_files = [
                     {
                         "file_path": str(file_path.name),
@@ -1601,31 +3373,35 @@ async def pipeline_enqueue_file(
                 return False, track_id
 
             try:
-                await rag.apipeline_enqueue_documents(
-                    content, file_paths=file_path.name, track_id=track_id
-                )
+                if extracted_images is not None:
+                    # Enqueue the PLAIN text first so the frontend
+                    # immediately sees the document as PENDING. Image
+                    # processing happens next (~2 min with concurrency),
+                    # then the text pipeline processes the augmented
+                    # content (text + image annotations).
+                    await rag.ainsert_document_with_images(
+                        text_content=content,
+                        extracted_images=extracted_images,
+                        file_path=file_path.name,
+                        track_id=track_id,
+                    )
+                    logger.info(
+                        f"Successfully extracted and enqueued file with "
+                        f"{len(extracted_images)} embedded images: "
+                        f"{file_path.name}"
+                    )
+                else:
+                    await rag.apipeline_enqueue_documents(
+                        content, file_paths=file_path.name, track_id=track_id
+                    )
 
-                logger.info(
-                    f"Successfully extracted and enqueued file: {file_path.name}"
-                )
+                    logger.info(
+                        f"Successfully extracted and enqueued file: {file_path.name}"
+                    )
 
                 # Move file to __enqueued__ directory after enqueuing
                 try:
-                    enqueued_dir = file_path.parent / "__enqueued__"
-                    await asyncio.to_thread(enqueued_dir.mkdir, exist_ok=True)
-
-                    # Generate unique filename to avoid conflicts
-                    unique_filename = get_unique_filename_in_enqueued(
-                        enqueued_dir, file_path.name
-                    )
-                    target_path = enqueued_dir / unique_filename
-
-                    # Move the file
-                    await asyncio.to_thread(file_path.rename, target_path)
-                    logger.debug(
-                        f"Moved file to enqueued directory: {file_path.name} -> {unique_filename}"
-                    )
-
+                    await _move_file_to_enqueued_directory(file_path)
                 except Exception as move_error:
                     logger.error(
                         f"Failed to move file {file_path.name} to __enqueued__ directory: {move_error}"
@@ -1686,28 +3462,59 @@ async def pipeline_enqueue_file(
                 logger.error(f"Error deleting file {file_path}: {str(e)}")
 
 
-async def pipeline_index_file(rag: LightRAG, file_path: Path, track_id: str = None):
+async def pipeline_index_file(
+    rag: LightRAG,
+    file_path: Path,
+    track_id: str = None,
+    preclaimed: bool = False,
+) -> bool:
     """Index a file with track_id
 
     Args:
         rag: LightRAG instance
         file_path: Path to the saved file
         track_id: Optional tracking ID
+        preclaimed: Whether the caller already claimed the file for exclusive
+            processing.
     """
+    if track_id is None:
+        track_id = generate_track_id("unknown")
+
+    claim_acquired = False
     try:
-        success, returned_track_id = await pipeline_enqueue_file(
-            rag, file_path, track_id
-        )
+        if not preclaimed:
+            claimed, existing_owner = await _claim_input_file(
+                rag, file_path.name, track_id
+            )
+            if not claimed:
+                logger.info(
+                    f"Skipping already claimed file {file_path.name} "
+                    f"(owner={existing_owner})"
+                )
+                return False
+            claim_acquired = True
+        else:
+            claim_acquired = True
+
+        success, _ = await pipeline_enqueue_file(rag, file_path, track_id)
         if success:
             await rag.apipeline_process_enqueue_documents()
+        return success
 
     except Exception as e:
         logger.error(f"Error indexing file {file_path.name}: {str(e)}")
         logger.error(traceback.format_exc())
+        return False
+    finally:
+        if claim_acquired:
+            await _release_input_file_claim(rag, file_path.name, track_id)
 
 
 async def pipeline_index_files(
-    rag: LightRAG, file_paths: List[Path], track_id: str = None
+    rag: LightRAG,
+    file_paths: List[Path],
+    track_id: str = None,
+    preclaimed: bool = False,
 ):
     """Index multiple files sequentially to avoid high CPU load
 
@@ -1719,8 +3526,6 @@ async def pipeline_index_files(
     if not file_paths:
         return
     try:
-        enqueued = False
-
         # Use get_pinyin_sort_key for Chinese pinyin sorting
         sorted_file_paths = sorted(
             file_paths, key=lambda p: get_pinyin_sort_key(str(p))
@@ -1728,13 +3533,8 @@ async def pipeline_index_files(
 
         # Process files sequentially with track_id
         for file_path in sorted_file_paths:
-            success, _ = await pipeline_enqueue_file(rag, file_path, track_id)
-            if success:
-                enqueued = True
+            await pipeline_index_file(rag, file_path, track_id, preclaimed=preclaimed)
 
-        # Process the queue only if at least one file was successfully enqueued
-        if enqueued:
-            await rag.apipeline_process_enqueue_documents()
     except Exception as e:
         logger.error(f"Error indexing files: {str(e)}")
         logger.error(traceback.format_exc())
@@ -1785,53 +3585,193 @@ async def run_scanning_process(
         doc_manager: DocumentManager instance
         track_id: Optional tracking ID to pass to all scanned files
     """
+    scan_state, scan_state_lock = await _get_document_scan_state(rag)
+
+    async with scan_state_lock:
+        if scan_state.get("busy", False):
+            scan_state["request_pending"] = True
+            logger.info(
+                "Document scan already in progress. Queued an additional scan pass."
+            )
+            return
+        scan_state["busy"] = True
+        scan_state["request_pending"] = False
+
     try:
-        new_files = doc_manager.scan_directory_for_new_files()
-        total_files = len(new_files)
-        logger.info(f"Found {total_files} files to index.")
+        while True:
+            new_files = doc_manager.scan_directory_for_new_files()
+            total_files = len(new_files)
+            logger.info(f"Found {total_files} files to index.")
 
-        if new_files:
-            # Check for files with PROCESSED status and filter them out
-            valid_files = []
-            processed_files = []
+            if new_files:
+                valid_files = []
+                skipped_files = []
 
-            for file_path in new_files:
-                filename = file_path.name
-                existing_doc_data = await rag.doc_status.get_doc_by_file_path(filename)
-
-                if existing_doc_data and existing_doc_data.get("status") == "processed":
-                    # File is already PROCESSED, skip it with warning
-                    processed_files.append(filename)
-                    logger.warning(f"Skipping already processed file: {filename}")
-                else:
-                    # File is new or in non-PROCESSED status, add to processing list
-                    valid_files.append(file_path)
-
-            # Process valid files (new files + non-PROCESSED status files)
-            if valid_files:
-                await pipeline_index_files(rag, valid_files, track_id)
-                if processed_files:
-                    logger.info(
-                        f"Scanning process completed: {len(valid_files)} files Processed {len(processed_files)} skipped."
+                for file_path in new_files:
+                    filename = file_path.name
+                    existing_doc_data = await rag.doc_status.get_doc_by_file_path(
+                        filename
                     )
+                    existing_status = (
+                        _coerce_doc_status_value(existing_doc_data.get("status"))
+                        if existing_doc_data
+                        else None
+                    )
+
+                    if existing_doc_data and _should_skip_scan_for_status(
+                        existing_status
+                    ):
+                        skipped_files.append(filename)
+                        logger.info(
+                            f"Skipping file already tracked by pipeline: "
+                            f"{filename} (status={existing_status})"
+                        )
+                    else:
+                        valid_files.append(file_path)
+
+                if valid_files:
+                    await pipeline_index_files(rag, valid_files, track_id)
+                    if skipped_files:
+                        logger.info(
+                            f"Scanning process completed: {len(valid_files)} files processed, "
+                            f"{len(skipped_files)} skipped."
+                        )
+                    else:
+                        logger.info(
+                            f"Scanning process completed: {len(valid_files)} files processed."
+                        )
                 else:
                     logger.info(
-                        f"Scanning process completed: {len(valid_files)} files Processed."
+                        "No files to process after filtering already tracked documents."
                     )
             else:
                 logger.info(
-                    "No files to process after filtering already processed files."
+                    "No upload file found, check if there are any documents in the queue..."
                 )
-        else:
-            # No new files to index, check if there are any documents in the queue
+                await rag.apipeline_process_enqueue_documents()
+
+            async with scan_state_lock:
+                has_pending_request = scan_state.get("request_pending", False)
+                scan_state["request_pending"] = False
+
+            if not has_pending_request:
+                break
+
             logger.info(
-                "No upload file found, check if there are any documents in the queue..."
+                "Running an additional scan pass because another scan request arrived."
             )
-            await rag.apipeline_process_enqueue_documents()
 
     except Exception as e:
         logger.error(f"Error during scanning process: {str(e)}")
         logger.error(traceback.format_exc())
+    finally:
+        async with scan_state_lock:
+            scan_state["busy"] = False
+            scan_state["request_pending"] = False
+
+
+async def background_rebuild_document_multimodal(
+    rag: LightRAG,
+    doc_manager: DocumentManager,
+    doc_id: str,
+    track_id: str,
+    reuse_cache: bool = True,
+    release_input_claim_filename: str | None = None,
+):
+    """Background task: rebuild multimodal assets for one tracked PDF."""
+    original_doc_status: dict[str, Any] | None = None
+    try:
+        doc_status = await rag.doc_status.get_by_id(doc_id)
+        if doc_status is None:
+            logger.error(
+                f"[rebuild_multimodal] unknown document id={doc_id}, nothing to rebuild"
+            )
+            return
+        original_doc_status = dict(doc_status)
+
+        logical_file_path = normalize_file_path(doc_status.get("file_path"))
+        processing_record = _build_multimodal_rebuild_status_record(
+            doc_status,
+            track_id=track_id,
+            file_path=logical_file_path,
+            stage="extracting_source_pdf",
+        )
+        await rag.doc_status.upsert({doc_id: processing_record})
+        await rag.doc_status.index_done_callback()
+
+        source_file = _resolve_document_source_file(doc_manager, logical_file_path)
+        if source_file is not None:
+            logger.info(
+                f"[rebuild_multimodal] extracting PDF again for doc_id={doc_id} "
+                f"source={source_file.name} reuse_cache={reuse_cache}"
+            )
+            text_content, extracted_images = await asyncio.to_thread(
+                _convert_with_docling_multimodal, source_file
+            )
+        else:
+            logger.warning(
+                f"[rebuild_multimodal] source PDF missing for doc_id={doc_id} "
+                f"({logical_file_path}); falling back to existing multimodal assets"
+            )
+            text_content, extracted_images = (
+                await rag.areconstruct_document_multimodal_payload(doc_id)
+            )
+
+        await rag.arebuild_document_multimodal(
+            doc_id=doc_id,
+            text_content=text_content,
+            extracted_images=extracted_images,
+            file_path=Path(logical_file_path).name if logical_file_path else source_file.name,
+            track_id=track_id,
+            reuse_existing_images=reuse_cache,
+        )
+        logger.info(
+            f"[rebuild_multimodal] completed doc_id={doc_id} "
+            f"images={len(extracted_images)} track_id={track_id}"
+        )
+    except Exception as e:
+        logger.error(
+            f"[rebuild_multimodal] failed for doc_id={doc_id}: "
+            f"{type(e).__name__}: {e}"
+        )
+        logger.error(traceback.format_exc())
+        try:
+            current_status = await rag.doc_status.get_by_id(doc_id)
+            failure_source = current_status or original_doc_status
+            if failure_source is not None:
+                failed_record = _build_multimodal_rebuild_status_record(
+                    failure_source,
+                    track_id=track_id,
+                    file_path=normalize_file_path(
+                        failure_source.get("file_path") if isinstance(failure_source, dict) else None
+                    ),
+                    stage="failed",
+                    error_msg=f"Multimodal rebuild failed: {e}",
+                )
+                failed_record["status"] = DocStatus.FAILED
+                failed_record["metadata"] = {
+                    **dict(failed_record.get("metadata", {}) or {}),
+                    "multimodal_rebuild_in_progress": False,
+                }
+                await rag.doc_status.upsert({doc_id: failed_record})
+                await rag.doc_status.index_done_callback()
+        except Exception as persist_error:
+            logger.warning(
+                f"[rebuild_multimodal] failed to persist failure state for {doc_id}: "
+                f"{type(persist_error).__name__}: {persist_error}"
+            )
+    finally:
+        if release_input_claim_filename:
+            try:
+                await _release_input_file_claim(
+                    rag, release_input_claim_filename, track_id
+                )
+            except Exception as release_error:
+                logger.warning(
+                    f"[rebuild_multimodal] failed to release input-file claim "
+                    f"for {release_input_claim_filename}: "
+                    f"{type(release_error).__name__}: {release_error}"
+                )
 
 
 async def background_delete_documents(
@@ -1855,6 +3795,7 @@ async def background_delete_documents(
     )
 
     total_docs = len(doc_ids)
+    deleting_doc_ids = set(doc_ids)
     successful_deletions = []
     failed_deletions = []
 
@@ -1931,6 +3872,22 @@ async def background_delete_documents(
                     ):
                         try:
                             deleted_files = []
+                            if await _is_file_path_still_referenced(
+                                rag,
+                                result.file_path,
+                                excluding_doc_ids=deleting_doc_ids,
+                            ):
+                                file_skip_msg = (
+                                    f"Skipping source file deletion because another "
+                                    f"document still references it: {result.file_path}"
+                                )
+                                logger.info(file_skip_msg)
+                                async with pipeline_status_lock:
+                                    pipeline_status["latest_message"] = file_skip_msg
+                                    pipeline_status["history_messages"].append(
+                                        file_skip_msg
+                                    )
+                                continue
                             # SECURITY FIX: Use secure path validation to prevent arbitrary file deletion
                             safe_file_path = validate_file_path_security(
                                 result.file_path, doc_manager.input_dir
@@ -2139,10 +4096,12 @@ def create_document_routes(
 
         1. **Filename Duplicate (Synchronous Detection)**:
            - Detected immediately before file processing
-           - Returns `status="duplicated"` with the existing document's track_id
-           - Two cases:
-             - If filename exists in document storage: returns existing track_id
-             - If filename exists in file system only: returns empty track_id ("")
+           - Usually returns `status="duplicated"` with the existing document's track_id
+           - Exception: if the filename matches an existing PDF document that is
+             already processed/failed and the multimodal pipeline is enabled, the
+             upload is treated as a replacement source for that same document and
+             triggers an in-place multimodal rebuild instead of creating a new doc
+           - Non-PDF duplicates and in-flight PDFs still return `duplicated`
 
         2. **Content Duplicate (Asynchronous Detection)**:
            - Detected during background processing after content extraction
@@ -2168,6 +4127,7 @@ def create_document_routes(
             InsertResponse: A response object containing the upload status and a message.
                 - status="success": File accepted and queued for processing
                 - status="duplicated": Filename already exists (see track_id for existing document)
+                - status="success": File accepted for normal indexing OR same-doc multimodal rebuild
 
         Raises:
             HTTPException: If the file type is not supported (400), file too large (413), or other errors occur (500).
@@ -2175,11 +4135,26 @@ def create_document_routes(
         try:
             # Sanitize filename to prevent Path Traversal attacks
             safe_filename = sanitize_filename(file.filename, doc_manager.input_dir)
+            file_ext = Path(safe_filename).suffix.lower()
+            claimed_upload_file = False
 
             if not doc_manager.is_supported_file(safe_filename):
                 raise HTTPException(
                     status_code=400,
                     detail=f"Unsupported file type. Supported types: {doc_manager.supported_extensions}",
+                )
+
+            if _is_direct_image_extension(file_ext) and (
+                rag.image_embedding_func is None
+                or rag.images_vdb is None
+                or rag.image_blob_store is None
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Image uploads require the multimodal pipeline to be "
+                        "enabled on the server."
+                    ),
                 )
 
             # Check file size limit (if configured)
@@ -2205,20 +4180,41 @@ def create_document_routes(
 
             # Check if filename already exists in doc_status storage
             existing_doc_data = await rag.doc_status.get_doc_by_file_path(safe_filename)
+            existing_doc_id: str | None = None
+            should_take_over_existing_pdf = False
             if existing_doc_data:
-                # Get document status and track_id from existing document
-                status = existing_doc_data.get("status", "unknown")
-                # Use `or ""` to handle both missing key and None value (e.g., legacy rows without track_id)
-                existing_track_id = existing_doc_data.get("track_id") or ""
-                return InsertResponse(
-                    status="duplicated",
-                    message=f"File '{safe_filename}' already exists in document storage (Status: {status}).",
-                    track_id=existing_track_id,
+                existing_status = _coerce_doc_status_value(
+                    existing_doc_data.get("status")
                 )
+                if (
+                    file_ext == ".pdf"
+                    and existing_status in MULTIMODAL_UPLOAD_TAKEOVER_STATUSES
+                    and _is_multimodal_pipeline_enabled(rag)
+                ):
+                    existing_doc_id, existing_doc_data = (
+                        await _find_tracked_document_by_file_path(rag, safe_filename)
+                    )
+                    should_take_over_existing_pdf = existing_doc_id is not None
+
+                if should_take_over_existing_pdf:
+                    await _ensure_pipeline_not_busy(rag)
+                else:
+                    # Get document status and track_id from existing document
+                    status = existing_doc_data.get("status", "unknown")
+                    # Use `or ""` to handle both missing key and None value (e.g., legacy rows without track_id)
+                    existing_track_id = existing_doc_data.get("track_id") or ""
+                    return InsertResponse(
+                        status="duplicated",
+                        message=f"File '{safe_filename}' already exists in document storage (Status: {status}).",
+                        track_id=existing_track_id,
+                    )
 
             file_path = doc_manager.input_dir / safe_filename
+            temp_file_path = doc_manager.input_dir / (
+                f"{temp_prefix}{uuid4().hex}_{safe_filename}"
+            )
             # Check if file already exists in file system
-            if file_path.exists():
+            if file_path.exists() and not should_take_over_existing_pdf:
                 return InsertResponse(
                     status="duplicated",
                     message=f"File '{safe_filename}' already exists in the input directory.",
@@ -2230,7 +4226,7 @@ def create_document_routes(
             chunk_size = 1024 * 1024  # 1MB chunks
             needs_cleanup = False
 
-            async with aiofiles.open(file_path, "wb") as out_file:
+            async with aiofiles.open(temp_file_path, "wb") as out_file:
                 while True:
                     # Read chunk from upload stream
                     chunk = await file.read(chunk_size)
@@ -2253,7 +4249,7 @@ def create_document_routes(
             # Cleanup after file is closed
             if needs_cleanup:
                 try:
-                    file_path.unlink()
+                    temp_file_path.unlink()
                 except Exception as cleanup_error:
                     logger.error(
                         f"Error cleaning up oversized file {safe_filename}: {cleanup_error}"
@@ -2264,10 +4260,76 @@ def create_document_routes(
                     detail=f"File too large. Maximum size: {global_args.max_upload_size / 1024 / 1024:.1f}MB, uploaded: {bytes_written / 1024 / 1024:.1f}MB",
                 )
 
-            track_id = generate_track_id("upload")
+            track_id = generate_track_id(
+                "rebuild_multimodal" if should_take_over_existing_pdf else "upload"
+            )
+
+            claimed_upload_file, existing_owner = await _claim_input_file(
+                rag, safe_filename, track_id
+            )
+            if not claimed_upload_file:
+                try:
+                    temp_file_path.unlink()
+                except Exception as cleanup_error:
+                    logger.error(
+                        f"Error cleaning up concurrently claimed upload {safe_filename}: {cleanup_error}"
+                    )
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"File '{safe_filename}' is already being processed "
+                        f"(owner={existing_owner})."
+                    ),
+                )
+
+            await asyncio.to_thread(temp_file_path.replace, file_path)
+
+            if should_take_over_existing_pdf:
+                doc_manager.mark_as_indexed(file_path)
+                queued_record = _build_multimodal_rebuild_status_record(
+                    existing_doc_data or {},
+                    track_id=track_id,
+                    file_path=safe_filename,
+                    stage="queued_for_rebuild",
+                )
+                await rag.doc_status.upsert({existing_doc_id: queued_record})
+                await rag.doc_status.index_done_callback()
+                background_tasks.add_task(
+                    background_rebuild_document_multimodal,
+                    rag,
+                    doc_manager,
+                    existing_doc_id,
+                    track_id,
+                    True,
+                    safe_filename,
+                )
+                return InsertResponse(
+                    status="success",
+                    message=(
+                        f"Detected an existing PDF named '{safe_filename}'. "
+                        f"Accepted the replacement source file, will reuse "
+                        f"document {existing_doc_id} instead of creating a duplicate, "
+                        f"and started multimodal rebuild in the background. "
+                        f"The document will move into the Processing list shortly."
+                    ),
+                    track_id=track_id,
+                    doc_id=existing_doc_id,
+                    operation_metadata={
+                        "operation": "multimodal_takeover_rebuild",
+                        "target_doc_id": existing_doc_id,
+                        "file_name": safe_filename,
+                        "previous_status": _coerce_doc_status_value(
+                            (existing_doc_data or {}).get("status")
+                        ),
+                        "target_status": DocStatus.PROCESSING.value,
+                        "multimodal_rebuild_stage": "queued_for_rebuild",
+                    },
+                )
 
             # Add to background tasks and get track_id
-            background_tasks.add_task(pipeline_index_file, rag, file_path, track_id)
+            background_tasks.add_task(
+                pipeline_index_file, rag, file_path, track_id, True
+            )
 
             return InsertResponse(
                 status="success",
@@ -2279,6 +4341,13 @@ def create_document_routes(
             # Re-raise HTTP exceptions (400, 413, etc.)
             raise
         except Exception as e:
+            if "claimed_upload_file" in locals() and claimed_upload_file:
+                await _release_input_file_claim(rag, safe_filename, track_id)
+            if "temp_file_path" in locals() and temp_file_path.exists():
+                try:
+                    temp_file_path.unlink()
+                except Exception:
+                    pass
             logger.error(f"Error /documents/upload: {file.filename}: {str(e)}")
             logger.error(traceback.format_exc())
             raise HTTPException(status_code=500, detail=str(e))
@@ -3108,6 +5177,145 @@ def create_document_routes(
             logger.error(f"Error getting track status for {track_id}: {str(e)}")
             logger.error(traceback.format_exc())
             raise HTTPException(status_code=500, detail=str(e))
+
+    @router.get(
+        "/{doc_id}/images",
+        dependencies=[Depends(combined_auth)],
+    )
+    async def get_document_images(doc_id: str) -> dict[str, Any]:
+        """List the image blob_ids associated with a document.
+
+        Reads the reverse index that ``ainsert_image`` writes to
+        ``doc_status[doc_id].metadata.image_ids``. For documents ingested
+        via ``ainsert_image`` this returns a single-entry list (one image
+        per virtual doc). For Phase 5 PDF documents with embedded images,
+        the same list carries every extracted image's blob_id.
+
+        Returns 404 when the doc_id is unknown, or 200 with an empty list
+        when the document exists but has no associated images.
+
+        Args:
+            doc_id: The document identifier.
+
+        Returns:
+            dict with fields:
+                - doc_id: echo of the requested doc_id
+                - image_ids: list[str] — blob_ids (may be empty)
+                - modality: "image" / "mixed" / "text" from doc_status metadata
+                - source_kind: origin hint (direct_image_upload, pdf_extracted, ...)
+        """
+        if rag.image_metadata is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "Multimodal pipeline is not enabled on this LightRAG "
+                    "instance. Configure image_embedding_func and reingest "
+                    "documents to populate the image index."
+                ),
+            )
+        try:
+            doc_status = await rag.doc_status.get_by_id(doc_id)
+            if doc_status is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Unknown document: {doc_id}",
+                )
+            metadata = doc_status.get("metadata") or {}
+            image_ids = list(metadata.get("image_ids") or [])
+            return {
+                "doc_id": doc_id,
+                "image_ids": image_ids,
+                "modality": metadata.get("modality", "text"),
+                "source_kind": metadata.get("source_kind"),
+                "count": len(image_ids),
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(
+                f"Error listing images for doc_id {doc_id}: {type(e).__name__}: {e}"
+            )
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @router.post(
+        "/{doc_id}/rebuild_multimodal",
+        response_model=RebuildMultimodalResponse,
+        dependencies=[Depends(combined_auth)],
+    )
+    async def rebuild_document_multimodal(
+        doc_id: str,
+        request: RebuildMultimodalRequest,
+        background_tasks: BackgroundTasks,
+    ) -> RebuildMultimodalResponse:
+        """Rebuild multimodal assets for one previously uploaded PDF document."""
+        if (
+            rag.image_embedding_func is None
+            or rag.images_vdb is None
+            or rag.image_blob_store is None
+            or rag.image_metadata is None
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Multimodal pipeline is not enabled on this LightRAG "
+                    "instance. Configure image_embedding_func first."
+                ),
+            )
+
+        doc_status = await rag.doc_status.get_by_id(doc_id)
+        if doc_status is None:
+            raise HTTPException(status_code=404, detail=f"Unknown document: {doc_id}")
+
+        logical_file_path = normalize_file_path(doc_status.get("file_path"))
+        if not logical_file_path.lower().endswith(".pdf"):
+            raise HTTPException(
+                status_code=400,
+                detail="Only PDF documents support multimodal rebuild.",
+            )
+
+        source_file = _resolve_document_source_file(doc_manager, logical_file_path)
+        if source_file is None:
+            recovered_image_ids = await rag._get_existing_image_ids_for_doc(doc_id)
+            if not recovered_image_ids:
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        f"Cannot locate the original PDF on disk for {logical_file_path}. "
+                        "Expected it in the input directory or __enqueued__, and no "
+                        "previously stored multimodal image assets were found for fallback."
+                    ),
+                )
+
+        await _ensure_pipeline_not_busy(rag)
+
+        track_id = generate_track_id("rebuild_multimodal")
+        queued_record = _build_multimodal_rebuild_status_record(
+            doc_status,
+            track_id=track_id,
+            file_path=logical_file_path,
+            stage="queued_for_rebuild",
+        )
+        await rag.doc_status.upsert({doc_id: queued_record})
+        await rag.doc_status.index_done_callback()
+        background_tasks.add_task(
+            background_rebuild_document_multimodal,
+            rag,
+            doc_manager,
+            doc_id,
+            track_id,
+            request.reuse_cache,
+        )
+        return RebuildMultimodalResponse(
+            status="rebuild_started",
+            message=(
+                "Multimodal rebuild has been initiated in the background. "
+                "The document will move into the Processing list, be re-extracted "
+                "from the original PDF, and reuse cached image captions/embeddings "
+                "whenever possible."
+            ),
+            track_id=track_id,
+            doc_id=doc_id,
+        )
 
     @router.post(
         "/paginated",

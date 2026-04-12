@@ -82,8 +82,28 @@ export const supportedFileTypes = {
   'application/pdf': ['.pdf'],
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
   'application/vnd.openxmlformats-officedocument.presentationml.presentation': ['.pptx'],
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx']
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+  'image/png': ['.png'],
+  'image/jpeg': ['.jpg', '.jpeg'],
+  'image/webp': ['.webp'],
+  'image/gif': ['.gif'],
+  'image/bmp': ['.bmp']
 }
+
+const viteEnv =
+  typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env : undefined
+
+export const defaultMaxUploadSize = Number(
+  viteEnv?.VITE_MAX_UPLOAD_SIZE ?? 100 * 1024 * 1024
+)
+
+const supportedFileExtensions = Array.from(
+  new Set(Object.values(supportedFileTypes).flat())
+)
+
+export const supportedFileTypesDescription = `Supported types: ${supportedFileExtensions
+  .map((extension) => extension.replace('.', '').toUpperCase())
+  .join(', ')}`
 
 export const SiteInfo = {
   name: 'LightRAG',

@@ -43,6 +43,16 @@ STORAGE_IMPLEMENTATIONS = {
         ],
         "required_methods": ["get_docs_by_status"],
     },
+    # Blob storage: holds the raw bytes of multimodal assets (images,
+    # audio, video, ...). Phase 2 introduces the filesystem default;
+    # S3/MinIO/Azure Blob backends can be added later without touching
+    # the core pipeline.
+    "BLOB_STORAGE": {
+        "implementations": [
+            "FileSystemBlobStorage",
+        ],
+        "required_methods": ["put", "get"],
+    },
 }
 
 # Storage implementation environment variable without default value
@@ -108,6 +118,8 @@ STORAGE_ENV_REQUIREMENTS: dict[str, list[str]] = {
     "OpenSearchVectorDBStorage": [
         "OPENSEARCH_HOSTS",
     ],
+    # Blob Storage Implementations
+    "FileSystemBlobStorage": [],
 }
 
 # Storage implementation module mapping
@@ -137,6 +149,7 @@ STORAGES = {
     "OpenSearchDocStatusStorage": ".kg.opensearch_impl",
     "OpenSearchGraphStorage": ".kg.opensearch_impl",
     "OpenSearchVectorDBStorage": ".kg.opensearch_impl",
+    "FileSystemBlobStorage": ".kg.filesystem_blob_impl",
 }
 
 

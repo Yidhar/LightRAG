@@ -537,6 +537,58 @@ class EmbeddingFunc:
         return result
 
 
+@dataclass
+class MultimodalEmbeddingFunc:
+    """Multimodal embedding function wrapper (text + image into a shared space).
+
+    Unlike EmbeddingFunc which only handles text, this wrapper exposes two
+    encoder paths that must output vectors in the SAME semantic space:
+        - text_encode(texts)  -> np.ndarray  (N, embedding_dim)
+        - image_encode(images) -> np.ndarray  (N, embedding_dim)
+
+    Typical backing models: tongyi-embedding-vision-plus, jina-clip-v2,
+    voyage-multimodal-3, BGE-VL, nomic-embed-vision.
+
+    Why the default __call__ routes to text_encode:
+        BaseVectorStorage.query(query: str) internally calls
+        ``embedding_func([query])`` to embed the query before similarity
+        search. For cross-modal retrieval we want the query text to be
+        encoded by the TEXT side of the multimodal model so it lands in the
+        same space as the indexed image vectors. Making __call__ default to
+        text_encode lets a MultimodalEmbeddingFunc be dropped into any
+        BaseVectorStorage slot without touching the vector store code — the
+        image side is only invoked explicitly during ingestion via
+        ``await mm_emb.image_encode([...])``.
+
+    Args:
+        embedding_dim: Dimension of the shared output vectors.
+        text_encode: Async callable, list[str] -> np.ndarray.
+        image_encode: Async callable, list[bytes] -> np.ndarray.
+            Each input element is the raw bytes of an image file.
+        model_name: Optional model identifier (used for vector DB namespacing).
+        max_token_size: Optional text-side token limit.
+    """
+
+    embedding_dim: int
+    text_encode: callable
+    image_encode: callable
+    model_name: str | None = None
+    max_token_size: int | None = None
+
+    async def __call__(self, texts, *args, **kwargs) -> np.ndarray:
+        """Default invocation path used by BaseVectorStorage.query().
+
+        Routes to text_encode so text queries against an images_vdb (which
+        was populated with image-side vectors) still land in the same shared
+        space as the indexed images.
+
+        Extra positional/keyword arguments (e.g. ``_priority`` passed by
+        NanoVectorDBStorage.query) are accepted and silently ignored for
+        compatibility with the EmbeddingFunc call convention.
+        """
+        return await self.text_encode(texts)
+
+
 def compute_args_hash(*args: Any) -> str:
     """Compute a hash for the given arguments with safe Unicode handling.
 
@@ -1971,6 +2023,7 @@ async def use_llm_func_with_cache(
     cache_type: str = "extract",
     chunk_id: str | None = None,
     cache_keys_collector: list = None,
+    image_data: "bytes | str | list[bytes | str] | None" = None,
 ) -> tuple[str, int]:
     """Call LLM function with cache support and text sanitization
 
@@ -1989,6 +2042,10 @@ async def use_llm_func_with_cache(
         chunk_id: Chunk identifier to store in cache
         text_chunks_storage: Text chunks storage to update llm_cache_list
         cache_keys_collector: Optional list to collect cache keys for batch processing
+        image_data: Optional image bytes / path(s) / URL(s) / data-URI(s) to forward
+            to a vision-capable LLM. When provided, the image content is hashed
+            into the cache key so that the same text prompt with different images
+            maps to distinct cache entries (prevents cache poisoning).
 
     Returns:
         tuple[str, int]: (LLM response text, timestamp)
@@ -2014,6 +2071,22 @@ async def use_llm_func_with_cache(
     else:
         history = None
 
+    # Compute an image fingerprint so the cache key varies when images change.
+    # We hash the raw image content (bytes) or the path/URL string. This keeps
+    # the key stable across runs but distinct per image, and avoids embedding
+    # megabytes of base64 into the hash input.
+    image_fingerprint: str | None = None
+    if image_data is not None:
+        imgs = image_data if isinstance(image_data, list) else [image_data]
+        hasher = md5()
+        for img in imgs:
+            if isinstance(img, (bytes, bytearray)):
+                hasher.update(bytes(img))
+            elif isinstance(img, str):
+                hasher.update(img.encode("utf-8", errors="replace"))
+            hasher.update(b"|")
+        image_fingerprint = hasher.hexdigest()
+
     if llm_response_cache:
         prompt_parts = []
         if safe_user_prompt:
@@ -2022,6 +2095,8 @@ async def use_llm_func_with_cache(
             prompt_parts.append(safe_system_prompt)
         if history:
             prompt_parts.append(history)
+        if image_fingerprint:
+            prompt_parts.append(f"__img_sha:{image_fingerprint}")
         _prompt = "\n".join(prompt_parts)
 
         arg_hash = compute_args_hash(_prompt)
@@ -2053,6 +2128,8 @@ async def use_llm_func_with_cache(
             kwargs["history_messages"] = safe_history_messages
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
+        if image_data is not None:
+            kwargs["image_data"] = image_data
 
         res: str = await use_llm_func(
             safe_user_prompt, system_prompt=safe_system_prompt, **kwargs
@@ -2087,6 +2164,8 @@ async def use_llm_func_with_cache(
         kwargs["history_messages"] = safe_history_messages
     if max_tokens is not None:
         kwargs["max_tokens"] = max_tokens
+    if image_data is not None:
+        kwargs["image_data"] = image_data
 
     try:
         res = await use_llm_func(
@@ -3236,6 +3315,28 @@ def convert_to_user_format(
             "file_path": chunk.get("file_path", "unknown_source"),
             "chunk_id": chunk.get("chunk_id", ""),
         }
+        # Preserve multimodal markers when present so API consumers can
+        # enumerate cross-modal image hits and build image-aware UIs.
+        # These fields are only added for image chunks (source_type =
+        # "image_vector"); text chunks keep their slim shape unchanged.
+        if chunk.get("source_type") == "image_vector":
+            chunk_data["source_type"] = "image_vector"
+            if chunk.get("image_blob_id"):
+                chunk_data["image_blob_id"] = chunk["image_blob_id"]
+            if chunk.get("blob_ref"):
+                chunk_data["blob_ref"] = chunk["blob_ref"]
+            for field_name in (
+                "source_doc_id",
+                "source_page",
+                "source_bbox",
+                "picture_index",
+                "context_text",
+                "context_chunk_ids",
+                "context_chunks",
+                "extra",
+            ):
+                if chunk.get(field_name) is not None:
+                    chunk_data[field_name] = chunk[field_name]
         formatted_chunks.append(chunk_data)
 
     logger.debug(

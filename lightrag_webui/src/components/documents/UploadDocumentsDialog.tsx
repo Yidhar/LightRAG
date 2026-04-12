@@ -12,13 +12,26 @@ import {
 import FileUploader from '@/components/ui/FileUploader'
 import { toast } from 'sonner'
 import { errorMessage } from '@/lib/utils'
-import { uploadDocument } from '@/api/lightrag'
+import { DocActionResponse, uploadDocument } from '@/api/lightrag'
+import {
+  defaultMaxUploadSize,
+  supportedFileTypesDescription
+} from '@/lib/constants'
 
 import { UploadIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 interface UploadDocumentsDialogProps {
-  onDocumentsUploaded?: () => Promise<void>
+  onDocumentsUploaded?: (payload: {
+    successfulUploads: Array<{
+      fileName: string
+      result: DocActionResponse
+    }>
+    takeoverRebuilds: Array<{
+      fileName: string
+      result: DocActionResponse
+    }>
+  }) => Promise<void> | void
 }
 
 export default function UploadDocumentsDialog({ onDocumentsUploaded }: UploadDocumentsDialogProps) {
@@ -27,6 +40,19 @@ export default function UploadDocumentsDialog({ onDocumentsUploaded }: UploadDoc
   const [isUploading, setIsUploading] = useState(false)
   const [progresses, setProgresses] = useState<Record<string, number>>({})
   const [fileErrors, setFileErrors] = useState<Record<string, string>>({})
+
+  const buildTakeoverSuccessMessage = useCallback((fileName: string, result: DocActionResponse) => {
+    if (result.doc_id) {
+      return t('documentPanel.uploadDocuments.takeoverSuccessWithDocId', {
+        name: fileName,
+        docId: result.doc_id
+      })
+    }
+
+    return t('documentPanel.uploadDocuments.takeoverSuccess', {
+      name: fileName
+    })
+  }, [t])
 
   const handleRejectedFiles = useCallback(
     (rejectedFiles: FileRejection[]) => {
@@ -76,6 +102,8 @@ export default function UploadDocumentsDialog({ onDocumentsUploaded }: UploadDoc
       try {
         // Track errors locally to ensure we have the final state
         const uploadErrors: Record<string, string> = {}
+        const takeoverMessages: string[] = []
+        const successfulUploads: Array<{ fileName: string; result: DocActionResponse }> = []
 
         // Create a collator that supports Chinese sorting
         const collator = new Intl.Collator(['zh-CN', 'en'], {
@@ -104,10 +132,11 @@ export default function UploadDocumentsDialog({ onDocumentsUploaded }: UploadDoc
             })
 
             if (result.status === 'duplicated') {
-              uploadErrors[file.name] = t('documentPanel.uploadDocuments.fileUploader.duplicateFile')
+              const duplicateMessage = result.message || t('documentPanel.uploadDocuments.fileUploader.duplicateFile')
+              uploadErrors[file.name] = duplicateMessage
               setFileErrors(prev => ({
                 ...prev,
-                [file.name]: t('documentPanel.uploadDocuments.fileUploader.duplicateFile')
+                [file.name]: duplicateMessage
               }))
             } else if (result.status !== 'success') {
               uploadErrors[file.name] = result.message
@@ -118,6 +147,13 @@ export default function UploadDocumentsDialog({ onDocumentsUploaded }: UploadDoc
             } else {
               // Mark that we had at least one successful upload
               hasSuccessfulUpload = true
+              successfulUploads.push({
+                fileName: file.name,
+                result
+              })
+              if (result.track_id?.startsWith('rebuild_multimodal')) {
+                takeoverMessages.push(buildTakeoverSuccessMessage(file.name, result))
+              }
             }
           } catch (err) {
             console.error(`Upload failed for ${file.name}:`, err)
@@ -155,6 +191,11 @@ export default function UploadDocumentsDialog({ onDocumentsUploaded }: UploadDoc
         // Update toast status
         if (hasErrors) {
           toast.error(t('documentPanel.uploadDocuments.batch.error'), { id: toastId })
+        } else if (takeoverMessages.length > 0) {
+          toast.success(takeoverMessages.join('\n'), {
+            id: toastId,
+            duration: 8000
+          })
         } else {
           toast.success(t('documentPanel.uploadDocuments.batch.success'), { id: toastId })
         }
@@ -163,7 +204,12 @@ export default function UploadDocumentsDialog({ onDocumentsUploaded }: UploadDoc
         if (hasSuccessfulUpload) {
           // Refresh document list
           if (onDocumentsUploaded) {
-            onDocumentsUploaded().catch(err => {
+            Promise.resolve(onDocumentsUploaded({
+              successfulUploads,
+              takeoverRebuilds: successfulUploads.filter(upload =>
+                upload.result.track_id?.startsWith('rebuild_multimodal')
+              )
+            })).catch(err => {
               console.error('Error refreshing documents:', err)
             })
           }
@@ -175,7 +221,7 @@ export default function UploadDocumentsDialog({ onDocumentsUploaded }: UploadDoc
         setIsUploading(false)
       }
     },
-    [setIsUploading, setProgresses, setFileErrors, t, onDocumentsUploaded]
+    [buildTakeoverSuccessMessage, setIsUploading, setProgresses, setFileErrors, t, onDocumentsUploaded]
   )
 
   return (
@@ -206,8 +252,8 @@ export default function UploadDocumentsDialog({ onDocumentsUploaded }: UploadDoc
         </DialogHeader>
         <FileUploader
           maxFileCount={Infinity}
-          maxSize={200 * 1024 * 1024}
-          description={t('documentPanel.uploadDocuments.fileTypes')}
+          maxSize={defaultMaxUploadSize}
+          description={supportedFileTypesDescription}
           onUpload={handleDocumentsUpload}
           onReject={handleRejectedFiles}
           progresses={progresses}

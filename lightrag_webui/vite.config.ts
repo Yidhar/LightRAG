@@ -14,6 +14,29 @@ import { webuiPrefix } from './src/lib/constants'
 // available inside Bun's runtime; Node.js leaves it undefined, crashing the build.
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
+  const essentialProxyEndpoints = [
+    '/api',
+    '/documents',
+    '/images',
+    '/graphs',
+    '/graph',
+    '/health',
+    '/query',
+    '/docs',
+    '/redoc',
+    '/openapi.json',
+    '/login',
+    '/auth-status',
+    '/auth',
+    '/static'
+  ]
+  const configuredProxyEndpoints = (env.VITE_API_ENDPOINTS || '')
+    .split(',')
+    .map((endpoint) => endpoint.trim())
+    .filter(Boolean)
+  const proxyEndpoints = env.VITE_API_PROXY === 'true'
+    ? Array.from(new Set([...configuredProxyEndpoints, ...essentialProxyEndpoints]))
+    : []
 
   return {
     plugins: [react(), tailwindcss()],
@@ -44,20 +67,34 @@ export default defineConfig(({ mode }) => {
       }
     },
     server: {
-      proxy: env.VITE_API_PROXY === 'true' && env.VITE_API_ENDPOINTS ?
-        Object.fromEntries(
-          env.VITE_API_ENDPOINTS.split(',').map(endpoint => [
+      // Vite's default port (5173) falls inside the Windows excluded port
+      // range 5099-5198 that Hyper-V / Docker Desktop / WSL virtual
+      // switches reserve on developer machines. Binding fails with
+      // `EACCES: permission denied ::1:5173` even when no process is
+      // listening. Move out of that range. Users can further override
+      // via the VITE_DEV_PORT environment variable.
+      //
+      // To audit reserved ranges on Windows, run:
+      //     netsh interface ipv4 show excludedportrange protocol=tcp
+      port: parseInt(env.VITE_DEV_PORT || '5273', 10),
+      strictPort: true,
+      host: env.VITE_DEV_HOST || 'localhost',
+      proxy: proxyEndpoints.length > 0
+        ? Object.fromEntries(
+          proxyEndpoints.map(endpoint => [
             endpoint,
             {
               target: env.VITE_BACKEND_URL || 'http://localhost:9621',
               changeOrigin: true,
-              rewrite: endpoint === '/api' ?
-                (p: string) => p.replace(/^\/api/, '') :
-                endpoint === '/docs' || endpoint === '/redoc' || endpoint === '/openapi.json' || endpoint === '/static' ?
-                  (p: string) => p : undefined
+              rewrite: endpoint === '/api'
+                ? (p: string) => p.replace(/^\/api/, '')
+                : endpoint === '/docs' || endpoint === '/redoc' || endpoint === '/openapi.json' || endpoint === '/static'
+                  ? (p: string) => p
+                  : undefined
             }
           ])
-        ) : {}
+        )
+        : {}
     }
   }
 })

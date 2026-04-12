@@ -141,6 +141,91 @@ class NanoVectorDBStorage(BaseVectorStorage):
                 f"[{self.workspace}] embedding is not 1-1 with data, {len(embeddings)} != {len(list_data)}"
             )
 
+    async def upsert_with_embeddings(
+        self,
+        data: dict[str, dict[str, Any]],
+        embeddings: dict[str, np.ndarray],
+    ) -> None:
+        """Insert/update vectors using pre-computed embeddings.
+
+        Mirrors ``upsert`` but skips the ``embedding_func`` call — the
+        vectors are provided by the caller. This is the entry point used
+        by the multimodal pipeline to write *image-side* vectors produced
+        by ``MultimodalEmbeddingFunc.image_encode``, which cannot be
+        reached via the text-oriented ``embedding_func``.
+
+        Args:
+            data: ``{id: {field1: val, ...}}``. ``content`` is NOT required
+                — only fields listed in ``self.meta_fields`` are persisted.
+            embeddings: ``{id: np.ndarray}`` — one vector per id. Each must
+                be 1-D and match ``self.embedding_func.embedding_dim``.
+
+        See ``BaseVectorStorage.upsert_with_embeddings`` for the full
+        contract.
+        """
+        if not data:
+            return
+
+        # Validate input: every id must have a corresponding vector, and
+        # every vector must have the expected dimension.
+        missing = [k for k in data.keys() if k not in embeddings]
+        if missing:
+            raise ValueError(
+                f"upsert_with_embeddings: {len(missing)} ids missing from "
+                f"embeddings dict (first few: {missing[:5]})"
+            )
+
+        expected_dim = self.embedding_func.embedding_dim
+        for key, vec in embeddings.items():
+            if key not in data:
+                # Extra embeddings with no corresponding data entry — skip
+                # silently, matching the idempotent put-returns-success
+                # pattern used elsewhere.
+                continue
+            if not isinstance(vec, np.ndarray):
+                raise TypeError(
+                    f"upsert_with_embeddings: embedding for {key!r} must be "
+                    f"np.ndarray, got {type(vec).__name__}"
+                )
+            if vec.ndim != 1 or vec.shape[0] != expected_dim:
+                raise ValueError(
+                    f"upsert_with_embeddings: embedding for {key!r} has shape "
+                    f"{vec.shape}, expected ({expected_dim},)"
+                )
+
+        current_time = int(time.time())
+        list_data: list[dict[str, Any]] = []
+        for k, v in data.items():
+            record = {
+                "__id__": k,
+                "__created_at__": current_time,
+                **{k1: v1 for k1, v1 in v.items() if k1 in self.meta_fields},
+            }
+            raw_vec = embeddings[k]
+            # Match the storage layout used by upsert(): compressed base64
+            # f16 for the persistent "vector" field plus the raw ndarray in
+            # "__vector__" which nano_vectordb consumes at write time.
+            vector_f16 = raw_vec.astype(np.float16)
+            compressed_vector = zlib.compress(vector_f16.tobytes())
+            encoded_vector = base64.b64encode(compressed_vector).decode("utf-8")
+            record["vector"] = encoded_vector
+            record["__vector__"] = raw_vec.astype(np.float32)
+            list_data.append(record)
+
+        client = await self._get_client()
+        client.upsert(datas=list_data)
+        # NOTE: do NOT call set_all_update_flags here. That flag means
+        # "another process wrote to the file on disk — reload from disk".
+        # For same-process writes we have NOT persisted to disk yet (that
+        # happens in index_done_callback), so setting the flag would cause
+        # our own index_done_callback to reload stale bytes and discard
+        # everything we just wrote. The existing upsert() method follows
+        # the same convention.
+        logger.debug(
+            f"[{self.workspace}] upsert_with_embeddings wrote {len(list_data)} "
+            f"records to {self.namespace} (bypassed embedding_func)"
+        )
+
     async def query(
         self, query: str, top_k: int, query_embedding: list[float] = None
     ) -> list[dict[str, Any]]:
@@ -160,9 +245,12 @@ class NanoVectorDBStorage(BaseVectorStorage):
             top_k=top_k,
             better_than_threshold=self.cosine_better_than_threshold,
         )
+        # Filter out bulky internal fields using a pre-built set (faster
+        # than a per-key string comparison on every field of every result).
+        _exclude = {"vector", "__vector__", "__id__", "__metrics__", "__created_at__"}
         results = [
             {
-                **{k: v for k, v in dp.items() if k != "vector"},
+                **{k: v for k, v in dp.items() if k not in _exclude},
                 "id": dp["__id__"],
                 "distance": dp["__metrics__"],
                 "created_at": dp.get("__created_at__"),
@@ -243,20 +331,24 @@ class NanoVectorDBStorage(BaseVectorStorage):
         """
 
         try:
+            # Single _get_client call (was called twice before — the second
+            # call could trigger a redundant file reload).
             client = await self._get_client()
             storage = getattr(client, "_NanoVectorDB__storage")
-            relations = [
-                dp
+
+            # Use a set for the entity name check so the per-record test is
+            # O(1) instead of two string comparisons.  The comprehension is
+            # still O(N) over the storage array (unavoidable without a
+            # secondary index), but we avoid the duplicate _get_client and
+            # do everything in a single pass.
+            target = entity_name
+            ids_to_delete = [
+                dp["__id__"]
                 for dp in storage["data"]
-                if dp["src_id"] == entity_name or dp["tgt_id"] == entity_name
+                if dp.get("src_id") == target or dp.get("tgt_id") == target
             ]
-            logger.debug(
-                f"[{self.workspace}] Found {len(relations)} relations for entity {entity_name}"
-            )
-            ids_to_delete = [relation["__id__"] for relation in relations]
 
             if ids_to_delete:
-                client = await self._get_client()
                 client.delete(ids_to_delete)
                 logger.debug(
                     f"[{self.workspace}] Deleted {len(ids_to_delete)} relations for {entity_name}"

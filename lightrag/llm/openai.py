@@ -20,6 +20,7 @@ from tenacity import (
     retry,
     stop_after_attempt,
     wait_exponential,
+    wait_random,
     retry_if_exception_type,
 )
 from lightrag.utils import (
@@ -185,8 +186,35 @@ def create_openai_async_client(
 
 
 @retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=4, max=10),
+    # Tuned to ride out provider-side token-per-minute (TPM) limits on
+    # hosted inference backends like SiliconFlow / DashScope / OpenRouter.
+    # Those APIs typically enforce a 60-second rolling TPM window, so any
+    # retry schedule whose cumulative wait is shorter than 60s has zero
+    # chance of recovering from a 429 burst — the worker just retries
+    # into the same hot window a few times and gives up.
+    #
+    # Schedule (deterministic component + 0-5 s jitter per gap), where
+    # "wait N" is the pause between attempts N and N+1:
+    #     wait after attempt 1 →  4 - 9   s
+    #     wait after attempt 2 →  4 - 9   s   (2^1 * 2 = 4, floored by min=4)
+    #     wait after attempt 3 →  8 - 13  s
+    #     wait after attempt 4 → 16 - 21  s
+    #     wait after attempt 5 → 32 - 37  s
+    #     wait after attempt 6 → 64 - 69  s
+    #     attempt 7 → final try
+    #
+    # Cumulative max wait before the final attempt: ~128-158 s. That is
+    # 2-2.5× the typical TPM reset window, so even when all MAX_ASYNC
+    # workers hit the 429 at the same instant and burn a retry together,
+    # the staggered wakeup still lets later attempts fall into fresh
+    # token budget.
+    #
+    # The added wait_random(0, 5) jitter is crucial when MAX_ASYNC > 1:
+    # without it, every worker that gets a 429 at the same instant waits
+    # the EXACT same backoff and then retries in lockstep, re-triggering
+    # the limit. The 0-5 s random offset staggers them across the window.
+    stop=stop_after_attempt(7),
+    wait=wait_exponential(multiplier=2, min=4, max=90) + wait_random(0, 5),
     retry=(
         retry_if_exception_type(RateLimitError)
         | retry_if_exception_type(APIConnectionError)
@@ -209,6 +237,8 @@ async def openai_complete_if_cache(
     use_azure: bool = False,
     azure_deployment: str | None = None,
     api_version: str | None = None,
+    image_data: "bytes | str | list[bytes | str] | None" = None,
+    image_mime_type: str = "image/jpeg",
     **kwargs: Any,
 ) -> str:
     """Complete a prompt using OpenAI's API with caching support and Chain of Thought (COT) integration.
@@ -301,7 +331,36 @@ async def openai_complete_if_cache(
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.extend(history_messages)
-    messages.append({"role": "user", "content": prompt})
+
+    if image_data is None:
+        # Text-only path (backwards compatible with all existing callers)
+        messages.append({"role": "user", "content": prompt})
+    else:
+        # Multimodal path: OpenAI vision content-list format.
+        # Accepts bytes, local file paths, http(s) URLs, or pre-built data: URIs.
+        # Any endpoint that implements the OpenAI chat/completions spec with
+        # vision support (OpenAI, Azure OpenAI, DashScope compatible-mode,
+        # vLLM, Ollama /v1, OpenRouter, LiteLLM proxy, etc.) will accept this.
+        images = image_data if isinstance(image_data, list) else [image_data]
+        user_content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        for img in images:
+            if isinstance(img, (bytes, bytearray)):
+                img_b64 = base64.b64encode(bytes(img)).decode("utf-8")
+                url = f"data:{image_mime_type};base64,{img_b64}"
+            elif isinstance(img, str):
+                if img.startswith(("http://", "https://", "data:")):
+                    url = img
+                else:
+                    # Treat as a local file path
+                    with open(img, "rb") as f:
+                        img_b64 = base64.b64encode(f.read()).decode("utf-8")
+                    url = f"data:{image_mime_type};base64,{img_b64}"
+            else:
+                raise TypeError(
+                    f"image_data entries must be bytes or str, got {type(img).__name__}"
+                )
+            user_content.append({"type": "image_url", "image_url": {"url": url}})
+        messages.append({"role": "user", "content": user_content})
 
     logger.debug("===== Entering func of LLM =====")
     logger.debug(f"Model: {model}   Base URL: {base_url}")

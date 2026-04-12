@@ -1,16 +1,17 @@
-import { useState, useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { AlignLeft, AlignCenter, AlignRight } from 'lucide-react'
+import { AlignCenter, AlignLeft, AlignRight } from 'lucide-react'
 
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
-  DialogTitle,
-  DialogDescription
+  DialogTitle
 } from '@/components/ui/Dialog'
 import Button from '@/components/ui/Button'
+import Progress from '@/components/ui/Progress'
 import { getPipelineStatus, cancelPipeline, PipelineStatusResponse } from '@/api/lightrag'
 import { errorMessage } from '@/lib/utils'
 import { cn } from '@/lib/utils'
@@ -22,6 +23,58 @@ interface PipelineStatusDialogProps {
   onOpenChange: (open: boolean) => void
 }
 
+const STATUS_POLL_INTERVAL_MS = 2000
+const CLOCK_TICK_INTERVAL_MS = 1000
+
+function formatDuration(ms: number | null): string {
+  if (ms === null || !Number.isFinite(ms) || ms < 0) {
+    return '—'
+  }
+
+  const totalSeconds = Math.max(0, Math.round(ms / 1000))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`
+  }
+  return `${seconds}s`
+}
+
+function getProgressMetrics(status: PipelineStatusResponse | null, nowMs: number) {
+  const totalBatches = Math.max(status?.batchs ?? 0, 0)
+  const currentBatch = Math.min(Math.max(status?.cur_batch ?? 0, 0), totalBatches || Number.MAX_SAFE_INTEGER)
+  const processedBatches = totalBatches > 0 ? currentBatch : 0
+  const remainingBatches = totalBatches > 0 ? Math.max(totalBatches - processedBatches, 0) : 0
+  const progressPercent = totalBatches > 0
+    ? Math.min(100, Math.max(0, (processedBatches / totalBatches) * 100))
+    : 0
+
+  const jobStartMs = status?.job_start ? new Date(status.job_start).getTime() : Number.NaN
+  const elapsedMs = Number.isFinite(jobStartMs)
+    ? Math.max(0, nowMs - jobStartMs)
+    : null
+
+  const etaMs = elapsedMs !== null && progressPercent > 0 && progressPercent < 100
+    ? elapsedMs * ((100 - progressPercent) / progressPercent)
+    : progressPercent >= 100
+      ? 0
+      : null
+
+  return {
+    totalBatches,
+    processedBatches,
+    remainingBatches,
+    progressPercent,
+    elapsedMs,
+    etaMs
+  }
+}
+
 export default function PipelineStatusDialog({
   open,
   onOpenChange
@@ -31,6 +84,7 @@ export default function PipelineStatusDialog({
   const [position, setPosition] = useState<DialogPosition>('center')
   const [isUserScrolled, setIsUserScrolled] = useState(false)
   const [showCancelConfirm, setShowCancelConfirm] = useState(false)
+  const [nowMs, setNowMs] = useState(() => Date.now())
   const historyRef = useRef<HTMLDivElement>(null)
 
   // Reset UI state whenever the controlling open prop changes.
@@ -44,6 +98,14 @@ export default function PipelineStatusDialog({
     }
 
     setShowCancelConfirm(false)
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+
+    setNowMs(Date.now())
+    const interval = setInterval(() => setNowMs(Date.now()), CLOCK_TICK_INTERVAL_MS)
+    return () => clearInterval(interval)
   }, [open])
 
   // Handle scroll position
@@ -83,7 +145,7 @@ export default function PipelineStatusDialog({
     }
 
     fetchStatus()
-    const interval = setInterval(fetchStatus, 2000)
+    const interval = setInterval(fetchStatus, STATUS_POLL_INTERVAL_MS)
     return () => clearInterval(interval)
   }, [open, t])
 
@@ -105,21 +167,33 @@ export default function PipelineStatusDialog({
   // Determine if cancel button should be enabled
   const canCancel = status?.busy === true && !status?.cancellation_requested
 
+  const metrics = useMemo(() => getProgressMetrics(status, nowMs), [status, nowMs])
+
+  const currentStep = status?.latest_message?.trim()
+    || (status?.busy
+      ? t('documentPanel.pipelineStatus.currentStepStarting', 'Starting…')
+      : t('documentPanel.pipelineStatus.noActiveJob', 'No active job'))
+
+  const progressSummary = status
+    ? `${Math.round(metrics.progressPercent)}% · ${metrics.processedBatches}/${metrics.totalBatches || 0} ${t('documentPanel.pipelineStatus.unit')}`
+    : '—'
+
+  const accessibleDescription = status?.job_name
+    ? `${t('documentPanel.pipelineStatus.jobName')}: ${status.job_name}, ${t('documentPanel.pipelineStatus.progress')}: ${progressSummary}`
+    : t('documentPanel.pipelineStatus.noActiveJob', 'No active job')
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         className={cn(
-          'sm:max-w-[800px] transition-all duration-200 fixed',
+          'sm:max-w-[860px] transition-all duration-200 fixed',
           position === 'left' && '!left-[25%] !translate-x-[-50%] !mx-4',
           position === 'center' && '!left-1/2 !-translate-x-1/2',
           position === 'right' && '!left-[75%] !translate-x-[-50%] !mx-4'
         )}
       >
         <DialogDescription className="sr-only">
-          {status?.job_name
-            ? `${t('documentPanel.pipelineStatus.jobName')}: ${status.job_name}, ${t('documentPanel.pipelineStatus.progress')}: ${status.cur_batch}/${status.batchs}`
-            : t('documentPanel.pipelineStatus.noActiveJob')
-          }
+          {accessibleDescription}
         </DialogDescription>
         <DialogHeader className="flex flex-row items-center">
           <DialogTitle className="flex-1">
@@ -205,21 +279,83 @@ export default function PipelineStatusDialog({
             )}
           </div>
 
-          {/* Job Information */}
-          <div className="rounded-md border p-3 space-y-2">
-            <div>{t('documentPanel.pipelineStatus.jobName')}: {status?.job_name || '-'}</div>
-            <div className="flex justify-between">
-              <span>{t('documentPanel.pipelineStatus.startTime')}: {status?.job_start
-                ? new Date(status.job_start).toLocaleString(undefined, {
-                  year: 'numeric',
-                  month: 'numeric',
-                  day: 'numeric',
-                  hour: 'numeric',
-                  minute: 'numeric',
-                  second: 'numeric'
-                })
-                : '-'}</span>
-              <span>{t('documentPanel.pipelineStatus.progress')}: {status ? `${status.cur_batch}/${status.batchs} ${t('documentPanel.pipelineStatus.unit')}` : '-'}</span>
+          {/* Job / Progress Information */}
+          <div className="rounded-md border p-4 space-y-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="space-y-1">
+                <div className="text-sm font-medium">{t('documentPanel.pipelineStatus.jobName')}: {status?.job_name || '-'}</div>
+                <div className="text-sm text-zinc-600 dark:text-zinc-400">
+                  {t('documentPanel.pipelineStatus.startTime')}: {status?.job_start
+                    ? new Date(status.job_start).toLocaleString(undefined, {
+                      year: 'numeric',
+                      month: 'numeric',
+                      day: 'numeric',
+                      hour: 'numeric',
+                      minute: 'numeric',
+                      second: 'numeric'
+                    })
+                    : '-'}
+                </div>
+              </div>
+              <div className="text-left sm:text-right">
+                <div className="text-2xl font-semibold leading-none">
+                  {`${Math.round(metrics.progressPercent)}%`}
+                </div>
+                <div className="text-xs text-zinc-600 dark:text-zinc-400 mt-1">
+                  {progressSummary}
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-3 text-xs text-zinc-600 dark:text-zinc-400">
+                <span>{t('documentPanel.pipelineStatus.progress')}</span>
+                <span>{status ? `${metrics.processedBatches}/${metrics.totalBatches || 0} ${t('documentPanel.pipelineStatus.unit')}` : '—'}</span>
+              </div>
+              <Progress value={metrics.progressPercent} className="h-2" />
+            </div>
+
+            <div className="rounded-md border bg-zinc-50/70 p-3 dark:bg-zinc-900/50">
+              <div className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                {t('documentPanel.pipelineStatus.currentStep', 'Current step')}
+              </div>
+              <div className="mt-1 text-sm break-words">
+                {currentStep}
+              </div>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <div className="rounded-md border p-3">
+                <div className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                  {t('documentPanel.pipelineStatus.remaining', 'Remaining')}
+                </div>
+                <div className="mt-1 text-lg font-semibold">{metrics.remainingBatches}</div>
+                <div className="text-xs text-zinc-600 dark:text-zinc-400">
+                  {t('documentPanel.pipelineStatus.unit')}
+                </div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                  {t('documentPanel.pipelineStatus.elapsed', 'Elapsed')}
+                </div>
+                <div className="mt-1 text-lg font-semibold">{formatDuration(metrics.elapsedMs)}</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                  {t('documentPanel.pipelineStatus.eta', 'ETA')}
+                </div>
+                <div className="mt-1 text-lg font-semibold">
+                  {metrics.progressPercent > 0
+                    ? formatDuration(metrics.etaMs)
+                    : t('documentPanel.pipelineStatus.etaUnavailable', 'Estimating…')}
+                </div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                  {t('documentPanel.pipelineStatus.totalDocuments', 'Total documents')}
+                </div>
+                <div className="mt-1 text-lg font-semibold">{status?.docs ?? 0}</div>
+              </div>
             </div>
           </div>
 

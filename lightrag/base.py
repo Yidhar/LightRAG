@@ -281,6 +281,56 @@ class BaseVectorStorage(StorageNameSpace, ABC):
            KG-storage-log should be used to avoid data corruption
         """
 
+    async def upsert_with_embeddings(
+        self,
+        data: dict[str, dict[str, Any]],
+        embeddings: dict[str, "np.ndarray"],
+    ) -> None:
+        """Insert or update vectors using PRE-COMPUTED embeddings.
+
+        This parallel entry point lets callers bypass the text-oriented
+        ``embedding_func`` path and write vectors that were produced by a
+        different encoder — typically the *image* side of a multimodal
+        embedding model (e.g. ``tongyi-embedding-vision-plus``). The text
+        ``upsert`` path cannot be used for image data because its only
+        input channel is a ``content`` string fed to ``embedding_func``.
+
+        The default implementation raises ``NotImplementedError``.
+        Concrete storage backends opt in by overriding this method —
+        subclasses that do NOT override it continue to work unchanged for
+        text-only workloads, preserving strict backwards compatibility.
+
+        Args:
+            data: Same shape as ``upsert`` — ``{id: {field1: val, ...}}``.
+                A ``content`` field is NOT required; fields present in
+                ``meta_fields`` are persisted alongside the vector.
+            embeddings: ``{id: np.ndarray}`` mapping. Every key in ``data``
+                MUST have a matching entry in ``embeddings``. Each vector
+                MUST be a 1-D ``np.ndarray`` of length
+                ``embedding_func.embedding_dim``.
+
+        Raises:
+            NotImplementedError: If the concrete backend has not overridden
+                this method. The error message tells the caller which
+                backend is missing support so they can either override it
+                or switch to one that supports multimodal pipelines.
+
+        Importance notes (for backends that override this method):
+        1. Changes will be persisted to disk during the next
+           ``index_done_callback``.
+        2. The ``meta_fields`` filter applies as in ``upsert``: only fields
+           listed in ``self.meta_fields`` are stored alongside the vector.
+        3. Do NOT call ``self.embedding_func`` — the whole point of this
+           method is to bypass it. Validate input dimensions against
+           ``self.embedding_func.embedding_dim`` instead.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support precomputed embeddings. "
+            "Override upsert_with_embeddings() to enable image / multimodal "
+            "vector ingestion, or switch to a backend that supports it "
+            "(NanoVectorDBStorage does in Phase 3+)."
+        )
+
     @abstractmethod
     async def delete_entity(self, entity_name: str) -> None:
         """Delete a single entity by its name.
@@ -399,6 +449,99 @@ class BaseKVStorage(StorageNameSpace, ABC):
         Returns:
             bool: True if storage contains no data, False otherwise
         """
+
+
+@dataclass
+class BaseBlobStorage(StorageNameSpace, ABC):
+    """Binary blob storage for original multimodal assets (images, audio, video, ...).
+
+    Unlike BaseKVStorage which is designed for structured JSON records,
+    BaseBlobStorage holds raw bytes keyed by a blob id (typically a content
+    hash like ``img-<md5>``). It is the canonical place to persist the
+    *original* of a multimodal input so that the retrieval layer can surface
+    it back to the user at query time.
+
+    Concrete implementations are expected to handle:
+    - Workspace isolation (subdirectories, key prefixes, or row-level filters
+      depending on the backend).
+    - Sidecar metadata (mime_type, created_at, size, user-supplied fields).
+    - Atomic writes and safe concurrent access.
+
+    Unlike the other base storage types, BaseBlobStorage does NOT require an
+    ``embedding_func`` — blobs are opaque binary payloads and are never
+    embedded or otherwise interpreted at this layer. The multimodal
+    embedding step operates on the bytes directly and writes its vectors
+    into a separate ``BaseVectorStorage`` collection.
+    """
+
+    @abstractmethod
+    async def put(
+        self,
+        blob_id: str,
+        data: bytes,
+        *,
+        content_type: str = "application/octet-stream",
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        """Persist a blob and return a reference usable to fetch it later.
+
+        Args:
+            blob_id: Unique identifier for the blob (typically a content
+                hash with a short type prefix, e.g. ``img-<md5>``).
+            data: Raw binary payload.
+            content_type: MIME type for later retrieval (e.g. ``image/png``).
+                Stored in the sidecar metadata and used to pick a file
+                extension for filesystem-backed impls.
+            metadata: Arbitrary user-supplied metadata merged into the
+                sidecar alongside system-managed fields (size, created_at).
+                Must be JSON-serializable.
+
+        Returns:
+            A storage-specific reference string that downstream code can
+            persist alongside the blob id — typically an absolute local
+            path for filesystem backends, or a URL / URI for remote
+            backends (S3, MinIO, HTTP-backed CDN, ...).
+
+        Notes:
+            - Writes MUST be atomic from the caller's perspective: a
+              successful return means the blob is durably stored.
+            - If ``blob_id`` already exists, implementations SHOULD overwrite
+              (idempotent put). Content-addressed ids make this safe.
+        """
+
+    @abstractmethod
+    async def get(self, blob_id: str) -> bytes | None:
+        """Fetch the raw bytes of a blob by id, or None if it does not exist."""
+
+    @abstractmethod
+    async def get_reference(self, blob_id: str) -> str | None:
+        """Return a storage-specific reference for the blob, or None.
+
+        For filesystem backends this is an absolute local path. For remote
+        backends it is a URL or URI (possibly a pre-signed URL for S3). The
+        caller can use this to hand the blob to an external system without
+        loading the bytes into memory.
+        """
+
+    @abstractmethod
+    async def get_metadata(self, blob_id: str) -> dict[str, Any] | None:
+        """Return the sidecar metadata for a blob, or None if it does not exist.
+
+        The returned dict always contains system-managed keys:
+            - ``content_type`` (str)
+            - ``size`` (int, bytes)
+            - ``created_at`` (ISO-8601 string, UTC)
+            - ``blob_id`` (str)
+        Additional fields come from the ``metadata`` argument passed to ``put()``.
+        """
+
+    @abstractmethod
+    async def exists(self, blob_id: str) -> bool:
+        """Return True iff a blob with this id is present in the store."""
+
+    @abstractmethod
+    async def delete(self, blob_id: str) -> bool:
+        """Delete a blob and its sidecar. Returns True if anything was removed."""
 
 
 @dataclass

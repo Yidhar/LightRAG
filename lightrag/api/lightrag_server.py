@@ -51,6 +51,7 @@ from lightrag.api.routers.document_routes import (
 )
 from lightrag.api.routers.query_routes import create_query_routes
 from lightrag.api.routers.graph_routes import create_graph_routes
+from lightrag.api.routers.image_routes import create_image_routes
 from lightrag.api.routers.ollama_api import OllamaAPI
 
 from lightrag.utils import logger, set_verbose_debug
@@ -1055,12 +1056,108 @@ def create_app(args):
         name=args.simulated_model_name, tag=args.simulated_model_tag
     )
 
+    # Build a query-time LLM function with enable_thinking=true when the
+    # indexing function has enable_thinking=false. This lets qwen3.6-plus
+    # (and similar reasoning models) use fast no-thinking mode during
+    # entity extraction (high volume, cost-sensitive) and full reasoning
+    # during answer generation (low volume, quality-sensitive).
+    #
+    # Only creates a separate function when OPENAI_LLM_EXTRA_BODY contains
+    # enable_thinking=false AND QUERY_ENABLE_THINKING is explicitly set to
+    # true. Otherwise query_llm_model_func stays None and the query path
+    # falls back to the same llm_model_func used by indexing.
+    query_llm_model_func = None
+    query_enable_thinking = get_env_value("QUERY_ENABLE_THINKING", False, bool)
+    if query_enable_thinking and args.llm_binding in ["openai", "azure_openai"]:
+        # Deep-copy the config_cache's openai_llm_options and override
+        # extra_body to enable thinking for the query path.
+        import copy
+
+        query_config_cache = copy.copy(config_cache)
+        query_options = dict(config_cache.openai_llm_options or {})
+        indexing_extra_body = query_options.get("extra_body") or {}
+        query_extra_body = dict(indexing_extra_body)
+        query_extra_body["enable_thinking"] = True
+        query_options["extra_body"] = query_extra_body
+        query_config_cache.openai_llm_options = query_options
+        logger.info(
+            f"Query LLM will use enable_thinking=true "
+            f"(indexing uses {indexing_extra_body.get('enable_thinking', 'default')})"
+        )
+
+        if args.llm_binding == "azure_openai":
+            query_llm_model_func = create_optimized_azure_openai_llm_func(
+                query_config_cache, args, llm_timeout
+            )
+        else:
+            query_llm_model_func = create_optimized_openai_llm_func(
+                query_config_cache, args, llm_timeout
+            )
+
+    # --- Multimodal pipeline: build image_embedding_func + vision_model_func
+    # from .env when configured. These are optional — when None, the LightRAG
+    # instance operates in pure-text mode identically to before Phase 1-6.
+    image_embedding_func = None
+    vision_model_func = None
+
+    mm_emb_model = get_env_value("MM_EMB_MODEL", "", str)
+    mm_emb_dim = get_env_value("MM_EMB_DIM", 0, int)
+    mm_emb_key = get_env_value("MM_EMB_BINDING_API_KEY", "", str)
+    vision_model = get_env_value("VISION_MODEL", "", str)
+    vision_host = get_env_value("VISION_BINDING_HOST", "", str)
+    vision_key = get_env_value("VISION_BINDING_API_KEY", "", str)
+
+    if mm_emb_model and mm_emb_dim and mm_emb_key:
+        try:
+            from lightrag.llm.tongyi import tongyi_multimodal_embedding
+
+            mm_emb_host = get_env_value("MM_EMB_BINDING_HOST", "", str) or None
+            image_embedding_func = tongyi_multimodal_embedding(
+                model=mm_emb_model,
+                embedding_dim=mm_emb_dim,
+                api_key=mm_emb_key,
+                base_url=mm_emb_host,
+            )
+            logger.info(
+                f"Multimodal image embedding enabled: model={mm_emb_model} "
+                f"dim={mm_emb_dim}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to initialize multimodal embedding ({mm_emb_model}): {e}. "
+                "Image pipeline will be disabled."
+            )
+            image_embedding_func = None
+
+    if vision_model and vision_host and vision_key:
+        try:
+            from lightrag.llm.openai import openai_complete_if_cache
+            from functools import partial as _partial
+
+            vision_model_func = _partial(
+                openai_complete_if_cache,
+                model=vision_model,
+                base_url=vision_host,
+                api_key=vision_key,
+            )
+            logger.info(
+                f"Multimodal vision model enabled: model={vision_model} "
+                f"host={vision_host}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to initialize vision model ({vision_model}): {e}. "
+                "Image captioning will be disabled."
+            )
+            vision_model_func = None
+
     # Initialize RAG with unified configuration
     try:
         rag = LightRAG(
             working_dir=args.working_dir,
             workspace=args.workspace,
             llm_model_func=create_llm_model_func(args.llm_binding),
+            query_llm_model_func=query_llm_model_func,
             llm_model_name=args.llm_model,
             llm_model_max_async=args.max_async,
             summary_max_tokens=args.summary_max_tokens,
@@ -1071,6 +1168,8 @@ def create_app(args):
                 args.llm_binding, args, llm_timeout
             ),
             embedding_func=embedding_func,
+            image_embedding_func=image_embedding_func,
+            vision_model_func=vision_model_func,
             default_llm_timeout=llm_timeout,
             default_embedding_timeout=embedding_timeout,
             kv_storage=args.kv_storage,
@@ -1105,6 +1204,15 @@ def create_app(args):
     )
     app.include_router(create_query_routes(rag, api_key, args.top_k))
     app.include_router(create_graph_routes(rag, api_key))
+
+    # Multimodal image routes — only registered when the multimodal
+    # pipeline is enabled on this LightRAG instance. create_image_routes
+    # returns None on text-only deployments, so FastAPI never sees any
+    # new endpoints unless image ingestion is actually wired up.
+    image_router = create_image_routes(rag, api_key)
+    if image_router is not None:
+        app.include_router(image_router)
+        logger.info("Registered multimodal image routes (/images/*)")
 
     # Add Ollama API routes
     ollama_api = OllamaAPI(rag, top_k=args.top_k, api_key=api_key)

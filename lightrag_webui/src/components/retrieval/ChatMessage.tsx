@@ -1,7 +1,8 @@
-import { ReactNode, useEffect, useMemo, useRef, memo, useState } from 'react' // Import useMemo
-import { Message } from '@/api/lightrag'
+import { ReactNode, useEffect, useMemo, useRef, memo, useState } from 'react'
+import { Message, RetrievedChunk, fetchImageBlobUrl } from '@/api/lightrag'
 import useTheme from '@/hooks/useTheme'
 import { cn } from '@/lib/utils'
+import { ChunkImageGrid } from '@/components/retrieval/ChunkImage'
 
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -42,6 +43,73 @@ export type MessageWithError = Message & {
    * Used to prevent red error text during streaming of incomplete LaTeX formulas.
    */
   latexRendered?: boolean
+  /**
+   * Multimodal image chunks retrieved alongside this assistant message.
+   * Populated by RetrievalTesting after the streaming answer finishes
+   * and a follow-up /query/data call lands. When empty or undefined,
+   * the UI renders text-only exactly as before — nothing gated on the
+   * multimodal pipeline changes the rendering path for text workloads.
+   */
+  imageChunks?: RetrievedChunk[]
+}
+
+/**
+ * Renders an image fetched from the blob store via authenticated axios.
+ *
+ * Used by the markdown `img` component override to display images the LLM
+ * embeds as `![alt](/images/img-xxx)`. A plain `<img src>` can't carry
+ * the auth header, so we fetch the bytes through `fetchImageBlobUrl` and
+ * display them via an object URL.
+ */
+function InlineBlobImage({ blobId, alt }: { blobId: string; alt: string }) {
+  const [url, setUrl] = useState<string | null>(null)
+  const [error, setError] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    let objectUrl: string | null = null
+
+    fetchImageBlobUrl(blobId)
+      .then((u) => {
+        if (cancelled) {
+          URL.revokeObjectURL(u)
+          return
+        }
+        objectUrl = u
+        setUrl(u)
+      })
+      .catch(() => {
+        if (!cancelled) setError(true)
+      })
+
+    return () => {
+      cancelled = true
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [blobId])
+
+  if (error) {
+    return (
+      <span className="text-muted-foreground inline-flex items-center gap-1 text-xs">
+        [image {blobId} failed to load]
+      </span>
+    )
+  }
+  if (!url) {
+    return (
+      <span className="bg-muted my-2 inline-flex h-32 w-48 animate-pulse items-center justify-center rounded text-xs">
+        loading...
+      </span>
+    )
+  }
+  return (
+    <img
+      src={url}
+      alt={alt}
+      className="my-2 max-w-full rounded border shadow-sm"
+      loading="lazy"
+    />
+  )
 }
 
 // Restore original component definition and export
@@ -136,7 +204,23 @@ export const ChatMessage = ({
     h4: ({ children }: { children?: ReactNode }) => <h4 className="text-base font-semibold mt-3 mb-2">{children}</h4>,
     ul: ({ children }: { children?: ReactNode }) => <ul className="list-disc pl-5 my-2">{children}</ul>,
     ol: ({ children }: { children?: ReactNode }) => <ol className="list-decimal pl-5 my-2">{children}</ol>,
-    li: ({ children }: { children?: ReactNode }) => <li className="my-1">{children}</li>
+    li: ({ children }: { children?: ReactNode }) => <li className="my-1">{children}</li>,
+    // Intercept markdown images whose src matches /images/img-* (our
+    // blob store URLs injected by the LLM via the prompt template).
+    // A plain <img src="/images/img-xxx"> won't carry auth headers, so
+    // we fetch the blob through the authenticated axios instance and
+    // render via an object URL instead.
+    img: (props: any) => {
+      const { src, alt } = props
+      if (src && /\/images\/img-/.test(src)) {
+        const blobId = src.split('/images/')[1]?.split(/[?#]/)[0]
+        if (blobId) {
+          return <InlineBlobImage blobId={blobId} alt={alt || ''} />
+        }
+      }
+      // Non-blob images (external URLs, data URIs): render normally.
+      return <img src={src} alt={alt} className="max-w-full rounded my-2" loading="lazy" />
+    }
   }), [message.mermaidRendered, message.role]);
 
   const thinkingMarkdownComponents = useMemo(() => ({
@@ -258,6 +342,14 @@ export const ChatMessage = ({
               {finalDisplayContent}
             </ReactMarkdown>
           </div>
+          {/*
+            Multimodal image chunks retrieved alongside this message.
+            Rendered only when the assistant message has at least one
+            image chunk — text-only workloads see nothing here.
+          */}
+          {message.role !== 'user' && message.imageChunks && message.imageChunks.length > 0 && (
+            <ChunkImageGrid chunks={message.imageChunks} />
+          )}
         </div>
       )}
       {/* Loading indicator - only show in active tab */}

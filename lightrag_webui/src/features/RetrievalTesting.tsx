@@ -3,7 +3,7 @@ import Input from '@/components/ui/Input'
 import Button from '@/components/ui/Button'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { throttle } from '@/lib/utils'
-import { queryText, queryTextStream } from '@/api/lightrag'
+import { queryText, queryTextStream, queryData } from '@/api/lightrag'
 import { errorMessage } from '@/lib/utils'
 import { useSettingsStore } from '@/stores/settings'
 import { useDebounce } from '@/hooks/useDebounce'
@@ -13,7 +13,7 @@ import { EraserIcon, SendIcon, CopyIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { copyToClipboard } from '@/utils/clipboard'
-import type { QueryMode } from '@/api/lightrag'
+import type { QueryMode, RetrievedChunk } from '@/api/lightrag'
 
 // Helper function to generate unique IDs with browser compatibility
 const generateUniqueId = () => {
@@ -418,6 +418,70 @@ export default function RetrievalTesting() {
         } finally {
           // Ensure cleanup happens regardless of errors
           thinkingStartTime.current = null
+        }
+
+        // Multimodal: fetch structured retrieval data in the background
+        // so any image chunks returned by the image pipeline show up
+        // below the streamed answer. This runs only for modes that can
+        // return cross-modal hits (anything that exercises chunks_vdb
+        // is a superset of images_vdb) and degrades silently when
+        // multimodal is not enabled — the backend simply returns no
+        // image_vector chunks and nothing is rendered.
+        if (
+          !assistantMessage.isError &&
+          ['mix', 'hybrid', 'local', 'global', 'naive'].includes(
+            queryParams.mode as string
+          )
+        ) {
+          // Disable streaming + LLM generation overhead: /query/data
+          // returns only the structured retrieval result.
+          const dataParams = { ...queryParams, stream: false }
+          queryData(dataParams)
+            .then((resp) => {
+              const chunks = resp?.data?.chunks ?? []
+              const imageChunks: RetrievedChunk[] = chunks.filter(
+                (c) =>
+                  c.source_type === 'image_vector' &&
+                  Boolean(c.image_blob_id)
+              )
+              if (imageChunks.length === 0) {
+                return
+              }
+              // Attach to the assistant message and trigger a re-render.
+              assistantMessage.imageChunks = imageChunks
+              setMessages((prev) => {
+                const next = [...prev]
+                const last = next[next.length - 1]
+                if (last && last.id === assistantMessage.id) {
+                  ;(last as typeof assistantMessage).imageChunks = imageChunks
+                }
+                return next
+              })
+              // Persist the enriched message in retrieval history so
+              // reloads from the store still show the thumbnails.
+              try {
+                useSettingsStore
+                  .getState()
+                  .setRetrievalHistory([
+                    ...prevMessages,
+                    userMessage,
+                    assistantMessage
+                  ])
+              } catch (error) {
+                console.error(
+                  'Error saving retrieval history with image chunks:',
+                  error
+                )
+              }
+            })
+            .catch((err) => {
+              // Swallow — the text answer is already on screen, and
+              // the structured-data call is purely an enrichment.
+              console.debug(
+                '[multimodal] /query/data fetch failed, ignoring:',
+                err
+              )
+            })
         }
 
         // Save history with error handling

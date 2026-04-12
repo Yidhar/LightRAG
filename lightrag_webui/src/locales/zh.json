@@ -96,8 +96,10 @@
       "batch": {
         "uploading": "正在上传文件...",
         "success": "文件上传完成",
-        "error": "部分文件上传失败"
+        "error": "部分文件上传失败，请查看下方文件列表中的具体原因"
       },
+      "takeoverSuccess": "已接收《{{name}}》，不会创建重复文档，已开始重建多模态，并将切换到“处理中”列表。",
+      "takeoverSuccessWithDocId": "已接收《{{name}}》，将复用现有文档 {{docId}}，不会创建重复文档，已开始重建多模态，并将切换到“处理中”列表。",
       "generalError": "上传失败\n{{error}}",
       "fileTypes": "支持的文件类型：TXT, MD, MDX, DOCX, PDF, PPTX, XLSX, RTF, ODT, EPUB, HTML, HTM, TEX, JSON, XML, YAML, YML, CSV, LOG, CONF, INI, PROPERTIES, SQL, BAT, SH, C, CPP, H, HPP, PY, JAVA, JS, TS, SWIFT, GO, RB, PHP, CSS, SCSS, LESS",
       "fileUploader": {
@@ -110,13 +112,21 @@
         "dragAndDrop": "拖放文件到此处，或点击选择文件",
         "removeFile": "移除文件",
         "uploadDescription": "您可以上传{{isMultiple ? '多个' : count}}个文件（每个文件最大{{maxSize}}）",
-        "duplicateFile": "文件名与服务器上的缓存重复"
+        "duplicateFile": "服务器中已存在同名文件"
       }
     },
     "documentManager": {
       "title": "文档管理",
       "scanButton": "扫描/重试",
       "scanTooltip": "扫描处理输入目录中的文档，同时重新处理所有失败的文档",
+      "rebuildMultimodalButton": "重建多模态",
+      "rebuildMultimodalTooltip": "重新从原始 PDF 拆分图片并重建图像向量、定位信息与上下文注入（尽量复用缓存）",
+      "rebuildMultimodalSingleOnly": "请只选择一个 PDF 文档进行多模态重建",
+      "rebuildMultimodalPdfOnly": "仅非等待中/处理中的 PDF 文档支持多模态重建",
+      "rebuildMultimodalBusy": "流水线忙碌中，请等待当前任务完成后再重建多模态",
+      "rebuildMultimodalStarted": "多模态重建任务已开始",
+      "rebuildMultimodalStartedWithName": "已开始为《{{name}}》重建多模态，文档已移入“处理中”列表。",
+      "queuedRebuildSummary": "《{{name}}》正在重建多模态，稍后会刷新为最新状态。",
       "refreshTooltip": "复位文档清单",
       "pipelineStatusButton": "流水线",
       "pipelineStatusTooltip": "查看文档处理流水线状态",
@@ -140,6 +150,7 @@
         "all": "全部",
         "completed": "已完成",
         "preprocessed": "预处理",
+        "rebuildingMultimodal": "重建多模态中",
         "processing": "处理中",
         "pending": "等待中",
         "failed": "失败"
@@ -147,7 +158,8 @@
       "errors": {
         "loadFailed": "加载文档失败\n{{error}}",
         "scanFailed": "扫描文档失败\n{{error}}",
-        "scanProgressFailed": "获取扫描进度失败\n{{error}}"
+        "scanProgressFailed": "获取扫描进度失败\n{{error}}",
+        "rebuildMultimodalFailed": "重建多模态失败\n{{error}}"
       },
       "fileNameLabel": "文件名",
       "showButton": "显示",
@@ -164,6 +176,14 @@
       "startTime": "开始时间",
       "progress": "进度",
       "unit": "批",
+      "noActiveJob": "当前无活动任务",
+      "currentStep": "当前步骤",
+      "currentStepStarting": "正在启动...",
+      "remaining": "剩余",
+      "elapsed": "已用时间",
+      "eta": "预计剩余",
+      "etaUnavailable": "估算中...",
+      "totalDocuments": "文档总数",
       "pipelineMessages": "流水线消息",
       "cancelButton": "中断",
       "cancelTooltip": "中断流水线处理",
@@ -394,7 +414,13 @@
       "placeholder": "输入查询内容 (支持模式前缀: /<Query Mode>)",
       "error": "错误：获取响应失败",
       "queryModeError": "仅支持以下查询模式：{{modes}}",
-      "queryModePrefixInvalid": "无效的查询模式前缀。请使用：/<模式> [空格] 查询内容"
+      "queryModePrefixInvalid": "无效的查询模式前缀。请使用：/<模式> [空格] 查询内容",
+      "retrievedImages": "检索到的图片",
+      "imageLoadError": "图片加载失败",
+      "imageDescription": "详细描述",
+      "imageEntities": "识别到的实体",
+      "imageContext": "邻近文本上下文",
+      "imageContextChunks": "邻近文本分块"
     },
     "querySettings": {
       "parametersTitle": "参数",

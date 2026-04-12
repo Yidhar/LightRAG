@@ -4,6 +4,7 @@ import traceback
 import asyncio
 import inspect
 import os
+import re
 import time
 import warnings
 from dataclasses import asdict, dataclass, field, replace
@@ -71,6 +72,7 @@ from lightrag.kg.shared_storage import (
 )
 
 from lightrag.base import (
+    BaseBlobStorage,
     BaseGraphStorage,
     BaseKVStorage,
     BaseVectorStorage,
@@ -98,6 +100,7 @@ from lightrag.utils import (
     Tokenizer,
     TiktokenTokenizer,
     EmbeddingFunc,
+    MultimodalEmbeddingFunc,
     always_get_an_event_loop,
     compute_mdhash_id,
     lazy_external_import,
@@ -204,6 +207,547 @@ def _normalize_string_list(raw_values: Any, context: str = "") -> list[str]:
     return result
 
 
+def _build_multimodal_rebuild_status_record(
+    existing_status: dict[str, Any],
+    *,
+    track_id: str,
+    file_path: str,
+    stage: str,
+    error_msg: str = "",
+) -> dict[str, Any]:
+    """Build a transient doc_status row for an in-flight multimodal rebuild."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    existing_meta = dict(existing_status.get("metadata", {}) or {})
+    processing_start_time = existing_meta.get("processing_start_time")
+    if not isinstance(processing_start_time, int):
+        processing_start_time = int(time.time())
+
+    rebuild_meta = {
+        **existing_meta,
+        "processing_start_time": processing_start_time,
+        "multimodal_rebuild_in_progress": True,
+        "multimodal_rebuild_track_id": track_id,
+        "multimodal_rebuild_stage": stage,
+        "multimodal_rebuild_started_at": existing_meta.get(
+            "multimodal_rebuild_started_at", now_iso
+        ),
+    }
+    if error_msg:
+        rebuild_meta["multimodal_rebuild_failed"] = True
+    else:
+        rebuild_meta.pop("multimodal_rebuild_failed", None)
+
+    return {
+        **existing_status,
+        "status": DocStatus.PROCESSING,
+        "track_id": track_id,
+        "file_path": file_path or existing_status.get("file_path") or "unknown_source",
+        "updated_at": now_iso,
+        "error_msg": error_msg,
+        "metadata": rebuild_meta,
+    }
+
+
+def _coerce_bbox_number(value: Any) -> float | None:
+    """Best-effort float coercion for image bbox fields."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _format_image_bbox_text(raw_bbox: Any) -> str | None:
+    """Render a bbox dict into a compact human-readable location string."""
+    if not isinstance(raw_bbox, dict):
+        return None
+
+    x0 = _coerce_bbox_number(raw_bbox.get("x0", raw_bbox.get("l")))
+    y0 = _coerce_bbox_number(raw_bbox.get("y0", raw_bbox.get("t")))
+    x1 = _coerce_bbox_number(raw_bbox.get("x1", raw_bbox.get("r")))
+    y1 = _coerce_bbox_number(raw_bbox.get("y1", raw_bbox.get("b")))
+    width = _coerce_bbox_number(raw_bbox.get("width"))
+    height = _coerce_bbox_number(raw_bbox.get("height"))
+
+    if width is None and x0 is not None and x1 is not None:
+        width = max(0.0, x1 - x0)
+    if height is None and y0 is not None and y1 is not None:
+        height = max(0.0, y1 - y0)
+
+    parts: list[str] = []
+    if x0 is not None:
+        parts.append(f"x={x0:.1f}")
+    if y0 is not None:
+        parts.append(f"y={y0:.1f}")
+    if width is not None:
+        parts.append(f"w={width:.1f}")
+    if height is not None:
+        parts.append(f"h={height:.1f}")
+
+    if not parts:
+        return None
+    return ", ".join(parts)
+
+
+def _parse_image_caption_json(raw: str | None) -> dict[str, Any] | None:
+    """Robustly parse the JSON returned by ``vision_model_func``.
+
+    Vision models sometimes wrap their output in markdown fences or emit
+    leading/trailing prose despite being told not to. This helper strips
+    markdown fences, extracts the first top-level JSON object it can find,
+    and falls back to wrapping the raw text in a synthetic dict if parsing
+    ultimately fails (so the caller always gets *something* usable for the
+    annotation text stage).
+    """
+    if not raw:
+        return None
+
+    import json
+    import re
+
+    text = raw.strip()
+
+    # Strip ```json ... ``` or ``` ... ``` fences if present.
+    fence_match = re.match(
+        r"^```(?:json|JSON)?\s*\n(.*?)\n```\s*$", text, flags=re.DOTALL
+    )
+    if fence_match:
+        text = fence_match.group(1).strip()
+
+    # First attempt: parse the text directly.
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        pass
+
+    # Second attempt: locate the first balanced top-level object.
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            parsed = json.loads(text[start : end + 1])
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    # Last resort: wrap the raw text so the downstream annotation still
+    # has content to chunk and feed to entity extraction.
+    logger.warning(
+        f"_parse_image_caption_json: failed to parse vision response as JSON; "
+        f"falling back to raw text wrapper. First 120 chars: {raw[:120]!r}"
+    )
+    return {
+        "image_category": "Other",
+        "sub_type": "",
+        "caption": raw[:120].strip(),
+        "detailed_description": raw.strip(),
+        "detected_entities": [],
+        "key_attributes": {},
+    }
+
+
+def _caption_json_has_meaningful_summary(caption_json: Any) -> bool:
+    """Return True when cached caption JSON contains useful descriptive signal.
+
+    Rebuild flows often reuse cached caption_json by blob hash. If the cached
+    payload only contains a coarse category and no actual caption / detail /
+    entities, reusing it will permanently preserve an under-described image and
+    make repeated rebuilds look like a quality regression.
+    """
+    if not isinstance(caption_json, dict):
+        return False
+
+    def _has_text(value: Any) -> bool:
+        return isinstance(value, str) and bool(value.strip())
+
+    if _has_text(caption_json.get("caption")):
+        return True
+    if _has_text(caption_json.get("detailed_description")):
+        return True
+
+    detected_entities = caption_json.get("detected_entities")
+    if isinstance(detected_entities, list):
+        for entity in detected_entities:
+            if _has_text(entity):
+                return True
+
+    key_attributes = caption_json.get("key_attributes")
+    if isinstance(key_attributes, dict) and any(
+        _has_text(key) or _has_text(value)
+        for key, value in key_attributes.items()
+    ):
+        return True
+
+    return False
+
+
+def _build_image_page_locator(extra_metadata: dict[str, Any] | None) -> str | None:
+    if not isinstance(extra_metadata, dict):
+        return None
+
+    parts: list[str] = []
+    page = extra_metadata.get("source_page")
+    printed_page = extra_metadata.get("source_printed_page")
+    page_label = str(extra_metadata.get("source_page_label") or "").strip()
+    physical_page_text = ""
+    printed_page_text = ""
+
+    if page is not None:
+        try:
+            physical_page_text = f"PDF物理第 {int(page)} 页"
+        except (TypeError, ValueError):
+            physical_page_text = f"PDF物理第 {page} 页"
+        parts.append(physical_page_text)
+    if printed_page is not None:
+        try:
+            printed_page_text = str(int(printed_page))
+        except (TypeError, ValueError):
+            printed_page_text = str(printed_page)
+        if printed_page_text and printed_page_text != str(page):
+            parts.append(f"文档页码 {printed_page_text}")
+
+    if page_label:
+        if page_label != str(page) and page_label != printed_page_text:
+            parts.append(f"页标 {page_label}")
+    elif page is None and physical_page_text:
+        parts.append(physical_page_text)
+
+    if page is None and not parts and page_label:
+        parts.append(f"页标 {page_label}")
+
+    if not parts:
+        return None
+    return " · ".join(parts)
+
+
+def _ingest_bbox_signature(
+    raw_bbox: Any, quantum: float = 8.0
+) -> tuple[int, int, int, int] | None:
+    if not isinstance(raw_bbox, dict):
+        return None
+    try:
+        return (
+            int(round(float(raw_bbox.get("x0")) / quantum)),
+            int(round(float(raw_bbox.get("y0")) / quantum)),
+            int(round(float(raw_bbox.get("x1")) / quantum)),
+            int(round(float(raw_bbox.get("y1")) / quantum)),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _merge_extracted_image_for_ingest(
+    preferred: dict[str, Any], candidate: dict[str, Any]
+) -> dict[str, Any]:
+    def _prefer_longer_text(key: str) -> None:
+        current = str(preferred.get(key) or "").strip()
+        other = str(candidate.get(key) or "").strip()
+        if other and len(other) > len(current):
+            preferred[key] = candidate.get(key)
+
+    for text_key in ("caption_hint", "page_text_excerpt", "context_text"):
+        _prefer_longer_text(text_key)
+
+    for key in (
+        "bbox",
+        "mime_type",
+        "page_no",
+        "source_printed_page",
+        "source_page_label",
+        "pil_size",
+        "page_size",
+        "native_xref",
+    ):
+        if preferred.get(key) is None and candidate.get(key) is not None:
+            preferred[key] = candidate.get(key)
+
+    merged_chunk_ids = list(
+        dict.fromkeys(
+            [
+                *(
+                    preferred.get("context_chunk_ids")
+                    if isinstance(preferred.get("context_chunk_ids"), list)
+                    else []
+                ),
+                *(
+                    candidate.get("context_chunk_ids")
+                    if isinstance(candidate.get("context_chunk_ids"), list)
+                    else []
+                ),
+            ]
+        )
+    )
+    if merged_chunk_ids:
+        preferred["context_chunk_ids"] = merged_chunk_ids
+
+    merged_context_chunks: list[dict[str, Any]] = []
+    seen_chunk_keys: set[str] = set()
+    for source in (
+        preferred.get("context_chunks"),
+        candidate.get("context_chunks"),
+    ):
+        if not isinstance(source, list):
+            continue
+        for chunk in source:
+            if not isinstance(chunk, dict):
+                continue
+            chunk_key = str(chunk.get("chunk_id") or chunk)
+            if chunk_key in seen_chunk_keys:
+                continue
+            seen_chunk_keys.add(chunk_key)
+            merged_context_chunks.append(chunk)
+    if merged_context_chunks:
+        preferred["context_chunks"] = merged_context_chunks
+
+    merged_modes = list(
+        dict.fromkeys(
+            [
+                *(
+                    preferred.get("merged_extraction_modes")
+                    if isinstance(preferred.get("merged_extraction_modes"), list)
+                    else []
+                ),
+                str(preferred.get("extraction_mode") or "").strip(),
+                *(
+                    candidate.get("merged_extraction_modes")
+                    if isinstance(candidate.get("merged_extraction_modes"), list)
+                    else []
+                ),
+                str(candidate.get("extraction_mode") or "").strip(),
+            ]
+        )
+    )
+    preferred["merged_extraction_modes"] = [mode for mode in merged_modes if mode]
+    return preferred
+
+
+def _dedupe_extracted_images_for_multimodal_ingest(
+    extracted_images: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Conservative last-mile dedupe before captioning / embedding / chunk append."""
+    if not extracted_images:
+        return []
+
+    priority_by_mode = {
+        "pymupdf_native_image": 500,
+        "pymupdf_image_block": 450,
+        "docling_picture": 400,
+        "page_raster_recall_fallback": 150,
+        "page_raster_fallback": 100,
+    }
+
+    sortable_images = [
+        img for img in extracted_images if isinstance(img, dict) and img.get("bytes")
+    ]
+    sortable_images.sort(
+        key=lambda item: (
+            -priority_by_mode.get(str(item.get("extraction_mode") or "").strip(), 0),
+            -len(item.get("bytes") or b""),
+        )
+    )
+
+    deduped: list[dict[str, Any]] = []
+    seen_by_key: dict[tuple[Any, Any, Any], dict[str, Any]] = {}
+    passthrough_items = [
+        img
+        for img in extracted_images
+        if not isinstance(img, dict) or not img.get("bytes")
+    ]
+
+    for item in sortable_images:
+        blob_id = compute_mdhash_id(item.get("bytes"), prefix="img-")
+        page_no = item.get("page_no")
+        try:
+            page_key: Any = int(page_no)
+        except (TypeError, ValueError):
+            page_key = page_no
+        dedupe_key = (
+            blob_id,
+            page_key,
+            _ingest_bbox_signature(item.get("bbox")),
+        )
+        existing = seen_by_key.get(dedupe_key)
+        if existing is None:
+            cloned = dict(item)
+            seen_by_key[dedupe_key] = cloned
+            deduped.append(cloned)
+        else:
+            _merge_extracted_image_for_ingest(existing, item)
+
+    return [*deduped, *passthrough_items]
+
+
+def _image_annotation_to_text(
+    caption_json: dict[str, Any] | None,
+    *,
+    blob_id: str,
+    file_path: str,
+    extra_metadata: dict[str, Any] | None = None,
+    include_context: bool = True,
+) -> str:
+    """Render a caption JSON into the human-readable text block that will flow
+    through LightRAG's standard text ingestion pipeline.
+
+    The text is deliberately structured (labelled sections and bullet lines)
+    so that the existing ``entity_extraction`` prompt produces high-quality
+    results on it. Entities listed in ``detected_entities`` become prime
+    candidates for extraction since the prompt looks for named objects.
+    """
+    loc_parts: list[str] = []
+    if extra_metadata:
+        page_locator = _build_image_page_locator(extra_metadata)
+        if page_locator:
+            loc_parts.append(page_locator)
+        bbox_text = _format_image_bbox_text(extra_metadata.get("source_bbox"))
+        if bbox_text:
+            loc_parts.append(f"原图位置: {bbox_text}")
+        page_picture_index = extra_metadata.get("page_picture_index")
+        if page_picture_index is not None:
+            try:
+                loc_parts.append(f"页内第 {int(page_picture_index) + 1} 张图")
+            except (TypeError, ValueError):
+                pass
+        source_pdf = extra_metadata.get("source_pdf")
+        if source_pdf:
+            loc_parts.append(f"来源文件: {source_pdf}")
+    loc = " · ".join(loc_parts) if loc_parts else file_path
+
+    lines: list[str] = []
+    lines.append(f"【图像】 blob_id={blob_id}")
+    lines.append(f"【位置】 {loc}")
+    extraction_mode = ""
+    caption_hint = ""
+    context_text = ""
+    if extra_metadata:
+        extraction_mode = str(extra_metadata.get("extraction_mode") or "").strip()
+        caption_hint = str(extra_metadata.get("caption_hint") or "").strip()
+        context_text = str(
+            extra_metadata.get("context_text")
+            or extra_metadata.get("page_text_excerpt")
+            or ""
+        ).strip()
+    if extraction_mode:
+        lines.append(f"【提取方式】 {extraction_mode}")
+    if extra_metadata:
+        merged_modes = extra_metadata.get("merged_extraction_modes")
+        if isinstance(merged_modes, list):
+            merged_modes = [str(mode).strip() for mode in merged_modes if str(mode).strip()]
+            if merged_modes:
+                lines.append(f"【合并提取来源】 {'、'.join(merged_modes)}")
+        native_xref = extra_metadata.get("native_xref")
+        if native_xref is not None:
+            lines.append(f"【PDF原生图像】 xref={native_xref}")
+
+    if not caption_json:
+        lines.append("【说明】 未获得视觉模型标注。")
+        if caption_hint:
+            lines.append(f"【页面提示】 {caption_hint}")
+        if include_context:
+            raw_context_chunks = (
+                extra_metadata.get("context_chunks") if extra_metadata else None
+            )
+            if isinstance(raw_context_chunks, list) and raw_context_chunks:
+                lines.append("【图像邻近上下文块】")
+                for chunk in raw_context_chunks[:3]:
+                    if not isinstance(chunk, dict):
+                        continue
+                    chunk_order_index = chunk.get("chunk_order_index")
+                    try:
+                        chunk_label = f"Chunk #{int(chunk_order_index) + 1}"
+                    except (TypeError, ValueError):
+                        chunk_label = "Chunk"
+                    chunk_content = str(chunk.get("content") or "").strip()
+                    if not chunk_content:
+                        continue
+                    lines.append(f"- {chunk_label}: {chunk_content[:500]}")
+            if context_text:
+                lines.append("【图像邻近上下文】")
+                lines.append(context_text[:1600])
+        return "\n".join(lines) + "\n"
+
+    category = caption_json.get("image_category", "")
+    sub_type = caption_json.get("sub_type", "")
+    if category or sub_type:
+        lines.append(f"【类型】 {category}" + (f" / {sub_type}" if sub_type else ""))
+
+    caption = caption_json.get("caption", "")
+    if caption:
+        lines.append(f"【概述】 {caption}")
+
+    detailed = caption_json.get("detailed_description", "")
+    if detailed:
+        lines.append(f"【详细描述】 {detailed}")
+
+    entities = caption_json.get("detected_entities")
+    if isinstance(entities, list) and entities:
+        joined = "、".join(str(e) for e in entities if e)
+        if joined:
+            lines.append(f"【识别到的对象】 {joined}")
+
+    key_attrs = caption_json.get("key_attributes")
+    if isinstance(key_attrs, dict) and key_attrs:
+        attr_parts = []
+        for k, v in key_attrs.items():
+            if isinstance(v, (list, tuple)):
+                v_str = "、".join(str(x) for x in v)
+            else:
+                v_str = str(v)
+            attr_parts.append(f"{k}: {v_str}")
+        if attr_parts:
+            lines.append("【关键属性】 " + "; ".join(attr_parts))
+
+    if caption_hint:
+        lines.append(f"【页面提示】 {caption_hint}")
+    if include_context:
+        context_chunks = []
+        if extra_metadata:
+            raw_context_chunks = extra_metadata.get("context_chunks")
+            if isinstance(raw_context_chunks, list):
+                context_chunks = raw_context_chunks
+        if context_chunks:
+            lines.append("【图像邻近上下文块】")
+            for chunk in context_chunks[:3]:
+                if not isinstance(chunk, dict):
+                    continue
+                chunk_order_index = chunk.get("chunk_order_index")
+                try:
+                    chunk_label = f"Chunk #{int(chunk_order_index) + 1}"
+                except (TypeError, ValueError):
+                    chunk_label = "Chunk"
+                chunk_content = str(chunk.get("content") or "").strip()
+                if not chunk_content:
+                    continue
+                lines.append(f"- {chunk_label}: {chunk_content[:500]}")
+        if context_text:
+            lines.append("【图像邻近上下文】")
+            lines.append(context_text[:1600])
+
+    return "\n".join(lines) + "\n"
+
+
+def _strip_appended_image_annotations(text: str) -> str:
+    """Remove the synthetic image-annotation appendix from a full_doc payload.
+
+    ``ainsert_document_with_images`` appends a deterministic marker section to
+    the document text before sending it through the normal text/KG pipeline.
+    When we need to rebuild multimodal data from already-stored image assets
+    (because the original PDF is no longer on disk), we should start from the
+    original document body instead of duplicating those annotation blocks.
+    """
+    if not text:
+        return ""
+    marker = "===== 本文档中的图像(自动提取)====="
+    marker_index = text.find(marker)
+    if marker_index == -1:
+        return text
+    return text[:marker_index].rstrip()
+
+
 @final
 @dataclass
 class LightRAG:
@@ -229,6 +773,31 @@ class LightRAG:
 
     doc_status_storage: str = field(default="JsonDocStatusStorage")
     """Storage type for tracking document processing statuses."""
+
+    image_blob_storage: str = field(default="FileSystemBlobStorage")
+    """Storage backend for raw image (and other multimodal) binary blobs.
+
+    Only instantiated when ``image_embedding_func`` is set. When the
+    multimodal pipeline is unused, this field has no effect — existing
+    text-only deployments behave exactly as before.
+    """
+
+    image_cosine_threshold: float = field(
+        default=float(os.getenv("IMAGE_COSINE_THRESHOLD", "0.05"))
+    )
+    """Minimum cosine similarity threshold for ``images_vdb`` retrieval.
+
+    Cross-modal (text query → image vector) similarities are systematically
+    lower than text-text similarities in aligned-space multimodal models —
+    typical range is 0.05 to 0.30 for semantically matching pairs, vs
+    0.6+ for text-text pairs. The default ``cosine_better_than_threshold``
+    of 0.2 (calibrated for text retrieval) would silently drop most
+    legitimate cross-modal matches.
+
+    Only used when the multimodal pipeline is enabled. Override via the
+    ``IMAGE_COSINE_THRESHOLD`` environment variable or this constructor
+    parameter.
+    """
 
     # Workspace
     # ---
@@ -365,6 +934,18 @@ class LightRAG:
     embedding_func: EmbeddingFunc | None = field(default=None)
     """Function for computing text embeddings. Must be set before use."""
 
+    image_embedding_func: MultimodalEmbeddingFunc | None = field(default=None)
+    """Optional multimodal embedding function for the image pipeline.
+
+    When set, LightRAG initializes the image blob store, image metadata KV
+    store, and (in Phase 3+) an image vector store alongside the existing
+    text stack. When None (the default), the multimodal pipeline is
+    disabled and the text-only behaviour is unchanged.
+
+    Use :func:`lightrag.llm.tongyi.tongyi_multimodal_embedding` or any
+    custom :class:`~lightrag.utils.MultimodalEmbeddingFunc` implementation.
+    """
+
     embedding_token_limit: int | None = field(default=None, init=False)
     """Token limit for embedding model. Set automatically from embedding_func.max_token_size in __post_init__."""
 
@@ -398,6 +979,39 @@ class LightRAG:
 
     llm_model_func: Callable[..., object] | None = field(default=None)
     """Function for interacting with the large language model (LLM). Must be set before use."""
+
+    query_llm_model_func: Callable[..., object] | None = field(default=None)
+    """Optional separate LLM function used exclusively for query-time answer
+    generation (the final LLM call in ``kg_query`` / ``naive_query``).
+
+    When set, the query path uses this function for generating the answer
+    while indexing (entity extraction, description summarization) continues
+    to use ``llm_model_func``. Keyword extraction during queries also stays
+    on ``llm_model_func`` since it's a fast structured-output call that
+    doesn't benefit from reasoning.
+
+    Primary use case: running the same model with different parameters —
+    e.g. ``enable_thinking=false`` for indexing (cost-sensitive, high
+    throughput) and ``enable_thinking=true`` for queries (quality-sensitive,
+    low volume).
+
+    When None (the default), all LLM calls go through ``llm_model_func``
+    and behavior is identical to the pre-Phase-6 single-function setup.
+    """
+
+    vision_model_func: Callable[..., object] | None = field(default=None)
+    """Optional vision-capable LLM function for image captioning.
+
+    Used by the multimodal pipeline (Phase 3+) to turn an image into
+    a structured JSON annotation that then flows into the normal text
+    chunking + entity-extraction path. Typically a ``functools.partial``
+    of :func:`lightrag.llm.openai.openai_complete_if_cache` bound to a
+    vision model (e.g. ``qwen3-vl-plus`` via the DashScope compatible
+    endpoint) — see ``.env`` ``VISION_*`` variables.
+
+    When None, no image captioning is performed and the image pipeline
+    degrades to embedding-only (still useful for cross-modal search).
+    """
 
     llm_model_name: str = field(default="gpt-4o-mini")
     """Name of the LLM model used for generating responses."""
@@ -735,6 +1349,64 @@ class LightRAG:
             embedding_func=None,
         )
 
+        # --- Multimodal pipeline storages (gated) ---------------------------
+        # These are only instantiated when the user wires in a multimodal
+        # embedding function. For text-only deployments, all four remain
+        # None and no new storage files/directories are created.
+        self.image_blob_store: BaseBlobStorage | None = None
+        self.image_metadata: BaseKVStorage | None = None
+        self.images_vdb: BaseVectorStorage | None = None
+        if self.image_embedding_func is not None:
+            image_blob_storage_cls = self._get_storage_class(self.image_blob_storage)
+            self.image_blob_store = image_blob_storage_cls(
+                namespace=NameSpace.BLOB_STORE_IMAGES,
+                workspace=self.workspace,
+                global_config=global_config,
+            )
+            # Sidecar KV store for image metadata (caption JSON, source-doc
+            # backlink, page / bbox for PDF-extracted images, etc.). Reuses
+            # the same KV backend as text chunks — no new dependencies.
+            self.image_metadata = self.key_string_value_json_storage_cls(  # type: ignore
+                namespace=NameSpace.KV_STORE_IMAGE_META,
+                workspace=self.workspace,
+                embedding_func=self.embedding_func,
+            )
+            # Image vector store — backed by the multimodal embedding function.
+            # Upserts use upsert_with_embeddings() to bypass the text-oriented
+            # embedding_func call path (image bytes cannot flow through
+            # text_encode). Queries use the default __call__ -> text_encode
+            # routing in MultimodalEmbeddingFunc, which gives cross-modal
+            # retrieval (text query -> image results) for free without
+            # touching the vector store internals.
+            self.images_vdb = self.vector_db_storage_cls(  # type: ignore
+                namespace=NameSpace.VECTOR_STORE_IMAGES,
+                workspace=self.workspace,
+                embedding_func=self.image_embedding_func,
+                meta_fields={
+                    "blob_id",
+                    "blob_ref",
+                    "caption",
+                    "image_category",
+                    "sub_type",
+                    "full_doc_id",
+                    "file_path",
+                    "source_page",
+                },
+            )
+            # Cross-modal retrieval calibration: the 0.2 default threshold
+            # baked into vector_db_storage_cls_kwargs is tuned for text-text
+            # similarity and would silently drop most legitimate image hits.
+            # Override with the multimodal-aware threshold.
+            self.images_vdb.cosine_better_than_threshold = self.image_cosine_threshold
+            logger.info(
+                f"[{self.workspace}] Multimodal pipeline enabled: "
+                f"blob_store={self.image_blob_storage} "
+                f"image_embedding_func={getattr(self.image_embedding_func, 'model_name', '?')} "
+                f"image_embedding_dim={self.image_embedding_func.embedding_dim} "
+                f"image_cosine_threshold={self.image_cosine_threshold} "
+                f"vision_model_func={'set' if self.vision_model_func else 'unset'}"
+            )
+
         # Directly use llm_response_cache, don't create a new object
         hashing_kv = self.llm_response_cache
 
@@ -750,6 +1422,23 @@ class LightRAG:
                 **self.llm_model_kwargs,
             )
         )
+
+        # Query-specific LLM: same priority queue setup as the indexing
+        # LLM but potentially different model parameters (e.g.
+        # enable_thinking=true for higher answer quality). When not set,
+        # kg_query / naive_query fall back to llm_model_func transparently.
+        if self.query_llm_model_func is not None:
+            self.query_llm_model_func = priority_limit_async_func_call(
+                self.llm_model_max_async,
+                llm_timeout=self.default_llm_timeout,
+                queue_name="Query LLM func",
+            )(
+                partial(
+                    self.query_llm_model_func,  # type: ignore
+                    hashing_kv=hashing_kv,
+                    **self.llm_model_kwargs,
+                )
+            )
 
         self._storages_status = StoragesStatus.CREATED
 
@@ -785,6 +1474,10 @@ class LightRAG:
                 self.chunk_entity_relation_graph,
                 self.llm_response_cache,
                 self.doc_status,
+                # Multimodal stores — None unless image_embedding_func is set.
+                self.image_blob_store,
+                self.image_metadata,
+                self.images_vdb,
             ):
                 if storage:
                     # logger.debug(f"Initializing storage: {storage}")
@@ -809,6 +1502,10 @@ class LightRAG:
                 ("chunk_entity_relation_graph", self.chunk_entity_relation_graph),
                 ("llm_response_cache", self.llm_response_cache),
                 ("doc_status", self.doc_status),
+                # Multimodal stores — None unless image_embedding_func is set.
+                ("image_blob_store", self.image_blob_store),
+                ("image_metadata", self.image_metadata),
+                ("images_vdb", self.images_vdb),
             ]
 
             # Finalize each storage individually to ensure one failure doesn't prevent others from closing
@@ -1268,6 +1965,1319 @@ class LightRAG:
 
         return track_id
 
+    async def ainsert_image(
+        self,
+        image: "bytes | str | Path",
+        *,
+        file_path: str | None = None,
+        mime_type: str = "image/jpeg",
+        extra_metadata: dict[str, Any] | None = None,
+        ids: str | None = None,
+        track_id: str | None = None,
+    ) -> str:
+        """Insert a single image into the multimodal pipeline.
+
+        Pipeline stages:
+            1. Normalize the input to raw bytes.
+            2. Persist the original bytes to the blob store (content-hashed id).
+            3. Generate a structured caption via ``vision_model_func`` (if set).
+            4. Compute the image-side embedding via ``image_embedding_func``.
+            5. Upsert the vector into ``images_vdb`` with meta_fields populated
+               from the caption JSON.
+            6. Upsert the sidecar record into the ``image_metadata`` KV store.
+            7. Thread the human-readable annotation text through the standard
+               text ingestion pipeline so entity extraction populates the KG
+               with entities detected in the image. This means the knowledge
+               graph learns about objects IN the image (poplar trees, tower
+               cranes, rebar, ...) from the caption text, without needing the
+               vision model at query time.
+
+        Args:
+            image: The image content. Accepts raw ``bytes``, a local file path
+                (``str`` or ``Path``), or anything else ``Path(...).read_bytes()``
+                can handle.
+            file_path: Logical file path recorded in the KG and blob sidecar.
+                When ``image`` is a path and this is ``None``, it defaults to
+                ``str(image)``. For bytes-only input, leave it ``None`` and a
+                synthetic ``image://<blob_id>`` reference is used.
+            mime_type: MIME type for blob storage and vision model forwarding.
+                Defaults to ``"image/jpeg"``.
+            extra_metadata: Arbitrary user metadata merged into the blob
+                sidecar and into ``image_metadata``. Reserved keys:
+                ``source_page``, ``source_doc_id``, ``source_file_path``,
+                ``total_pages``.
+            ids: Optional explicit document id for the KG linkage. If omitted,
+                a content-hashed ``doc-img-<...>`` id is derived from the image
+                bytes.
+            track_id: Optional tracking id for the pipeline. If omitted a new
+                one is generated with prefix ``insert_image``.
+
+        Returns:
+            The tracking id for monitoring pipeline progress (mirrors
+            :meth:`ainsert`).
+
+        Raises:
+            RuntimeError: If ``image_embedding_func`` is not configured.
+            FileNotFoundError: If ``image`` is a path that does not exist.
+            TypeError: If ``image`` is not bytes or a path-like.
+        """
+        if self.image_embedding_func is None or self.images_vdb is None:
+            raise RuntimeError(
+                "ainsert_image requires the multimodal pipeline. Pass "
+                "image_embedding_func=... when constructing LightRAG."
+            )
+        if self.image_blob_store is None or self.image_metadata is None:
+            raise RuntimeError(
+                "ainsert_image called before initialize_storages(). "
+                "Call `await rag.initialize_storages()` first."
+            )
+
+        # --- (1) Normalize input to bytes ---
+        from pathlib import Path as _Path
+
+        if isinstance(image, (bytes, bytearray, memoryview)):
+            image_bytes = bytes(image)
+        elif isinstance(image, (str, _Path)):
+            image_path_obj = _Path(image)
+            if not image_path_obj.is_file():
+                raise FileNotFoundError(f"ainsert_image: image file not found: {image}")
+            image_bytes = image_path_obj.read_bytes()
+            if file_path is None:
+                file_path = str(image_path_obj)
+        else:
+            raise TypeError(
+                f"ainsert_image: image must be bytes or a path-like, "
+                f"got {type(image).__name__}"
+            )
+
+        if not image_bytes:
+            raise ValueError("ainsert_image: image is empty (0 bytes)")
+
+        # --- (2) Derive content-hashed ids ---
+        blob_id = compute_mdhash_id(image_bytes, prefix="img-")
+        doc_id = ids or compute_mdhash_id(image_bytes, prefix="doc-img-")
+        effective_file_path = file_path or f"image://{blob_id}"
+
+        if track_id is None:
+            track_id = generate_track_id("insert_image")
+
+        logger.info(
+            f"[{self.workspace}] ainsert_image: blob_id={blob_id} "
+            f"doc_id={doc_id} size={len(image_bytes)} file_path={effective_file_path}"
+        )
+
+        # --- (3) Persist raw bytes to the blob store ---
+        blob_sidecar_meta = {
+            "source_doc_id": doc_id,
+            "source_file_path": effective_file_path,
+            **(extra_metadata or {}),
+        }
+        blob_ref = await self.image_blob_store.put(
+            blob_id,
+            image_bytes,
+            content_type=mime_type,
+            metadata=blob_sidecar_meta,
+        )
+
+        # --- (4) Vision caption (optional, falls back gracefully) ---
+        language = self.addon_params.get("language", "English")
+        caption_json: dict[str, Any] | None = None
+        if self.vision_model_func is not None:
+            try:
+                caption_raw = await self.vision_model_func(
+                    prompt=PROMPTS["image_caption_user_prompt"].format(
+                        language=language
+                    ),
+                    system_prompt=PROMPTS["image_caption_system_prompt"].format(
+                        language=language
+                    ),
+                    image_data=image_bytes,
+                    image_mime_type=mime_type,
+                )
+                caption_json = _parse_image_caption_json(caption_raw)
+            except Exception as e:
+                logger.warning(
+                    f"[{self.workspace}] ainsert_image: vision captioning "
+                    f"failed for {blob_id}: {type(e).__name__}: {e}"
+                )
+                caption_json = None
+        else:
+            logger.debug(
+                f"[{self.workspace}] ainsert_image: no vision_model_func "
+                f"configured, skipping caption generation for {blob_id}"
+            )
+
+        annotation_text = _image_annotation_to_text(
+            caption_json,
+            blob_id=blob_id,
+            file_path=effective_file_path,
+            extra_metadata=extra_metadata,
+        )
+
+        # --- (5) Compute image-side embedding ---
+        vectors = await self.image_embedding_func.image_encode([image_bytes])
+        if vectors is None or len(vectors) != 1:
+            raise RuntimeError(
+                f"ainsert_image: image_embedding_func.image_encode returned "
+                f"unexpected shape for {blob_id}"
+            )
+        image_vector = vectors[0]
+
+        # --- (6) Upsert vector into images_vdb (bypasses embedding_func) ---
+        caption_safe = caption_json or {}
+        vdb_record: dict[str, Any] = {
+            "blob_id": blob_id,
+            "blob_ref": blob_ref,
+            "caption": str(caption_safe.get("caption", ""))[:500],
+            "image_category": str(caption_safe.get("image_category", "")),
+            "sub_type": str(caption_safe.get("sub_type", "")),
+            "full_doc_id": doc_id,
+            "file_path": effective_file_path,
+        }
+        if extra_metadata and "source_page" in extra_metadata:
+            vdb_record["source_page"] = extra_metadata["source_page"]
+        await self.images_vdb.upsert_with_embeddings(
+            data={blob_id: vdb_record},
+            embeddings={blob_id: image_vector},
+        )
+
+        # --- (7) Upsert sidecar into image_metadata KV ---
+        await self.image_metadata.upsert(
+            {
+                blob_id: {
+                    "blob_ref": blob_ref,
+                    "content_type": mime_type,
+                    "caption_json": caption_json,
+                    "annotation_text": annotation_text,
+                    "source_doc_id": doc_id,
+                    "source_file_path": effective_file_path,
+                    "source_page": (
+                        extra_metadata.get("source_page")
+                        if isinstance(extra_metadata, dict)
+                        else None
+                    ),
+                    "source_bbox": (
+                        extra_metadata.get("source_bbox")
+                        if isinstance(extra_metadata, dict)
+                        else None
+                    ),
+                    "picture_index": (
+                        extra_metadata.get("picture_index")
+                        if isinstance(extra_metadata, dict)
+                        else None
+                    ),
+                    "context_text": (
+                        extra_metadata.get("context_text")
+                        if isinstance(extra_metadata, dict)
+                        else None
+                    ),
+                    "extraction_mode": (
+                        extra_metadata.get("extraction_mode")
+                        if isinstance(extra_metadata, dict)
+                        else None
+                    ),
+                    "extra": extra_metadata or {},
+                }
+            }
+        )
+
+        # --- (8) Thread annotation text through the standard text pipeline ---
+        # This is what lets entity extraction populate the KG with the
+        # objects/entities detected IN the image (trees, cranes, rebar, ...).
+        # The doc_id and file_path flow through unchanged so KG source_ids
+        # point back at this image, enabling "which image mentions X?" queries.
+        await self.apipeline_enqueue_documents(
+            input=annotation_text,
+            ids=doc_id,
+            file_paths=effective_file_path,
+            track_id=track_id,
+        )
+        await self.apipeline_process_enqueue_documents()
+
+        # --- (9) Reverse index: doc_status[doc_id].metadata.image_ids ---
+        # Write the blob_id into the doc's metadata so the
+        # GET /documents/{doc_id}/images endpoint can enumerate images for
+        # a document in O(1). Read-modify-write because Phase 5 will extend
+        # this to cover PDF documents that contain multiple embedded images.
+        #
+        # CRITICAL: JsonDocStatusStorage.upsert() uses dict.update() which
+        # REPLACES the entire value at each key. We MUST spread all existing
+        # fields into the merged record, otherwise status / file_path /
+        # content_summary / chunks_count / etc. are wiped out and subsequent
+        # pipeline calls crash on the record's missing 'status' field.
+        try:
+            existing_status = await self.doc_status.get_by_id(doc_id)
+            if existing_status is None:
+                logger.warning(
+                    f"[{self.workspace}] doc_status missing for {doc_id} "
+                    "after apipeline_process_enqueue_documents — skipping "
+                    "reverse image index write."
+                )
+            else:
+                existing_meta = existing_status.get("metadata", {}) or {}
+                existing_image_ids = list(existing_meta.get("image_ids") or [])
+                if blob_id not in existing_image_ids:
+                    existing_image_ids.append(blob_id)
+                merged_meta = {
+                    **existing_meta,
+                    "modality": "image"
+                    if existing_meta.get("modality") in (None, "image")
+                    else "mixed",
+                    "image_ids": existing_image_ids,
+                    "source_kind": existing_meta.get(
+                        "source_kind", "direct_image_upload"
+                    ),
+                }
+                # Spread the existing full record first so fields like
+                # status, file_path, content_summary, chunks_count,
+                # chunks_list, created_at, updated_at, track_id are all
+                # preserved. Then override metadata and multimodal_processed.
+                merged_record = {
+                    **existing_status,
+                    "metadata": merged_meta,
+                    "multimodal_processed": True,
+                }
+                await self.doc_status.upsert({doc_id: merged_record})
+        except Exception as e:
+            logger.warning(
+                f"[{self.workspace}] Failed to write reverse image index "
+                f"for doc_id={doc_id}: {type(e).__name__}: {e}"
+            )
+
+        # Flush image-side stores alongside the text pipeline's index_done.
+        # apipeline_process_enqueue_documents persists chunks/entities/graph
+        # but does not know about image_blob_store / image_metadata / images_vdb.
+        await asyncio.gather(
+            self.image_blob_store.index_done_callback(),
+            self.image_metadata.index_done_callback(),
+            self.images_vdb.index_done_callback(),
+            self.doc_status.index_done_callback(),
+        )
+
+        logger.info(
+            f"[{self.workspace}] ainsert_image complete: blob_id={blob_id} "
+            f"category={caption_safe.get('image_category', 'unknown')} "
+            f"track_id={track_id}"
+        )
+        return track_id
+
+    async def ainsert_document_with_images(
+        self,
+        text_content: str,
+        extracted_images: list[dict[str, Any]],
+        *,
+        file_path: str,
+        ids: str | None = None,
+        track_id: str | None = None,
+        reuse_existing_images: bool = True,
+        allow_existing_doc_id: bool = False,
+        initial_doc_status: DocStatus = DocStatus.PENDING,
+        initial_doc_metadata: dict[str, Any] | None = None,
+    ) -> str:
+        """Ingest a document whose text AND embedded images should both
+        participate in the multimodal pipeline.
+
+        This is the Phase 5 entry point for PDFs (and eventually DOCX /
+        PPTX) parsed by ``_convert_with_docling_multimodal``. It ensures
+        that:
+
+        1. Every embedded image is persisted to the blob store, captioned
+           by ``vision_model_func``, embedded by ``image_embedding_func``,
+           and upserted into ``images_vdb`` and ``image_metadata``.
+        2. All image annotations are appended to the parent document's
+           text so a single trip through the text pipeline populates the
+           KG with entities detected in EVERY image as well as the body
+           text. The KG source_id for those entities points at the parent
+           document, which means "which image mentions rebar?" queries
+           can fan out through the parent doc's image_ids list.
+        3. The parent ``doc_id`` is shared by every extracted image, so
+           the reverse index in ``doc_status[doc_id].metadata.image_ids``
+           enumerates all images for the document and
+           ``GET /documents/{doc_id}/images`` returns them in a single
+           call.
+
+        When ``extracted_images`` is empty, this method degrades to a
+        plain text ingest (equivalent to ``ainsert(text_content)``), so
+        callers can use it unconditionally when Docling's picture
+        extraction returns no pictures.
+
+        Args:
+            text_content: The full text/markdown of the document (typically
+                from ``_convert_with_docling_multimodal``).
+            extracted_images: List of picture info dicts as returned by
+                ``_convert_with_docling_multimodal``. Each must have
+                ``bytes``, ``mime_type``, and is expected to optionally
+                carry ``page_no``, ``bbox``, ``caption_hint``,
+                ``picture_index``, ``pil_size``.
+            file_path: The original document path (PDF / DOCX / PPTX).
+                Used as the file_path for KG citation and for the sidecar
+                metadata on each stored blob.
+            ids: Optional explicit parent doc_id. Defaults to a content
+                hash of ``text_content``.
+            track_id: Optional tracking id. Defaults to a new
+                ``insert_doc_images`` prefixed id.
+            reuse_existing_images: When True, try to reuse any existing
+                caption JSON and image embeddings for matching content-hashed
+                image blobs instead of re-running the vision model and
+                image encoder. Blob sidecars and annotation_text are still
+                refreshed so page / bbox / context metadata stay current.
+            allow_existing_doc_id: When True, allow Step A to overwrite an
+                existing doc_status/full_docs row for ``ids``. Used by
+                in-place multimodal rebuild so the document stays visible
+                while its content is regenerated.
+            initial_doc_status: Initial doc status written during Step A.
+                Defaults to ``PENDING`` for normal ingest; rebuild flows may
+                use ``PROCESSING`` so the document appears under the active
+                processing bucket immediately.
+            initial_doc_metadata: Optional metadata to seed on the Step A
+                doc_status row before the text pipeline takes over.
+
+        Returns:
+            The pipeline tracking id.
+
+        Raises:
+            RuntimeError: If the multimodal pipeline is not configured.
+        """
+        if self.image_embedding_func is None or self.images_vdb is None:
+            raise RuntimeError(
+                "ainsert_document_with_images requires the multimodal "
+                "pipeline. Pass image_embedding_func=... when constructing "
+                "LightRAG."
+            )
+        if self.image_blob_store is None or self.image_metadata is None:
+            raise RuntimeError(
+                "ainsert_document_with_images called before "
+                "initialize_storages(). Call `await rag.initialize_storages()` "
+                "first."
+            )
+        if not text_content and not extracted_images:
+            raise ValueError(
+                "ainsert_document_with_images: text_content is empty and "
+                "no images were extracted — nothing to ingest."
+            )
+        raw_extracted_image_count = len(extracted_images)
+        extracted_images = _dedupe_extracted_images_for_multimodal_ingest(
+            extracted_images
+        )
+        if raw_extracted_image_count != len(extracted_images):
+            logger.info(
+                f"[{self.workspace}] multimodal ingest deduped extracted images: "
+                f"{raw_extracted_image_count} -> {len(extracted_images)}"
+            )
+        if not text_content and not extracted_images:
+            raise ValueError(
+                "ainsert_document_with_images: all extracted images were "
+                "filtered/deduplicated away and text_content is empty — "
+                "nothing to ingest."
+            )
+
+        # Parent document id: hash of the extracted text, same convention
+        # as the plain `ainsert` path so that re-ingesting the same doc is
+        # idempotent and doesn't create duplicates.
+        parent_doc_id = ids or compute_mdhash_id(
+            text_content or file_path, prefix="doc-"
+        )
+        if track_id is None:
+            track_id = generate_track_id("insert_doc_images")
+
+        effective_file_path = file_path or f"doc://{parent_doc_id}"
+        language = self.addon_params.get("language", "English")
+
+        logger.info(
+            f"[{self.workspace}] ainsert_document_with_images: "
+            f"doc_id={parent_doc_id} file_path={effective_file_path} "
+            f"text_len={len(text_content or '')} "
+            f"n_images={len(extracted_images)}"
+        )
+
+        await self._attach_context_chunks_to_extracted_images(
+            text_content, extracted_images
+        )
+
+        # --- Process images concurrently ---
+        # Each image needs: blob write + vision caption (~15s) + embedding
+        # (~1s) + vdb upsert + metadata upsert. Serial processing of 50
+        # images takes ~13 min; 8-way concurrency brings it to ~2 min.
+        image_concurrency = min(self.llm_model_max_async, 8)
+        sem = asyncio.Semaphore(image_concurrency)
+        caption_prompt = PROMPTS["image_caption_user_prompt"].format(
+            language=language
+        )
+        caption_sys = PROMPTS["image_caption_system_prompt"].format(
+            language=language
+        )
+        n_total = len(extracted_images)
+        existing_meta_by_blob: dict[str, dict[str, Any]] = {}
+        existing_vectors_by_blob: dict[str, Any] = {}
+
+        if reuse_existing_images and extracted_images:
+            raw_blob_ids: list[str] = []
+            for img_info in extracted_images:
+                img_bytes = img_info.get("bytes")
+                if img_bytes:
+                    raw_blob_ids.append(compute_mdhash_id(img_bytes, prefix="img-"))
+            unique_blob_ids = list(dict.fromkeys(raw_blob_ids))
+            if unique_blob_ids:
+                try:
+                    metadata_records, vectors_by_blob = await asyncio.gather(
+                        self.image_metadata.get_by_ids(unique_blob_ids),
+                        self.images_vdb.get_vectors_by_ids(unique_blob_ids),
+                    )
+                    for blob_id, metadata_record in zip(
+                        unique_blob_ids, metadata_records
+                    ):
+                        if isinstance(metadata_record, dict):
+                            existing_meta_by_blob[blob_id] = metadata_record
+                    if isinstance(vectors_by_blob, dict):
+                        existing_vectors_by_blob = vectors_by_blob
+                    logger.info(
+                        f"[{self.workspace}] image-cache probe: "
+                        f"{len(existing_meta_by_blob)}/{len(unique_blob_ids)} captions, "
+                        f"{len(existing_vectors_by_blob)}/{len(unique_blob_ids)} embeddings reusable"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[{self.workspace}] image cache probe failed: "
+                        f"{type(e).__name__}: {e}"
+                    )
+
+        async def _process_one_image(
+            idx: int, img_info: dict[str, Any]
+        ) -> dict[str, Any] | None:
+            async with sem:
+                img_bytes = img_info.get("bytes")
+                if not img_bytes:
+                    return None
+                mime_type = img_info.get("mime_type") or "image/png"
+                page_no = img_info.get("page_no")
+                source_bbox = img_info.get("bbox")
+                picture_index = img_info.get("picture_index")
+                page_picture_index = img_info.get("page_picture_index")
+                extraction_mode = img_info.get("extraction_mode")
+                source_printed_page = img_info.get("source_printed_page")
+                source_page_label = img_info.get("source_page_label")
+                native_xref = img_info.get("native_xref")
+                merged_extraction_modes = img_info.get("merged_extraction_modes")
+                caption_hint = img_info.get("caption_hint")
+                page_text_excerpt = img_info.get("page_text_excerpt")
+                context_text = img_info.get("context_text")
+                context_chunk_ids = img_info.get("context_chunk_ids")
+                context_chunks = img_info.get("context_chunks")
+
+                blob_id = compute_mdhash_id(img_bytes, prefix="img-")
+                existing_meta = existing_meta_by_blob.get(blob_id) or {}
+                logger.info(
+                    f"[{self.workspace}] image [{idx+1}/{n_total}] "
+                    f"page={page_no} blob_id={blob_id} processing..."
+                )
+
+                # (a) Blob store
+                try:
+                        blob_ref = await self.image_blob_store.put(
+                            blob_id,
+                            img_bytes,
+                            content_type=mime_type,
+                            metadata={
+                                "source_doc_id": parent_doc_id,
+                                "source_file_path": effective_file_path,
+                                "source_page": page_no,
+                                "source_printed_page": source_printed_page,
+                                "source_page_label": source_page_label,
+                                "source_bbox": source_bbox,
+                                "picture_index": picture_index,
+                                "page_picture_index": page_picture_index,
+                                "extraction_mode": extraction_mode,
+                                "native_xref": native_xref,
+                                "merged_extraction_modes": merged_extraction_modes,
+                                "context_text": context_text,
+                                "context_chunk_ids": context_chunk_ids,
+                                "context_chunks": context_chunks,
+                            },
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"[{self.workspace}] blob_store.put failed for "
+                        f"picture {picture_index}: {type(e).__name__}: {e}"
+                    )
+                    return None
+
+                # (b) Vision caption (optional)
+                caption_json: dict[str, Any] | None = None
+                cached_caption_json = existing_meta.get("caption_json")
+                if _caption_json_has_meaningful_summary(cached_caption_json):
+                    caption_json = cached_caption_json
+                elif cached_caption_json is not None and self.vision_model_func is None:
+                    caption_json = cached_caption_json
+                elif self.vision_model_func is not None:
+                    if cached_caption_json is not None:
+                        logger.info(
+                            f"[{self.workspace}] cached caption for {blob_id} "
+                            f"is too sparse; regenerating vision summary"
+                        )
+                    try:
+                        caption_raw = await self.vision_model_func(
+                            prompt=caption_prompt,
+                            system_prompt=caption_sys,
+                            image_data=img_bytes,
+                            image_mime_type=mime_type,
+                        )
+                        caption_json = _parse_image_caption_json(caption_raw)
+                    except Exception as e:
+                        logger.warning(
+                            f"[{self.workspace}] vision failed for "
+                            f"{blob_id}: {type(e).__name__}: {e}"
+                        )
+
+                # (c) Image embedding
+                image_vector = None
+                existing_vector_raw = existing_vectors_by_blob.get(blob_id)
+                if existing_vector_raw is not None:
+                    try:
+                        import numpy as np
+
+                        image_vector = (
+                            existing_vector_raw
+                            if isinstance(existing_vector_raw, np.ndarray)
+                            else np.asarray(existing_vector_raw, dtype=np.float32)
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"[{self.workspace}] failed to coerce cached embedding "
+                            f"for {blob_id}: {type(e).__name__}: {e}"
+                        )
+                if image_vector is None:
+                    try:
+                        vectors = await self.image_embedding_func.image_encode(
+                            [img_bytes]
+                        )
+                        if vectors is not None and len(vectors) == 1:
+                            image_vector = vectors[0]
+                    except Exception as e:
+                        logger.warning(
+                            f"[{self.workspace}] image_encode failed for "
+                            f"{blob_id}: {type(e).__name__}: {e}"
+                        )
+
+                # (d) Upsert vector
+                if image_vector is not None:
+                    caption_safe = caption_json or {}
+                    vdb_record: dict[str, Any] = {
+                        "blob_id": blob_id,
+                        "blob_ref": blob_ref,
+                        "caption": str(
+                            caption_safe.get("caption", "")
+                        )[:500],
+                        "image_category": str(
+                            caption_safe.get("image_category", "")
+                        ),
+                        "sub_type": str(
+                            caption_safe.get("sub_type", "")
+                        ),
+                        "full_doc_id": parent_doc_id,
+                        "file_path": effective_file_path,
+                    }
+                    if page_no is not None:
+                        vdb_record["source_page"] = page_no
+                    if source_printed_page is not None:
+                        vdb_record["source_printed_page"] = source_printed_page
+                    try:
+                        await self.images_vdb.upsert_with_embeddings(
+                            data={blob_id: vdb_record},
+                            embeddings={blob_id: image_vector},
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"[{self.workspace}] images_vdb upsert failed "
+                            f"for {blob_id}: {type(e).__name__}: {e}"
+                        )
+
+                # (e) Image metadata KV
+                annotation_text = _image_annotation_to_text(
+                    caption_json,
+                    blob_id=blob_id,
+                    file_path=effective_file_path,
+                    extra_metadata={
+                        "source_page": page_no,
+                        "source_printed_page": source_printed_page,
+                        "source_page_label": source_page_label,
+                        "source_bbox": source_bbox,
+                        "picture_index": picture_index,
+                        "page_picture_index": page_picture_index,
+                        "extraction_mode": extraction_mode,
+                        "native_xref": native_xref,
+                        "merged_extraction_modes": merged_extraction_modes,
+                        "caption_hint": caption_hint,
+                        "page_text_excerpt": page_text_excerpt,
+                        "context_text": context_text,
+                        "context_chunk_ids": context_chunk_ids,
+                        "context_chunks": context_chunks,
+                        "source_pdf": os.path.basename(file_path)
+                        if file_path
+                        else None,
+                    },
+                    include_context=False,
+                )
+                try:
+                    await self.image_metadata.upsert(
+                        {
+                            blob_id: {
+                                "blob_ref": blob_ref,
+                                "content_type": mime_type,
+                                "caption_json": caption_json,
+                                "annotation_text": annotation_text,
+                                "source_doc_id": parent_doc_id,
+                                "source_file_path": effective_file_path,
+                                "source_page": page_no,
+                                "source_printed_page": source_printed_page,
+                                "source_page_label": source_page_label,
+                                "source_bbox": source_bbox,
+                                "picture_index": picture_index,
+                                "page_picture_index": page_picture_index,
+                                "context_text": context_text,
+                                "extraction_mode": extraction_mode,
+                                "native_xref": native_xref,
+                                "merged_extraction_modes": merged_extraction_modes,
+                                "context_chunk_ids": context_chunk_ids,
+                                "context_chunks": context_chunks,
+                                "extra": {
+                                    "caption_hint": caption_hint,
+                                    "page_text_excerpt": page_text_excerpt,
+                                    "context_text": context_text,
+                                    "extraction_mode": extraction_mode,
+                                    "page_picture_index": page_picture_index,
+                                    "source_printed_page": source_printed_page,
+                                    "source_page_label": source_page_label,
+                                    "native_xref": native_xref,
+                                    "merged_extraction_modes": merged_extraction_modes,
+                                    "context_chunk_ids": context_chunk_ids,
+                                    "context_chunks": context_chunks,
+                                },
+                            }
+                        }
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[{self.workspace}] image_metadata upsert failed "
+                        f"for {blob_id}: {type(e).__name__}: {e}"
+                    )
+
+                logger.info(
+                    f"[{self.workspace}] image [{idx+1}/{n_total}] "
+                    f"page={page_no} blob_id={blob_id} done"
+                )
+                return {
+                    "blob_id": blob_id,
+                    "blob_ref": blob_ref,
+                    "page_no": page_no,
+                    "annotation_text": annotation_text,
+                    "caption_json": caption_json,
+                }
+
+        logger.info(
+            f"[{self.workspace}] Processing {n_total} images with "
+            f"concurrency={image_concurrency}"
+        )
+        raw_results = await asyncio.gather(
+            *[
+                _process_one_image(i, img)
+                for i, img in enumerate(extracted_images)
+            ],
+            return_exceptions=True,
+        )
+        per_image_results: list[dict[str, Any]] = []
+        for r in raw_results:
+            if isinstance(r, Exception):
+                logger.warning(
+                    f"[{self.workspace}] image processing exception: "
+                    f"{type(r).__name__}: {r}"
+                )
+            elif r is not None:
+                per_image_results.append(r)
+
+        # --- Step A: Enqueue the PLAIN text immediately ---
+        # This creates a PENDING doc_status entry so the frontend sees the
+        # document right away. Image annotations will be appended BEFORE
+        # the text pipeline actually processes the chunks.
+        await self.apipeline_enqueue_documents(
+            input=text_content or f"[Document with {len(extracted_images)} images]",
+            ids=parent_doc_id,
+            file_paths=effective_file_path,
+            track_id=track_id,
+            allow_existing_ids=allow_existing_doc_id,
+            initial_status=initial_doc_status,
+            initial_metadata=initial_doc_metadata,
+        )
+        logger.info(
+            f"[{self.workspace}] Document enqueued as PENDING "
+            f"(text only, images processing in parallel)"
+        )
+
+        # --- Step B: Build augmented text with image annotations ---
+        if per_image_results:
+            sections = ["", "", "===== 本文档中的图像(自动提取)====="]
+            for r in per_image_results:
+                sections.append("")
+                sections.append(r["annotation_text"].rstrip())
+            augmented_text = (text_content or "") + "\n".join(sections) + "\n"
+        else:
+            augmented_text = text_content or ""
+
+        # --- Step C: Update full_docs with augmented text ---
+        # The enqueue in Step A stored the plain text. Now overwrite with
+        # the augmented version (text + image annotations) BEFORE the text
+        # pipeline processes it, so entity extraction sees everything.
+        await self.full_docs.upsert(
+            {
+                parent_doc_id: {
+                    "content": augmented_text,
+                    "file_path": effective_file_path,
+                }
+            }
+        )
+
+        # --- Step D: Process the enqueued document ---
+        await self.apipeline_process_enqueue_documents()
+
+        # --- Reverse index: doc_status.metadata.image_ids ---
+        # Same read-modify-write pattern as ainsert_image step 9: preserve
+        # ALL existing doc_status fields (status, file_path, chunks_count,
+        # etc.) and only override metadata + multimodal_processed. The
+        # Phase 4 bug was caused by spreading only metadata in an upsert
+        # and losing the status field — don't repeat it here.
+        try:
+            existing_status = await self.doc_status.get_by_id(parent_doc_id)
+            if existing_status is None:
+                logger.warning(
+                    f"[{self.workspace}] doc_status missing for "
+                    f"{parent_doc_id} after apipeline_process_enqueue — "
+                    "skipping reverse image index write."
+                )
+            else:
+                existing_meta = existing_status.get("metadata", {}) or {}
+                new_image_ids = [r["blob_id"] for r in per_image_results]
+                merged_image_ids = list(dict.fromkeys(new_image_ids))
+                merged_meta = {
+                    **existing_meta,
+                    "modality": "mixed"
+                    if text_content and per_image_results
+                    else ("image" if per_image_results else "text"),
+                    "image_ids": merged_image_ids,
+                    "source_kind": "pdf_extracted",
+                    "n_images_extracted": len(per_image_results),
+                }
+                merged_record = {
+                    **existing_status,
+                    "metadata": merged_meta,
+                    "multimodal_processed": True,
+                }
+                await self.doc_status.upsert({parent_doc_id: merged_record})
+        except Exception as e:
+            logger.warning(
+                f"[{self.workspace}] Failed to write reverse image index "
+                f"for doc_id={parent_doc_id}: {type(e).__name__}: {e}"
+            )
+
+        # Flush image-side stores alongside the text pipeline's index_done.
+        await asyncio.gather(
+            self.image_blob_store.index_done_callback(),
+            self.image_metadata.index_done_callback(),
+            self.images_vdb.index_done_callback(),
+            self.doc_status.index_done_callback(),
+        )
+
+        logger.info(
+            f"[{self.workspace}] ainsert_document_with_images complete: "
+            f"doc_id={parent_doc_id} images={len(per_image_results)} "
+            f"track_id={track_id}"
+        )
+        return track_id
+
+    async def _attach_context_chunks_to_extracted_images(
+        self,
+        text_content: str,
+        extracted_images: list[dict[str, Any]],
+    ) -> None:
+        """Attach nearby text chunks to extracted image metadata.
+
+        The multimodal retrieval path already stores page-local context text,
+        but for PDF figure recall we also want the *actual document chunks*
+        surrounding that figure so the LLM can see the same chunk boundaries
+        used by the text retrieval path.
+        """
+        if not text_content or not extracted_images:
+            return
+
+        def _normalize_match_text(text: Any) -> str:
+            if text is None:
+                return ""
+            return re.sub(r"\s+", " ", str(text)).strip()
+
+        def _extract_match_snippets(text: Any) -> list[str]:
+            normalized = _normalize_match_text(text)
+            if not normalized:
+                return []
+
+            snippets: list[str] = []
+            raw_parts = re.split(r"[\r\n]+|(?<=[。！？.!?；;])", str(text))
+            for part in raw_parts:
+                part_norm = _normalize_match_text(part)
+                if len(part_norm) >= 24:
+                    snippets.append(part_norm[:160])
+
+            if len(normalized) >= 48:
+                snippets.extend(
+                    [
+                        normalized[:96],
+                        normalized[max(0, len(normalized) // 2 - 48) : len(normalized) // 2 + 48],
+                        normalized[-96:],
+                    ]
+                )
+            else:
+                snippets.append(normalized)
+
+            unique_snippets: list[str] = []
+            for snippet in snippets:
+                cleaned = snippet.strip()
+                if len(cleaned) < 16:
+                    continue
+                if cleaned not in unique_snippets:
+                    unique_snippets.append(cleaned)
+                if len(unique_snippets) >= 6:
+                    break
+            return unique_snippets
+
+        def _score_chunk_match(chunk_text: str, snippets: list[str]) -> int:
+            score = 0
+            for snippet in snippets:
+                if snippet and snippet in chunk_text:
+                    score += len(snippet)
+                elif len(snippet) >= 48:
+                    half = snippet[: len(snippet) // 2].strip()
+                    if half and half in chunk_text:
+                        score += len(half)
+            return score
+
+        try:
+            chunking_result = self.chunking_func(
+                self.tokenizer,
+                text_content,
+                None,
+                False,
+                self.chunk_overlap_token_size,
+                self.chunk_token_size,
+            )
+            if inspect.isawaitable(chunking_result):
+                chunking_result = await chunking_result
+        except Exception as e:
+            logger.warning(
+                f"[{self.workspace}] failed to derive text chunks for image context: "
+                f"{type(e).__name__}: {e}"
+            )
+            return
+
+        if not isinstance(chunking_result, (list, tuple)):
+            logger.warning(
+                f"[{self.workspace}] chunking_func returned unexpected type "
+                f"{type(chunking_result)} while deriving image context chunks"
+            )
+            return
+
+        text_chunks: list[dict[str, Any]] = []
+        for fallback_index, chunk in enumerate(chunking_result):
+            if not isinstance(chunk, dict):
+                continue
+            content = str(chunk.get("content") or "").strip()
+            if not content:
+                continue
+            chunk_order_index = chunk.get("chunk_order_index", fallback_index)
+            try:
+                chunk_order_index = int(chunk_order_index)
+            except (TypeError, ValueError):
+                chunk_order_index = fallback_index
+            text_chunks.append(
+                {
+                    "chunk_id": compute_mdhash_id(content, prefix="chunk-"),
+                    "chunk_order_index": chunk_order_index,
+                    "content": content,
+                    "match_text": _normalize_match_text(content),
+                }
+            )
+
+        if not text_chunks:
+            return
+
+        matched_count = 0
+        for img_info in extracted_images:
+            if img_info.get("context_chunks"):
+                continue
+            primary_anchor = img_info.get("page_text_excerpt") or ""
+            fallback_anchor = img_info.get("context_text") or ""
+            snippets = _extract_match_snippets(primary_anchor) or _extract_match_snippets(
+                fallback_anchor
+            )
+            if not snippets:
+                continue
+
+            best_index = -1
+            best_score = 0
+            for index, chunk in enumerate(text_chunks):
+                score = _score_chunk_match(chunk["match_text"], snippets)
+                if score > best_score:
+                    best_score = score
+                    best_index = index
+
+            if best_index < 0 or best_score <= 0:
+                continue
+
+            start = max(0, best_index - 1)
+            end = min(len(text_chunks), best_index + 2)
+            context_chunks = []
+            context_chunk_ids = []
+            for chunk in text_chunks[start:end]:
+                excerpt = str(chunk.get("content") or "").strip()
+                if len(excerpt) > 500:
+                    excerpt = excerpt[:500].rstrip() + "…"
+                context_chunks.append(
+                    {
+                        "chunk_id": chunk["chunk_id"],
+                        "chunk_order_index": chunk["chunk_order_index"],
+                        "content": excerpt,
+                    }
+                )
+                context_chunk_ids.append(chunk["chunk_id"])
+
+            if context_chunks:
+                img_info["context_chunks"] = context_chunks
+                img_info["context_chunk_ids"] = context_chunk_ids
+                matched_count += 1
+
+        if matched_count:
+            logger.info(
+                f"[{self.workspace}] attached nearby text chunks for "
+                f"{matched_count}/{len(extracted_images)} extracted images"
+            )
+
+    async def _delete_image_side_resources(self, image_ids: list[str]) -> None:
+        """Delete image-only resources without touching the text/KG side."""
+        normalized_ids = [
+            image_id for image_id in image_ids if isinstance(image_id, str) and image_id
+        ]
+        if not normalized_ids:
+            return
+
+        delete_tasks: list[Awaitable[Any]] = []
+        if self.images_vdb is not None:
+            delete_tasks.append(self.images_vdb.delete(normalized_ids))
+        if self.image_metadata is not None:
+            delete_tasks.append(self.image_metadata.delete(normalized_ids))
+        if self.image_blob_store is not None:
+            delete_tasks.extend(
+                self.image_blob_store.delete(image_id) for image_id in normalized_ids
+            )
+
+        if delete_tasks:
+            await asyncio.gather(*delete_tasks, return_exceptions=True)
+
+        flush_tasks: list[Awaitable[Any]] = []
+        if self.images_vdb is not None:
+            flush_tasks.append(self.images_vdb.index_done_callback())
+        if self.image_metadata is not None:
+            flush_tasks.append(self.image_metadata.index_done_callback())
+        if self.image_blob_store is not None:
+            flush_tasks.append(self.image_blob_store.index_done_callback())
+        if flush_tasks:
+            await asyncio.gather(*flush_tasks, return_exceptions=True)
+
+    async def _get_existing_image_ids_for_doc(self, doc_id: str) -> list[str]:
+        """Best-effort recovery of image ids belonging to one document."""
+        existing_status = await self.doc_status.get_by_id(doc_id)
+        existing_meta = (
+            (existing_status or {}).get("metadata", {})
+            if isinstance(existing_status, dict)
+            else {}
+        ) or {}
+        image_ids = _normalize_string_list(
+            existing_meta.get("image_ids", []),
+            context=f"doc {doc_id} metadata.image_ids",
+        )
+        if image_ids:
+            if self.image_metadata is not None:
+                try:
+                    metadata_records = await self.image_metadata.get_by_ids(image_ids)
+                    filtered_ids = [
+                        image_id
+                        for image_id, metadata_record in zip(
+                            image_ids, metadata_records
+                        )
+                        if isinstance(metadata_record, dict)
+                    ]
+                    if filtered_ids:
+                        if len(filtered_ids) != len(image_ids):
+                            logger.warning(
+                                f"[{self.workspace}] filtered "
+                                f"{len(image_ids) - len(filtered_ids)} stale image ids "
+                                f"from doc_status metadata for {doc_id}"
+                            )
+                        return filtered_ids
+                except Exception as e:
+                    logger.warning(
+                        f"[{self.workspace}] failed to validate cached image ids "
+                        f"for {doc_id}: {type(e).__name__}: {e}"
+                    )
+            return image_ids
+
+        raw_image_metadata = getattr(self.image_metadata, "_data", None)
+        if raw_image_metadata is None:
+            return []
+
+        try:
+            if hasattr(raw_image_metadata, "_getvalue"):
+                raw_image_metadata = raw_image_metadata._getvalue()
+            metadata_items = raw_image_metadata.items()
+        except Exception:
+            return []
+
+        recovered: list[tuple[int, int, str]] = []
+        for blob_id, record in metadata_items:
+            if not isinstance(record, dict):
+                continue
+            if record.get("source_doc_id") != doc_id:
+                continue
+            extra = record.get("extra") if isinstance(record.get("extra"), dict) else {}
+            page_no = record.get("source_page", extra.get("source_page"))
+            picture_index = record.get("picture_index", extra.get("picture_index"))
+            try:
+                page_sort = int(page_no) if page_no is not None else 10**9
+            except (TypeError, ValueError):
+                page_sort = 10**9
+            try:
+                picture_sort = (
+                    int(picture_index) if picture_index is not None else 10**9
+                )
+            except (TypeError, ValueError):
+                picture_sort = 10**9
+            recovered.append((page_sort, picture_sort, str(blob_id)))
+
+        recovered.sort()
+        deduped = [blob_id for *_ignored, blob_id in recovered]
+        if deduped:
+            logger.info(
+                f"[{self.workspace}] recovered {len(deduped)} image ids for "
+                f"{doc_id} from image_metadata fallback"
+            )
+        return deduped
+
+    async def areconstruct_document_multimodal_payload(
+        self, doc_id: str
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Reconstruct multimodal inputs from already-stored assets."""
+        if self.image_metadata is None or self.image_blob_store is None:
+            raise RuntimeError(
+                "areconstruct_document_multimodal_payload requires image storages"
+            )
+
+        full_doc = await self.full_docs.get_by_id(doc_id)
+        if full_doc is None:
+            raise FileNotFoundError(
+                f"Cannot reconstruct multimodal payload: full_doc missing for {doc_id}"
+            )
+        text_content = _strip_appended_image_annotations(
+            str(full_doc.get("content") or "")
+        )
+
+        image_ids = await self._get_existing_image_ids_for_doc(doc_id)
+        if not image_ids:
+            raise FileNotFoundError(
+                f"Cannot reconstruct multimodal payload: no stored images found for {doc_id}"
+            )
+
+        metadata_records = await self.image_metadata.get_by_ids(image_ids)
+        extracted_images: list[dict[str, Any]] = []
+        for blob_id, metadata in zip(image_ids, metadata_records):
+            record = metadata or {}
+            extra = record.get("extra") if isinstance(record.get("extra"), dict) else {}
+            image_bytes = await self.image_blob_store.get(blob_id)
+            if not image_bytes:
+                logger.warning(
+                    f"[{self.workspace}] skipping missing image blob during "
+                    f"reconstruct: {blob_id}"
+                )
+                continue
+
+            extracted_images.append(
+                {
+                    "bytes": image_bytes,
+                    "mime_type": record.get("content_type") or "image/png",
+                    "page_no": record.get("source_page", extra.get("source_page")),
+                    "source_printed_page": record.get(
+                        "source_printed_page", extra.get("source_printed_page")
+                    ),
+                    "source_page_label": record.get(
+                        "source_page_label", extra.get("source_page_label")
+                    ),
+                    "bbox": record.get("source_bbox", extra.get("source_bbox")),
+                    "caption_hint": extra.get("caption_hint"),
+                    "picture_index": record.get(
+                        "picture_index", extra.get("picture_index")
+                    ),
+                    "page_picture_index": record.get(
+                        "page_picture_index", extra.get("page_picture_index")
+                    ),
+                    "page_text_excerpt": extra.get("page_text_excerpt"),
+                    "context_text": record.get("context_text")
+                    or extra.get("context_text")
+                    or extra.get("page_text_excerpt"),
+                    "context_chunk_ids": record.get("context_chunk_ids")
+                    or extra.get("context_chunk_ids"),
+                    "context_chunks": record.get("context_chunks")
+                    or extra.get("context_chunks"),
+                    "extraction_mode": record.get("extraction_mode")
+                    or extra.get("extraction_mode")
+                    or "recovered_existing_assets",
+                    "native_xref": record.get("native_xref")
+                    or extra.get("native_xref"),
+                    "merged_extraction_modes": record.get(
+                        "merged_extraction_modes"
+                    )
+                    or extra.get("merged_extraction_modes"),
+                }
+            )
+
+        extracted_images.sort(
+            key=lambda item: (
+                item.get("page_no") if item.get("page_no") is not None else 10**9,
+                item.get("page_picture_index")
+                if item.get("page_picture_index") is not None
+                else item.get("picture_index", 0),
+            )
+        )
+        for picture_index, item in enumerate(extracted_images):
+            item["picture_index"] = picture_index
+
+        logger.info(
+            f"[{self.workspace}] reconstructed multimodal payload for {doc_id}: "
+            f"text_len={len(text_content)} images={len(extracted_images)}"
+        )
+        return text_content, extracted_images
+
+    async def arebuild_document_multimodal(
+        self,
+        doc_id: str,
+        text_content: str,
+        extracted_images: list[dict[str, Any]],
+        *,
+        file_path: str,
+        track_id: str | None = None,
+        reuse_existing_images: bool = True,
+    ) -> str:
+        """Rebuild a document's multimodal representation in place.
+
+        The current text/KG representation is removed via ``adelete_by_doc_id``
+        and then recreated from freshly extracted PDF text + images while
+        preserving reusable image-side cache entries whenever possible.
+        """
+        if not doc_id:
+            raise ValueError("arebuild_document_multimodal: doc_id must be non-empty")
+
+        existing_status = await self.doc_status.get_by_id(doc_id)
+        existing_full_doc = await self.full_docs.get_by_id(doc_id)
+        if existing_status is None:
+            raise ValueError(
+                f"arebuild_document_multimodal: unknown document id {doc_id}"
+            )
+
+        if track_id is None:
+            track_id = generate_track_id("rebuild_multimodal")
+
+        existing_meta = existing_status.get("metadata", {}) or {}
+        old_image_ids = _normalize_string_list(
+            existing_meta.get("image_ids", []),
+            context=f"rebuild doc {doc_id} metadata.image_ids",
+        )
+        new_image_ids = list(
+            dict.fromkeys(
+                compute_mdhash_id(img["bytes"], prefix="img-")
+                for img in extracted_images
+                if img.get("bytes")
+            )
+        )
+        stale_image_ids = [img_id for img_id in old_image_ids if img_id not in new_image_ids]
+
+        logger.info(
+            f"[{self.workspace}] rebuilding multimodal doc_id={doc_id} "
+            f"file_path={file_path} old_images={len(old_image_ids)} "
+            f"new_images={len(new_image_ids)} reuse_cache={reuse_existing_images}"
+        )
+
+        delete_result = await self.adelete_by_doc_id(doc_id, delete_llm_cache=False)
+        if delete_result.status not in {"success", "not_found"}:
+            raise RuntimeError(delete_result.message)
+
+        processing_placeholder = _build_multimodal_rebuild_status_record(
+            existing_status,
+            track_id=track_id,
+            file_path=file_path,
+            stage="indexing_multimodal_payload",
+        )
+        await self.doc_status.upsert({doc_id: processing_placeholder})
+        await self.doc_status.index_done_callback()
+
+        try:
+            rebuild_track_id = await self.ainsert_document_with_images(
+                text_content=text_content,
+                extracted_images=extracted_images,
+                file_path=file_path,
+                ids=doc_id,
+                track_id=track_id,
+                reuse_existing_images=reuse_existing_images,
+                allow_existing_doc_id=True,
+                initial_doc_status=DocStatus.PROCESSING,
+                initial_doc_metadata=processing_placeholder.get("metadata", {}),
+            )
+        except Exception as e:
+            logger.error(
+                f"[{self.workspace}] multimodal rebuild failed for {doc_id}: "
+                f"{type(e).__name__}: {e}"
+            )
+            restore_meta = dict(existing_meta)
+            restore_meta["multimodal_rebuild_failed"] = True
+            restore_record = {
+                **existing_status,
+                "status": DocStatus.FAILED,
+                "track_id": track_id,
+                "chunks_count": 0,
+                "chunks_list": [],
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "error_msg": f"Multimodal rebuild failed: {e}",
+                "metadata": restore_meta,
+            }
+            try:
+                await self.doc_status.upsert({doc_id: restore_record})
+                if existing_full_doc is not None:
+                    await self.full_docs.upsert({doc_id: existing_full_doc})
+                await asyncio.gather(
+                    self.doc_status.index_done_callback(),
+                    self.full_docs.index_done_callback(),
+                    return_exceptions=True,
+                )
+            except Exception as restore_error:
+                logger.error(
+                    f"[{self.workspace}] failed to restore rebuild failure state "
+                    f"for {doc_id}: {type(restore_error).__name__}: {restore_error}"
+                )
+            raise
+
+        if stale_image_ids:
+            try:
+                await self._delete_image_side_resources(stale_image_ids)
+            except Exception as cleanup_error:
+                logger.warning(
+                    f"[{self.workspace}] stale multimodal image cleanup failed for "
+                    f"{doc_id}: {type(cleanup_error).__name__}: {cleanup_error}"
+                )
+
+        return rebuild_track_id
+
     # TODO: deprecated, use insert instead
     def insert_custom_chunks(
         self,
@@ -1346,6 +3356,9 @@ class LightRAG:
         ids: list[str] | None = None,
         file_paths: str | list[str] | None = None,
         track_id: str | None = None,
+        allow_existing_ids: bool = False,
+        initial_status: DocStatus = DocStatus.PENDING,
+        initial_metadata: dict[str, Any] | None = None,
     ) -> str:
         """
         Pipeline for Processing Documents
@@ -1360,6 +3373,12 @@ class LightRAG:
             ids: list of unique document IDs, if not provided, MD5 hash IDs will be generated
             file_paths: list of file paths corresponding to each document, used for citation
             track_id: tracking ID for monitoring processing status, if not provided, will be generated with "enqueue" prefix
+            allow_existing_ids: when True, skip duplicate-ID filtering and
+                overwrite existing doc/full_doc rows for the provided ids.
+                Intended for controlled in-place rebuild flows.
+            initial_status: initial status written into doc_status rows.
+            initial_metadata: optional metadata merged into each initial
+                doc_status record.
 
         Returns:
             str: tracking ID for monitoring processing status
@@ -1432,7 +3451,7 @@ class LightRAG:
         # 2. Generate document initial status (without content)
         new_docs: dict[str, Any] = {
             id_: {
-                "status": DocStatus.PENDING,
+                "status": initial_status,
                 "content_summary": get_content_summary(content_data["content"]),
                 "content_length": len(content_data["content"]),
                 "created_at": datetime.now(timezone.utc).isoformat(),
@@ -1441,6 +3460,7 @@ class LightRAG:
                     "file_path"
                 ],  # Store file path in document status
                 "track_id": track_id,  # Store track_id in document status
+                "metadata": dict(initial_metadata or {}),
             }
             for id_, content_data in contents.items()
         }
@@ -1449,53 +3469,65 @@ class LightRAG:
         # Get docs ids
         all_new_doc_ids = set(new_docs.keys())
         # Exclude IDs of documents that are already enqueued
-        unique_new_doc_ids = await self.doc_status.filter_keys(all_new_doc_ids)
+        if allow_existing_ids:
+            unique_new_doc_ids = all_new_doc_ids
+        else:
+            unique_new_doc_ids = await self.doc_status.filter_keys(all_new_doc_ids)
 
-        # Handle duplicate documents - create trackable records with current track_id
-        ignored_ids = list(all_new_doc_ids - unique_new_doc_ids)
-        if ignored_ids:
-            duplicate_docs: dict[str, Any] = {}
-            for doc_id in ignored_ids:
-                file_path = (
-                    new_docs.get(doc_id, {}).get("file_path") or "unknown_source"
-                )
-                logger.warning(f"Duplicate document detected: {doc_id} ({file_path})")
+            # Handle duplicate documents - create trackable records with current track_id
+            ignored_ids = list(all_new_doc_ids - unique_new_doc_ids)
+            if ignored_ids:
+                duplicate_docs: dict[str, Any] = {}
+                for doc_id in ignored_ids:
+                    file_path = (
+                        new_docs.get(doc_id, {}).get("file_path") or "unknown_source"
+                    )
+                    logger.warning(f"Duplicate document detected: {doc_id} ({file_path})")
 
-                # Get existing document info for reference
-                existing_doc = await self.doc_status.get_by_id(doc_id)
-                existing_status = (
-                    existing_doc.get("status", "unknown") if existing_doc else "unknown"
-                )
-                existing_track_id = (
-                    existing_doc.get("track_id", "") if existing_doc else ""
-                )
+                    # Get existing document info for reference
+                    existing_doc = await self.doc_status.get_by_id(doc_id)
+                    existing_status = (
+                        existing_doc.get("status", "unknown")
+                        if existing_doc
+                        else "unknown"
+                    )
+                    existing_track_id = (
+                        existing_doc.get("track_id", "") if existing_doc else ""
+                    )
 
-                # Create a new record with unique ID for this duplicate attempt
-                dup_record_id = compute_mdhash_id(f"{doc_id}-{track_id}", prefix="dup-")
-                duplicate_docs[dup_record_id] = {
-                    "status": DocStatus.FAILED,
-                    "content_summary": f"[DUPLICATE] Original document: {doc_id}",
-                    "content_length": new_docs.get(doc_id, {}).get("content_length", 0),
-                    "chunks_count": 0,
-                    "chunks_list": [],
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                    "file_path": file_path,
-                    "track_id": track_id,  # Use current track_id for tracking
-                    "error_msg": f"Content already exists. Original doc_id: {doc_id}, Status: {existing_status}",
-                    "metadata": {
-                        "is_duplicate": True,
-                        "original_doc_id": doc_id,
-                        "original_track_id": existing_track_id,
-                    },
-                }
+                    # Create a new record with unique ID for this duplicate attempt
+                    dup_record_id = compute_mdhash_id(
+                        f"{doc_id}-{track_id}", prefix="dup-"
+                    )
+                    duplicate_docs[dup_record_id] = {
+                        "status": DocStatus.FAILED,
+                        "content_summary": f"[DUPLICATE] Original document: {doc_id}",
+                        "content_length": new_docs.get(doc_id, {}).get(
+                            "content_length", 0
+                        ),
+                        "chunks_count": 0,
+                        "chunks_list": [],
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                        "file_path": file_path,
+                        "track_id": track_id,  # Use current track_id for tracking
+                        "error_msg": (
+                            f"Content already exists. Original doc_id: {doc_id}, "
+                            f"Status: {existing_status}"
+                        ),
+                        "metadata": {
+                            "is_duplicate": True,
+                            "original_doc_id": doc_id,
+                            "original_track_id": existing_track_id,
+                        },
+                    }
 
-            # Store duplicate records in doc_status
-            if duplicate_docs:
-                await self.doc_status.upsert(duplicate_docs)
-                logger.info(
-                    f"Created {len(duplicate_docs)} duplicate document records with track_id: {track_id}"
-                )
+                # Store duplicate records in doc_status
+                if duplicate_docs:
+                    await self.doc_status.upsert(duplicate_docs)
+                    logger.info(
+                        f"Created {len(duplicate_docs)} duplicate document records with track_id: {track_id}"
+                    )
 
         # Filter new_docs to only include documents with unique IDs
         new_docs = {
@@ -2772,6 +4804,11 @@ class LightRAG:
                 hashing_kv=self.llm_response_cache,
                 system_prompt=None,
                 chunks_vdb=self.chunks_vdb,
+                # Multimodal: these are None when the multimodal pipeline
+                # is not configured, and kg_query falls back to pure text
+                # retrieval without any change in behavior.
+                images_vdb=self.images_vdb,
+                image_metadata=self.image_metadata,
             )
         elif data_param.mode == "naive":
             logger.debug(f"[aquery_data] Using naive_query for mode: {data_param.mode}")
@@ -2782,6 +4819,8 @@ class LightRAG:
                 global_config,
                 hashing_kv=self.llm_response_cache,
                 system_prompt=None,
+                images_vdb=self.images_vdb,
+                image_metadata=self.image_metadata,
             )
         elif data_param.mode == "bypass":
             logger.debug("[aquery_data] Using bypass mode")
@@ -2869,6 +4908,9 @@ class LightRAG:
                     hashing_kv=self.llm_response_cache,
                     system_prompt=system_prompt,
                     chunks_vdb=self.chunks_vdb,
+                    # Multimodal: None when not configured -> pure text retrieval.
+                    images_vdb=self.images_vdb,
+                    image_metadata=self.image_metadata,
                 )
             elif param.mode == "naive":
                 query_result = await naive_query(
@@ -2878,6 +4920,8 @@ class LightRAG:
                     global_config,
                     hashing_kv=self.llm_response_cache,
                     system_prompt=system_prompt,
+                    images_vdb=self.images_vdb,
+                    image_metadata=self.image_metadata,
                 )
             elif param.mode == "bypass":
                 # Bypass mode: directly use LLM without knowledge retrieval

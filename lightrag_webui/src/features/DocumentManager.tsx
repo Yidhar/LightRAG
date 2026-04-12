@@ -21,6 +21,8 @@ import PaginationControls from '@/components/ui/PaginationControls'
 
 import {
   scanNewDocuments,
+  rebuildDocumentMultimodal,
+  DocActionResponse,
   getDocumentsPaginatedWithTimeout,
   DocsStatusesResponse,
   DocStatus,
@@ -32,7 +34,7 @@ import { errorMessage } from '@/lib/utils'
 import { toast } from 'sonner'
 import { useBackendState } from '@/stores/state'
 
-import { RefreshCwIcon, ActivityIcon, ArrowUpIcon, ArrowDownIcon, RotateCcwIcon, CheckSquareIcon, XIcon, AlertTriangle, Info } from 'lucide-react'
+import { RefreshCwIcon, ActivityIcon, ArrowUpIcon, ArrowDownIcon, RotateCcwIcon, CheckSquareIcon, XIcon, AlertTriangle, Info, ImageIcon } from 'lucide-react'
 import PipelineStatusDialog from '@/components/documents/PipelineStatusDialog'
 
 type StatusFilter = DocStatus | 'all';
@@ -73,6 +75,59 @@ const getDisplayFileName = (doc: DocStatusResponse, maxLength: number = 20): str
     ? fileName.slice(0, maxLength) + '...'
     : fileName;
 };
+
+const isPdfRebuildCandidate = (doc: DocStatusResponse): boolean => {
+  const filePath = (doc.file_path || '').toLowerCase()
+  if (!filePath.endsWith('.pdf')) {
+    return false
+  }
+  return doc.status !== 'processing' && doc.status !== 'pending'
+}
+
+const getRawFileName = (doc: Pick<DocStatusResponse, 'file_path' | 'id'>): string => {
+  if (!doc.file_path || typeof doc.file_path !== 'string' || doc.file_path.trim() === '') {
+    return doc.id
+  }
+
+  const parts = doc.file_path.split('/')
+  const fileName = parts[parts.length - 1]
+  return fileName || doc.id
+}
+
+const parseDocStatusValue = (value: unknown): DocStatus | undefined => {
+  if (typeof value !== 'string') {
+    return undefined
+  }
+
+  switch (value) {
+    case 'pending':
+    case 'processing':
+    case 'preprocessed':
+    case 'processed':
+    case 'failed':
+      return value
+    default:
+      return undefined
+  }
+}
+
+const mergeUniqueDocsById = (
+  prioritizedDocs: DocStatusResponse[],
+  existingDocs: DocStatusResponse[]
+): DocStatusResponse[] => {
+  const merged: DocStatusResponse[] = []
+  const seenIds = new Set<string>()
+
+  for (const doc of [...prioritizedDocs, ...existingDocs]) {
+    if (!doc?.id || seenIds.has(doc.id)) {
+      continue
+    }
+    seenIds.add(doc.id)
+    merged.push(doc)
+  }
+
+  return merged
+}
 
 const formatMetadata = (metadata: Record<string, any>): string => {
   const formattedMetadata = { ...metadata };
@@ -307,6 +362,87 @@ export default function DocumentManager() {
     nextRetryTime: null as number | null
   });
 
+  const seedQueuedRebuildsIntoProcessing = useCallback((
+    queuedDocs: Array<{
+      doc: DocStatusResponse
+      previousStatus?: DocStatus
+    }>
+  ) => {
+    if (queuedDocs.length === 0) {
+      return
+    }
+
+    const processingPage = 1
+    const queuedDocResponses = queuedDocs.map(item => item.doc)
+
+    setCurrentPageDocs(prev => (
+      statusFilter === 'processing'
+        ? mergeUniqueDocsById(queuedDocResponses, prev)
+        : queuedDocResponses
+    ))
+
+    setStatusCounts(prev => {
+      const next = { ...prev }
+
+      if (typeof next.processing !== 'number') {
+        next.processing = 0
+      }
+      if (typeof next.all !== 'number') {
+        next.all = 0
+      }
+
+      for (const { previousStatus } of queuedDocs) {
+        if (previousStatus && previousStatus !== 'processing') {
+          const previousCount = next[previousStatus]
+          if (typeof previousCount === 'number') {
+            next[previousStatus] = Math.max(0, previousCount - 1)
+          }
+        }
+        next.processing += 1
+      }
+
+      return next
+    })
+
+    setPageByStatus(prev => ({
+      ...prev,
+      [statusFilter]: pagination.page,
+      processing: processingPage
+    }))
+    setStatusFilter('processing')
+    setPagination(prev => ({ ...prev, page: processingPage }))
+  }, [pagination.page, statusFilter])
+
+  const createQueuedRebuildDoc = useCallback((params: {
+    docId?: string
+    fileName: string
+    summary?: string
+    trackId?: string
+    previousStatus?: DocStatus
+    stage?: string
+  }): DocStatusResponse => {
+    const nowIso = new Date().toISOString()
+    const fileName = params.fileName || params.docId || nowIso
+
+    return {
+      id: params.docId || params.trackId || `queued-${fileName}-${Date.now()}`,
+      content_summary: params.summary || t('documentPanel.documentManager.queuedRebuildSummary', { name: fileName }),
+      content_length: 0,
+      status: 'processing',
+      created_at: nowIso,
+      updated_at: nowIso,
+      track_id: params.trackId,
+      chunks_count: 0,
+      metadata: {
+        multimodal_rebuild_in_progress: true,
+        multimodal_rebuild_stage: params.stage || 'queued_for_rebuild',
+        processing_start_time: Math.floor(Date.now() / 1000),
+        previous_status: params.previousStatus,
+        optimistic: true
+      },
+      file_path: fileName
+    }
+  }, [t])
 
   // Handle checkbox change for individual documents
   const handleDocumentSelect = useCallback((docId: string, checked: boolean) => {
@@ -446,6 +582,42 @@ export default function DocumentManager() {
   const hasCurrentPageSelection = useMemo(() => {
     return selectedCurrentPageCount > 0
   }, [selectedCurrentPageCount])
+
+  const selectedDocs = useMemo(() => {
+    if (!filteredAndSortedDocs) {
+      return [] as DocStatusResponse[]
+    }
+    return filteredAndSortedDocs.filter(doc => selectedDocIds.includes(doc.id))
+  }, [filteredAndSortedDocs, selectedDocIds])
+
+  const rebuildableSelectedDocs = useMemo(() => {
+    return selectedDocs.filter(isPdfRebuildCandidate)
+  }, [selectedDocs])
+
+  const canRebuildSelectedDoc = useMemo(() => {
+    return (
+      selectedDocs.length === 1 &&
+      rebuildableSelectedDocs.length === 1 &&
+      !pipelineBusy &&
+      !isRefreshing
+    )
+  }, [selectedDocs.length, rebuildableSelectedDocs.length, pipelineBusy, isRefreshing])
+
+  const rebuildMultimodalTooltip = useMemo(() => {
+    if (pipelineBusy) {
+      return t('documentPanel.documentManager.rebuildMultimodalBusy')
+    }
+    if (selectedDocs.length === 0) {
+      return t('documentPanel.documentManager.rebuildMultimodalTooltip')
+    }
+    if (selectedDocs.length !== 1) {
+      return t('documentPanel.documentManager.rebuildMultimodalSingleOnly')
+    }
+    if (rebuildableSelectedDocs.length !== 1) {
+      return t('documentPanel.documentManager.rebuildMultimodalPdfOnly')
+    }
+    return t('documentPanel.documentManager.rebuildMultimodalTooltip')
+  }, [pipelineBusy, selectedDocs.length, rebuildableSelectedDocs.length, t])
 
   // Handle select current page
   const handleSelectCurrentPage = useCallback(() => {
@@ -954,6 +1126,18 @@ export default function DocumentManager() {
     }, intervalMs);
   }, [fetchDocuments, t, clearPollingInterval, isCircuitBreakerOpen, recordSuccess, recordFailure, classifyError, retryState.count]);
 
+  const startFastProcessingPolling = useCallback(() => {
+    startPollingInterval(2000)
+
+    setTimeout(() => {
+      if (isMountedRef.current && currentTab === 'documents' && health) {
+        const hasActiveDocuments = hasActiveDocumentsStatus(statusCounts)
+        const normalInterval = hasActiveDocuments ? 5000 : 30000
+        startPollingInterval(normalInterval)
+      }
+    }, 15000)
+  }, [currentTab, health, startPollingInterval, statusCounts])
+
   const scanDocuments = useCallback(async () => {
     try {
       // Check if component is still mounted before starting the request
@@ -974,24 +1158,133 @@ export default function DocumentManager() {
       await handleIntelligentRefresh(undefined, false, 90000);
 
       // Start fast refresh with 2-second interval after initial refresh
-      startPollingInterval(2000);
-
-      // Set recovery timer to restore normal polling interval after 15 seconds
-      setTimeout(() => {
-        if (isMountedRef.current && currentTab === 'documents' && health) {
-          // Restore intelligent polling interval based on document status
-          const hasActiveDocuments = hasActiveDocumentsStatus(statusCounts);
-          const normalInterval = hasActiveDocuments ? 5000 : 30000;
-          startPollingInterval(normalInterval);
-        }
-      }, 15000); // Restore after 15 seconds
+      startFastProcessingPolling()
     } catch (err) {
       // Only show error if component is still mounted
       if (isMountedRef.current) {
         toast.error(t('documentPanel.documentManager.errors.scanFailed', { error: errorMessage(err) }));
       }
     }
-  }, [t, startPollingInterval, currentTab, health, statusCounts, handleIntelligentRefresh])
+  }, [t, handleIntelligentRefresh, startFastProcessingPolling])
+
+  const handleUploadedDocuments = useCallback(async (payload: {
+    successfulUploads: Array<{
+      fileName: string
+      result: DocActionResponse
+    }>
+    takeoverRebuilds: Array<{
+      fileName: string
+      result: DocActionResponse
+    }>
+  }) => {
+    const takeoverRebuilds = payload.takeoverRebuilds || []
+
+    useBackendState.getState().resetHealthCheckTimerDelayed(1000)
+
+    if (takeoverRebuilds.length > 0) {
+      const queuedDocs = takeoverRebuilds.map(upload => {
+        const previousStatus = parseDocStatusValue(
+          upload.result.operation_metadata?.previous_status
+        )
+
+        return {
+          doc: createQueuedRebuildDoc({
+            docId: upload.result.doc_id,
+            fileName: upload.fileName,
+            trackId: upload.result.track_id,
+            previousStatus,
+            stage: typeof upload.result.operation_metadata?.multimodal_rebuild_stage === 'string'
+              ? upload.result.operation_metadata.multimodal_rebuild_stage
+              : undefined
+          }),
+          previousStatus
+        }
+      })
+
+      seedQueuedRebuildsIntoProcessing(queuedDocs)
+      startFastProcessingPolling()
+
+      if (statusFilter === 'processing' && pagination.page === 1) {
+        await handleIntelligentRefresh(1, false, 120000)
+      }
+      return
+    }
+
+    await handleIntelligentRefresh(undefined, false, 120000)
+  }, [
+    createQueuedRebuildDoc,
+    handleIntelligentRefresh,
+    pagination.page,
+    seedQueuedRebuildsIntoProcessing,
+    startFastProcessingPolling,
+    statusFilter
+  ])
+
+  const handleRebuildMultimodal = useCallback(async () => {
+    if (!canRebuildSelectedDoc || rebuildableSelectedDocs.length !== 1) {
+      return
+    }
+
+    const targetDoc = rebuildableSelectedDocs[0]
+    const processingPage = 1
+
+    try {
+      const { track_id: rebuildTrackId } = await rebuildDocumentMultimodal(targetDoc.id, {
+        reuse_cache: true
+      })
+
+      if (!isMountedRef.current) return
+
+      const targetFileName = getRawFileName(targetDoc)
+      const previousStatus = parseDocStatusValue(targetDoc.status)
+
+      seedQueuedRebuildsIntoProcessing([
+        {
+          doc: createQueuedRebuildDoc({
+            docId: targetDoc.id,
+            fileName: targetFileName,
+            summary: targetDoc.content_summary,
+            trackId: rebuildTrackId,
+            previousStatus
+          }),
+          previousStatus
+        }
+      ])
+
+      toast.success(t('documentPanel.documentManager.rebuildMultimodalStartedWithName', {
+        name: targetFileName
+      }), {
+        duration: 8000
+      })
+      setSelectedDocIds([])
+
+      useBackendState.getState().resetHealthCheckTimerDelayed(1000)
+
+      startFastProcessingPolling()
+
+      if (statusFilter === 'processing' && pagination.page === processingPage) {
+        await handleIntelligentRefresh(processingPage, false, 120000)
+      }
+    } catch (err) {
+      if (isMountedRef.current) {
+        toast.error(
+          t('documentPanel.documentManager.errors.rebuildMultimodalFailed', {
+            error: errorMessage(err)
+          })
+        )
+      }
+    }
+  }, [
+    canRebuildSelectedDoc,
+    rebuildableSelectedDocs,
+    t,
+    createQueuedRebuildDoc,
+    pagination.page,
+    statusFilter,
+    seedQueuedRebuildsIntoProcessing,
+    startFastProcessingPolling,
+    handleIntelligentRefresh
+  ])
 
   // Handle manual refresh with pagination reset logic
   const handleManualRefresh = useCallback(async () => {
@@ -1221,6 +1514,19 @@ export default function DocumentManager() {
 
           <div className="flex gap-2">
             {isSelectionMode && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleRebuildMultimodal}
+                disabled={!canRebuildSelectedDoc}
+                side="bottom"
+                tooltip={rebuildMultimodalTooltip}
+              >
+                <ImageIcon className="h-4 w-4" />
+                {t('documentPanel.documentManager.rebuildMultimodalButton')}
+              </Button>
+            )}
+            {isSelectionMode && (
               <DeleteDocumentsDialog
                 selectedDocIds={selectedDocIds}
                 onDocumentsDeleted={handleDocumentsDeleted}
@@ -1246,7 +1552,7 @@ export default function DocumentManager() {
             ) : !isSelectionMode ? (
               <ClearDocumentsDialog onDocumentsCleared={handleDocumentsCleared} />
             ) : null}
-            <UploadDocumentsDialog onDocumentsUploaded={() => handleIntelligentRefresh(undefined, false, 120000)} />
+            <UploadDocumentsDialog onDocumentsUploaded={handleUploadedDocuments} />
             <PipelineStatusDialog
               open={showPipelineStatus}
               onOpenChange={setShowPipelineStatus}
@@ -1472,17 +1778,28 @@ export default function DocumentManager() {
                           </TableCell>
                           <TableCell>
                             <div className="group relative flex items-center overflow-visible tooltip-container">
+                              {doc.metadata?.multimodal_rebuild_in_progress && (
+                                <span className="text-blue-600">
+                                  {t('documentPanel.documentManager.status.rebuildingMultimodal')}
+                                </span>
+                              )}
                               {doc.status === 'processed' && (
                                 <span className="text-green-600">{t('documentPanel.documentManager.status.completed')}</span>
                               )}
                               {doc.status === 'preprocessed' && (
-                                <span className="text-purple-600">{t('documentPanel.documentManager.status.preprocessed')}</span>
+                                !doc.metadata?.multimodal_rebuild_in_progress && (
+                                  <span className="text-purple-600">{t('documentPanel.documentManager.status.preprocessed')}</span>
+                                )
                               )}
                               {doc.status === 'processing' && (
-                                <span className="text-blue-600">{t('documentPanel.documentManager.status.processing')}</span>
+                                !doc.metadata?.multimodal_rebuild_in_progress && (
+                                  <span className="text-blue-600">{t('documentPanel.documentManager.status.processing')}</span>
+                                )
                               )}
                               {doc.status === 'pending' && (
-                                <span className="text-yellow-600">{t('documentPanel.documentManager.status.pending')}</span>
+                                !doc.metadata?.multimodal_rebuild_in_progress && (
+                                  <span className="text-yellow-600">{t('documentPanel.documentManager.status.pending')}</span>
+                                )
                               )}
                               {doc.status === 'failed' && (
                                 <span className="text-red-600">{t('documentPanel.documentManager.status.failed')}</span>
@@ -1496,11 +1813,8 @@ export default function DocumentManager() {
                               )}
 
                               {/* Tooltip rendering logic */}
-                              {(doc.error_msg || (doc.metadata && Object.keys(doc.metadata).length > 0) || doc.track_id) && (
+                              {(doc.error_msg || (doc.metadata && Object.keys(doc.metadata).length > 0)) && (
                                 <div className="invisible group-hover:visible tooltip">
-                                  {doc.track_id && (
-                                    <div className="mt-1">Track ID: {doc.track_id}</div>
-                                  )}
                                   {doc.metadata && Object.keys(doc.metadata).length > 0 && (
                                     <pre>{formatMetadata(doc.metadata)}</pre>
                                   )}

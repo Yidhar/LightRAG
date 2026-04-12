@@ -98,6 +98,107 @@ def _truncate_entity_identifier(
     return display_value
 
 
+def _normalize_vdb_compare_value(key: str, value: Any) -> Any:
+    """Normalize VDB payload values so semantically-equal rows compare equal."""
+    if value is None:
+        return None
+
+    if key in {"source_id", "file_path"} and isinstance(value, str):
+        parts = [part.strip() for part in value.split(GRAPH_FIELD_SEP) if part.strip()]
+        return tuple(sorted(dict.fromkeys(parts)))
+
+    if key == "weight":
+        try:
+            return round(float(value), 8)
+        except (TypeError, ValueError):
+            return value
+
+    if isinstance(value, str):
+        return value.strip()
+
+    if isinstance(value, list):
+        return tuple(value)
+
+    return value
+
+
+async def _filter_unchanged_vdb_upsert_batch(
+    storage: BaseVectorStorage | None,
+    payload: dict[str, dict[str, Any]],
+    *,
+    label: str,
+    min_probe_size: int = 64,
+) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
+    """Skip VDB upserts whose persisted payload is unchanged.
+
+    For rebuild / reprocess workflows, the KG layer often recomputes a large
+    entity/relation set whose vector payload did not materially change. Those
+    rows would otherwise be re-embedded and re-written, which is expensive.
+    """
+    stats = {
+        "total": len(payload),
+        "kept": len(payload),
+        "skipped": 0,
+    }
+    if storage is None or not payload or len(payload) < min_probe_size:
+        return payload, stats
+
+    compare_keys = set(getattr(storage, "meta_fields", set()) or set()) | {"content"}
+    if not compare_keys:
+        return payload, stats
+
+    payload_ids = list(payload.keys())
+    fetch_start = time.perf_counter()
+    try:
+        existing_records = await storage.get_by_ids(payload_ids)
+    except Exception as e:
+        logger.warning(
+            f"[vdb-diff] failed to probe existing {label} records before batch "
+            f"upsert ({len(payload)} candidates): {type(e).__name__}: {e}"
+        )
+        return payload, stats
+
+    performance_timing_log(
+        "[vdb-diff] %s get_by_ids completed in %.4fs ids=%s",
+        label,
+        time.perf_counter() - fetch_start,
+        len(payload_ids),
+    )
+
+    filtered_payload: dict[str, dict[str, Any]] = {}
+    skipped = 0
+    for record_id, new_record, existing_record in zip(
+        payload_ids, payload.values(), existing_records
+    ):
+        if not isinstance(existing_record, dict):
+            filtered_payload[record_id] = new_record
+            continue
+
+        unchanged = True
+        for key in compare_keys:
+            if _normalize_vdb_compare_value(
+                key, new_record.get(key)
+            ) != _normalize_vdb_compare_value(key, existing_record.get(key)):
+                unchanged = False
+                break
+
+        if unchanged:
+            skipped += 1
+        else:
+            filtered_payload[record_id] = new_record
+
+    stats["kept"] = len(filtered_payload)
+    stats["skipped"] = skipped
+
+    if skipped:
+        logger.info(
+            f"[vdb-diff] {label}: skipped {skipped}/{len(payload)} unchanged "
+            f"records before embedding/upsert"
+        )
+
+    return filtered_payload, stats
+
+
 def chunking_by_token_size(
     tokenizer: Tokenizer,
     content: str,
@@ -279,23 +380,32 @@ async def _handle_entity_relation_summary(
             f"   Summarizing {entity_or_relation_name}: Map {len(current_list)} descriptions into {len(chunks)} groups"
         )
 
-        # Reduce phase: summarize each group from chunks
+        # Reduce phase: summarize each group from chunks.
+        # Multi-description groups are dispatched concurrently via
+        # asyncio.gather — each LLM call is independent and benefits
+        # from the MAX_ASYNC worker pool. This turns the O(K) serial
+        # chain of summary calls into O(1) wall time (bounded by the
+        # slowest single call).
+        async def _reduce_one(chunk_group):
+            if len(chunk_group) == 1:
+                return chunk_group[0], False
+            summary = await _summarize_descriptions(
+                description_type,
+                entity_or_relation_name,
+                chunk_group,
+                global_config,
+                llm_response_cache,
+            )
+            return summary, True
+
+        reduce_results = await asyncio.gather(
+            *[_reduce_one(chunk_group) for chunk_group in chunks]
+        )
         new_summaries = []
-        for i, chunk in enumerate(chunks, start=1):
-            if len(chunk) == 1:
-                # Optimization: single description chunks don't need LLM summarization
-                new_summaries.append(chunk[0])
-            else:
-                # Multiple descriptions need LLM summarization
-                summary = await _summarize_descriptions(
-                    description_type,
-                    entity_or_relation_name,
-                    chunk,
-                    global_config,
-                    llm_response_cache,
-                )
-                new_summaries.append(summary)
-                llm_was_used = True  # Mark that LLM was used in reduce phase
+        for summary, used_llm in reduce_results:
+            new_summaries.append(summary)
+            if used_llm:
+                llm_was_used = True
 
         # Update current list with new summaries for next iteration
         current_list = new_summaries
@@ -1740,7 +1850,7 @@ async def _merge_nodes_then_upsert(
                     f"Skipped `{entity_name}`: KEEP old chunks {already_source_ids}/{len(full_source_ids)}"
                 )
                 existing_node_data = dict(already_node)
-                return existing_node_data
+                return existing_node_data, None  # No VDB payload for skipped entity
             else:
                 logger.error(
                     f"Internal Error: already_node missing for `{entity_name}`"
@@ -1902,7 +2012,7 @@ async def _merge_nodes_then_upsert(
         else:
             logger.debug(status_message)
 
-        # 11. Update both graph and vector db
+        # 11. Update graph (VDB upsert is deferred to batch — see Phase 3)
         node_data = dict(
             entity_id=entity_name,
             entity_type=entity_type,
@@ -1917,10 +2027,17 @@ async def _merge_nodes_then_upsert(
             node_data=node_data,
         )
         node_data["entity_name"] = entity_name
+
+        # Build the VDB payload but do NOT upsert here. nano_vectordb's
+        # upsert does a linear scan of all existing data on every call
+        # (O(N) per call), so N individual upserts become O(N²). Instead,
+        # we return the payload and the caller batches all entities into
+        # ONE upsert call at the end of Phase 1 → O(N) total.
+        vdb_payload = None
         if entity_vdb is not None:
             entity_vdb_id = compute_mdhash_id(str(entity_name), prefix="ent-")
             entity_content = f"{entity_name}\n{description}"
-            data_for_vdb = {
+            vdb_payload = {
                 entity_vdb_id: {
                     "entity_name": entity_name,
                     "entity_type": entity_type,
@@ -1929,14 +2046,7 @@ async def _merge_nodes_then_upsert(
                     "file_path": file_path,
                 }
             }
-            await safe_vdb_operation_with_exception(
-                operation=lambda payload=data_for_vdb: entity_vdb.upsert(payload),
-                operation_name="entity_upsert",
-                entity_name=entity_name,
-                max_retries=3,
-                retry_delay=0.1,
-            )
-        return node_data
+        return node_data, vdb_payload
     finally:
         performance_timing_log(
             "[_merge_nodes_then_upsert] `%s` completed in %.4fs",
@@ -1964,7 +2074,7 @@ async def _merge_edges_then_upsert(
     timing_relation = f"`{src_id}`~`{tgt_id}`"
     try:
         if src_id == tgt_id:
-            return None
+            return None, None, None  # Self-loop, skip
 
         already_edge = None
         already_weights = []
@@ -1973,11 +2083,11 @@ async def _merge_edges_then_upsert(
         already_keywords = []
         already_file_paths = []
 
-        # 1. Get existing edge data from graph storage
-        if await knowledge_graph_inst.has_edge(src_id, tgt_id):
-            already_edge = await knowledge_graph_inst.get_edge(src_id, tgt_id)
-            # Handle the case where get_edge returns None or missing fields
-            if already_edge:
+        # 1. Get existing edge data from graph storage.
+        # Single call instead of has_edge() + get_edge() — avoids a
+        # redundant O(degree) adjacency-list traversal per edge.
+        already_edge = await knowledge_graph_inst.get_edge(src_id, tgt_id)
+        if already_edge is not None:
                 # Get weight with default 1.0 if missing
                 already_weights.append(already_edge.get("weight", 1.0))
 
@@ -2080,7 +2190,7 @@ async def _merge_edges_then_upsert(
                     f"Skipped `{src_id}`~`{tgt_id}`: KEEP old chunks  {already_source_ids}/{len(full_source_ids)}"
                 )
                 existing_edge_data = dict(already_edge)
-                return existing_edge_data
+                return existing_edge_data, None, None  # No VDB payload for skipped edge
             else:
                 logger.error(
                     f"Internal Error: already_node missing for `{src_id}`~`{tgt_id}`"
@@ -2459,17 +2569,16 @@ async def _merge_edges_then_upsert(
         if src_id > tgt_id:
             src_id, tgt_id = tgt_id, src_id
 
+        # Build VDB payload but defer upsert to batch (Phase 3) to avoid
+        # nano_vectordb's O(N) per-call linear scan → O(N²) total.
+        rel_vdb_payload = None
+        rel_vdb_delete_ids = None
         if relationships_vdb is not None:
             rel_vdb_id = compute_mdhash_id(src_id + tgt_id, prefix="rel-")
             rel_vdb_id_reverse = compute_mdhash_id(tgt_id + src_id, prefix="rel-")
-            try:
-                await relationships_vdb.delete([rel_vdb_id, rel_vdb_id_reverse])
-            except Exception as e:
-                logger.debug(
-                    f"Could not delete old relationship vector records {rel_vdb_id}, {rel_vdb_id_reverse}: {e}"
-                )
+            rel_vdb_delete_ids = [rel_vdb_id, rel_vdb_id_reverse]
             rel_content = f"{keywords}\t{src_id}\n{tgt_id}\n{description}"
-            vdb_data = {
+            rel_vdb_payload = {
                 rel_vdb_id: {
                     "src_id": src_id,
                     "tgt_id": tgt_id,
@@ -2481,15 +2590,8 @@ async def _merge_edges_then_upsert(
                     "file_path": file_path,
                 }
             }
-            await safe_vdb_operation_with_exception(
-                operation=lambda payload=vdb_data: relationships_vdb.upsert(payload),
-                operation_name="relationship_upsert",
-                entity_name=f"{src_id}-{tgt_id}",
-                max_retries=3,
-                retry_delay=0.2,
-            )
 
-        return edge_data
+        return edge_data, rel_vdb_payload, rel_vdb_delete_ids
     finally:
         performance_timing_log(
             "[_merge_edges_then_upsert] %s completed in %.4fs",
@@ -2645,8 +2747,12 @@ async def merge_nodes_and_edges(
         entity_tasks.append(task)
         await _cooperative_yield(i, every=16)
 
-    # Execute entity tasks with error handling
+    # Execute entity tasks with error handling.
+    # Each task returns (node_data, vdb_payload). We collect vdb_payloads
+    # to do ONE batch upsert at Phase 3 instead of N individual upserts
+    # (avoids nano_vectordb's O(N) per-call linear scan → O(N²) total).
     processed_entities = []
+    entity_vdb_batch: dict[str, dict[str, Any]] = {}
     if entity_tasks:
         done, pending = await asyncio.wait(
             entity_tasks, return_when=asyncio.FIRST_EXCEPTION
@@ -2662,7 +2768,10 @@ async def merge_nodes_and_edges(
                 if first_exception is None:
                     first_exception = e
             else:
-                processed_entities.append(result)
+                node_data, vdb_payload = result
+                processed_entities.append(node_data)
+                if vdb_payload:
+                    entity_vdb_batch.update(vdb_payload)
             await _cooperative_yield(i, every=32)
 
         if pending:
@@ -2674,7 +2783,10 @@ async def merge_nodes_and_edges(
                     if first_exception is None:
                         first_exception = result
                 else:
-                    processed_entities.append(result)
+                    node_data, vdb_payload = result
+                    processed_entities.append(node_data)
+                    if vdb_payload:
+                        entity_vdb_batch.update(vdb_payload)
 
         if first_exception is not None:
             raise first_exception
@@ -2711,26 +2823,28 @@ async def merge_nodes_and_edges(
                     added_entities = []  # Track entities added during edge processing
 
                     logger.debug(f"Processing relation {sorted_edge_key}")
-                    edge_data = await _merge_edges_then_upsert(
-                        edge_key[0],
-                        edge_key[1],
-                        edges,
-                        knowledge_graph_inst,
-                        relationships_vdb,
-                        entity_vdb,
-                        global_config,
-                        pipeline_status,
-                        pipeline_status_lock,
-                        llm_response_cache,
-                        added_entities,  # Pass list to collect added entities
-                        relation_chunks_storage,
-                        entity_chunks_storage,  # Add entity_chunks_storage parameter
+                    edge_data, rel_vdb_payload, rel_vdb_delete_ids = (
+                        await _merge_edges_then_upsert(
+                            edge_key[0],
+                            edge_key[1],
+                            edges,
+                            knowledge_graph_inst,
+                            relationships_vdb,
+                            entity_vdb,
+                            global_config,
+                            pipeline_status,
+                            pipeline_status_lock,
+                            llm_response_cache,
+                            added_entities,  # Pass list to collect added entities
+                            relation_chunks_storage,
+                            entity_chunks_storage,
+                        )
                     )
 
                     if edge_data is None:
-                        return None, []
+                        return None, [], None, None
 
-                    return edge_data, added_entities
+                    return edge_data, added_entities, rel_vdb_payload, rel_vdb_delete_ids
 
                 except Exception as e:
                     error_msg = f"Error processing relation `{sorted_edge_key}`: {e}"
@@ -2763,9 +2877,13 @@ async def merge_nodes_and_edges(
         edge_tasks.append(task)
         await _cooperative_yield(i, every=16)
 
-    # Execute relationship tasks with error handling
+    # Execute relationship tasks with error handling.
+    # Each task returns (edge_data, added_entities, rel_vdb_payload, rel_vdb_delete_ids).
+    # VDB payloads are collected for batch upsert in Phase 3.
     processed_edges = []
     all_added_entities = []
+    rel_vdb_batch: dict[str, dict[str, Any]] = {}
+    rel_vdb_delete_batch: list[str] = []
 
     if edge_tasks:
         done, pending = await asyncio.wait(
@@ -2776,14 +2894,20 @@ async def merge_nodes_and_edges(
 
         for i, task in enumerate(done, start=1):
             try:
-                edge_data, added_entities = task.result()
+                edge_data, added_entities, rel_vdb_payload, rel_vdb_delete_ids = (
+                    task.result()
+                )
             except BaseException as e:
                 if first_exception is None:
                     first_exception = e
             else:
                 if edge_data is not None:
                     processed_edges.append(edge_data)
-                all_added_entities.extend(added_entities)
+                all_added_entities.extend(added_entities or [])
+                if rel_vdb_payload:
+                    rel_vdb_batch.update(rel_vdb_payload)
+                if rel_vdb_delete_ids:
+                    rel_vdb_delete_batch.extend(rel_vdb_delete_ids)
             await _cooperative_yield(i, every=32)
 
         if pending:
@@ -2795,10 +2919,16 @@ async def merge_nodes_and_edges(
                     if first_exception is None:
                         first_exception = result
                 else:
-                    edge_data, added_entities = result
+                    edge_data, added_entities, rel_vdb_payload, rel_vdb_delete_ids = (
+                        result
+                    )
                     if edge_data is not None:
                         processed_edges.append(edge_data)
-                    all_added_entities.extend(added_entities)
+                    all_added_entities.extend(added_entities or [])
+                    if rel_vdb_payload:
+                        rel_vdb_batch.update(rel_vdb_payload)
+                    if rel_vdb_delete_ids:
+                        rel_vdb_delete_batch.extend(rel_vdb_delete_ids)
 
         if first_exception is not None:
             raise first_exception
@@ -2872,6 +3002,104 @@ async def merge_nodes_and_edges(
                 f"Failed to update entity-relation index for document {doc_id}: {e}"
             )
             # Don't raise exception to avoid affecting main flow
+
+    # ===== Phase 3b: Batch VDB upserts (O(N) instead of O(N²)) =====
+    # nano_vectordb's upsert does a linear scan of all existing records on
+    # every call. Upserting N items one-by-one is O(N²). Collecting all
+    # payloads and doing ONE upsert call is O(N) — the single call still
+    # scans the existing data, but only once.
+    vdb_upsert_tasks = []
+    if entity_vdb is not None and entity_vdb_batch:
+        entity_vdb_batch, entity_vdb_diff_stats = await _filter_unchanged_vdb_upsert_batch(
+            entity_vdb,
+            entity_vdb_batch,
+            label="entity_vdb",
+        )
+        if entity_vdb_diff_stats["skipped"] and not entity_vdb_batch:
+            logger.info(
+                "Batch entity upsert skipped entirely: all %s records unchanged",
+                entity_vdb_diff_stats["total"],
+            )
+        if entity_vdb_diff_stats["skipped"] and entity_vdb_batch:
+            logger.info(
+                "Batch entity upsert reduced %s -> %s records after unchanged diff",
+                entity_vdb_diff_stats["total"],
+                len(entity_vdb_batch),
+            )
+    if entity_vdb is not None and entity_vdb_batch:
+        logger.info(
+            f"Batch upserting {len(entity_vdb_batch)} entities to entity_vdb"
+        )
+        vdb_upsert_tasks.append(
+            safe_vdb_operation_with_exception(
+                operation=lambda: entity_vdb.upsert(entity_vdb_batch),
+                operation_name="batch_entity_upsert",
+                entity_name=f"batch({len(entity_vdb_batch)})",
+                max_retries=3,
+                retry_delay=0.5,
+            )
+        )
+    if relationships_vdb is not None:
+        if rel_vdb_batch:
+            rel_vdb_batch, rel_vdb_diff_stats = await _filter_unchanged_vdb_upsert_batch(
+                relationships_vdb,
+                rel_vdb_batch,
+                label="relationships_vdb",
+            )
+
+            if rel_vdb_delete_batch:
+                allowed_delete_ids: set[str] = set()
+                for rel_vdb_id, payload in rel_vdb_batch.items():
+                    allowed_delete_ids.add(rel_vdb_id)
+                    src_id = str(payload.get("src_id") or "")
+                    tgt_id = str(payload.get("tgt_id") or "")
+                    if src_id and tgt_id:
+                        allowed_delete_ids.add(
+                            compute_mdhash_id(tgt_id + src_id, prefix="rel-")
+                        )
+                rel_vdb_delete_batch = list(
+                    dict.fromkeys(
+                        rel_id
+                        for rel_id in rel_vdb_delete_batch
+                        if rel_id in allowed_delete_ids
+                    )
+                )
+
+            if rel_vdb_diff_stats["skipped"] and not rel_vdb_batch:
+                logger.info(
+                    "Batch relationship upsert skipped entirely: all %s records unchanged",
+                    rel_vdb_diff_stats["total"],
+                )
+            if rel_vdb_diff_stats["skipped"] and rel_vdb_batch:
+                logger.info(
+                    "Batch relationship upsert reduced %s -> %s records after unchanged diff",
+                    rel_vdb_diff_stats["total"],
+                    len(rel_vdb_batch),
+                )
+        # Delete old relationship vectors first (stale forward+reverse ids)
+        if rel_vdb_delete_batch:
+            try:
+                await relationships_vdb.delete(rel_vdb_delete_batch)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to batch-delete {len(rel_vdb_delete_batch)} "
+                    f"stale relationship vectors: {e}"
+                )
+        if rel_vdb_batch:
+            logger.info(
+                f"Batch upserting {len(rel_vdb_batch)} relations to relationships_vdb"
+            )
+            vdb_upsert_tasks.append(
+                safe_vdb_operation_with_exception(
+                    operation=lambda: relationships_vdb.upsert(rel_vdb_batch),
+                    operation_name="batch_relationship_upsert",
+                    entity_name=f"batch({len(rel_vdb_batch)})",
+                    max_retries=3,
+                    retry_delay=0.5,
+                )
+            )
+    if vdb_upsert_tasks:
+        await asyncio.gather(*vdb_upsert_tasks)
 
     log_message = f"Completed merging: {len(processed_entities)} entities, {len(all_added_entities)} extra entities, {len(processed_edges)} relations"
     logger.info(log_message)
@@ -3172,6 +3400,8 @@ async def kg_query(
     hashing_kv: BaseKVStorage | None = None,
     system_prompt: str | None = None,
     chunks_vdb: BaseVectorStorage = None,
+    images_vdb: BaseVectorStorage = None,
+    image_metadata: BaseKVStorage = None,
 ) -> QueryResult | None:
     """
     Execute knowledge graph query and return unified QueryResult object.
@@ -3187,6 +3417,12 @@ async def kg_query(
         hashing_kv: Cache storage
         system_prompt: System prompt
         chunks_vdb: Document chunks vector database
+        images_vdb: Optional multimodal image-side vector database. When set
+            (along with ``image_metadata``), KG query modes can append
+            cross-modal image hits alongside their normal retrieval path.
+        image_metadata: Optional KV store holding image sidecar records
+            (annotation text, blob refs). Required alongside ``images_vdb``
+            for cross-modal retrieval to work.
 
     Returns:
         QueryResult | None: Unified query result object containing:
@@ -3208,11 +3444,19 @@ async def kg_query(
 
     if query_param.model_func:
         use_model_func = query_param.model_func
+    elif global_config.get("query_llm_model_func") is not None:
+        # Use the query-specific LLM for answer generation (e.g.
+        # enable_thinking=true for higher quality answers). Keyword
+        # extraction below still uses llm_model_func (fast, no thinking).
+        use_model_func = global_config["query_llm_model_func"]
+        use_model_func = partial(use_model_func, _priority=5)
     else:
         use_model_func = global_config["llm_model_func"]
         # Apply higher priority (5) to query relation LLM function
         use_model_func = partial(use_model_func, _priority=5)
 
+    # Keyword extraction always uses llm_model_func (fast, structured
+    # output — thinking mode doesn't help here and just adds latency).
     hl_keywords, ll_keywords = await get_keywords_from_query(
         query, query_param, global_config, hashing_kv
     )
@@ -3246,6 +3490,8 @@ async def kg_query(
         text_chunks_db,
         query_param,
         chunks_vdb,
+        images_vdb=images_vdb,
+        image_metadata=image_metadata,
     )
 
     if context_result is None:
@@ -3513,6 +3759,289 @@ async def extract_keywords_only(
     return hl_keywords, ll_keywords
 
 
+async def _get_image_context(
+    query: str,
+    images_vdb: BaseVectorStorage,
+    image_metadata: BaseKVStorage,
+    query_param: QueryParam,
+) -> list[dict]:
+    """Retrieve multimodal image hits for a text query.
+
+    Runs the query against ``images_vdb``. Because
+    :class:`~lightrag.utils.MultimodalEmbeddingFunc`'s default ``__call__``
+    routes to ``text_encode``, the query text is encoded into the SAME
+    semantic space as the indexed *image* vectors — this is what enables
+    cross-modal retrieval ("find images that match this description") at
+    zero cost to the vector store internals.
+
+    Each hit is resolved against the ``image_metadata`` KV store so the
+    caller sees the full annotation text (captured during ``ainsert_image``)
+    as the chunk content, not just the short caption stored in the VDB
+    meta_fields.
+
+    Returns a list of chunk-shaped dicts compatible with the downstream
+    ``_merge_all_chunks`` / ``_build_context_str`` pipeline:
+
+        {
+            "content":       annotation_text,
+            "file_path":     <source pdf / image path>,
+            "chunk_id":      "img-<hash>",   # distinct from text chunks' "chunk-<hash>"
+            "source_type":   "image_vector",
+            "image_blob_id": "img-<hash>",
+            "blob_ref":      <absolute path or URL>,
+            "distance":      <cosine similarity>,
+            "created_at":    <epoch>,
+        }
+
+    Args:
+        query: Text query string.
+        images_vdb: Vector store holding image-side embeddings.
+        image_metadata: KV store holding image sidecar records.
+        query_param: Query parameters (``chunk_top_k`` / ``top_k`` used).
+
+    Returns:
+        List of chunk-shaped dicts. Empty list when there are no hits or
+        when either dependency is missing. Never raises — errors are logged
+        and swallowed so a broken multimodal side never takes down the
+        text-side retrieval path.
+    """
+    if images_vdb is None or image_metadata is None:
+        return []
+    try:
+        def _build_image_locator(meta: dict[str, Any]) -> str:
+            parts: list[str] = []
+            page = meta.get("source_page")
+            printed_page = meta.get("source_printed_page")
+            page_label = str(meta.get("source_page_label") or "").strip()
+            if page is not None:
+                try:
+                    parts.append(f"PDF物理第 {int(page)} 页")
+                except (TypeError, ValueError):
+                    parts.append(f"PDF物理第 {page} 页")
+            printed_page_text = ""
+            if printed_page is not None:
+                try:
+                    printed_page_text = str(int(printed_page))
+                except (TypeError, ValueError):
+                    printed_page_text = str(printed_page)
+                if printed_page_text and printed_page_text != str(page):
+                    parts.append(f"文档页码 {printed_page_text}")
+            if page_label and page_label not in {str(page), printed_page_text}:
+                parts.append(f"页标 {page_label}")
+            bbox = meta.get("source_bbox")
+            if isinstance(bbox, dict):
+                x0 = bbox.get("x0", bbox.get("l"))
+                y0 = bbox.get("y0", bbox.get("t"))
+                width = bbox.get("width")
+                height = bbox.get("height")
+                if width is None:
+                    x1 = bbox.get("x1", bbox.get("r"))
+                    try:
+                        if x0 is not None and x1 is not None:
+                            width = float(x1) - float(x0)
+                    except (TypeError, ValueError):
+                        width = None
+                if height is None:
+                    y1 = bbox.get("y1", bbox.get("b"))
+                    try:
+                        if y0 is not None and y1 is not None:
+                            height = float(y1) - float(y0)
+                    except (TypeError, ValueError):
+                        height = None
+                locator_parts = []
+                try:
+                    if x0 is not None:
+                        locator_parts.append(f"x={float(x0):.1f}")
+                    if y0 is not None:
+                        locator_parts.append(f"y={float(y0):.1f}")
+                    if width is not None:
+                        locator_parts.append(f"w={float(width):.1f}")
+                    if height is not None:
+                        locator_parts.append(f"h={float(height):.1f}")
+                except (TypeError, ValueError):
+                    locator_parts = []
+                if locator_parts:
+                    parts.append("原图位置: " + ", ".join(locator_parts))
+            return " · ".join(parts)
+
+        def _build_image_query_text(
+            meta: dict[str, Any], fallback_annotation: str
+        ) -> str:
+            content = (fallback_annotation or "").strip()
+            locator = _build_image_locator(meta)
+            extra = meta.get("extra") if isinstance(meta.get("extra"), dict) else {}
+            context_text = (
+                meta.get("context_text")
+                or extra.get("context_text")
+                or extra.get("page_text_excerpt")
+                or ""
+            )
+            context_text = str(context_text).strip()
+
+            if locator and "【位置】" not in content:
+                content = (
+                    f"{content}\n【位置】 {locator}".strip() if content else f"【位置】 {locator}"
+                )
+            if context_text and context_text not in content:
+                content = (
+                    f"{content}\n【图像邻近上下文】\n{context_text}".strip()
+                    if content
+                    else f"【图像邻近上下文】\n{context_text}"
+                )
+            extraction_mode = str(
+                meta.get("extraction_mode") or extra.get("extraction_mode") or ""
+            ).strip()
+            if extraction_mode and "【提取方式】" not in content:
+                content = (
+                    f"{content}\n【提取方式】 {extraction_mode}".strip()
+                    if content
+                    else f"【提取方式】 {extraction_mode}"
+                )
+            merged_modes_raw = meta.get("merged_extraction_modes") or extra.get(
+                "merged_extraction_modes"
+            )
+            if isinstance(merged_modes_raw, list):
+                merged_modes = [
+                    str(mode).strip() for mode in merged_modes_raw if str(mode).strip()
+                ]
+            else:
+                merged_modes = []
+            if merged_modes and "【合并提取来源】" not in content:
+                merged_modes_text = "、".join(merged_modes)
+                content = (
+                    f"{content}\n【合并提取来源】 {merged_modes_text}".strip()
+                    if content
+                    else f"【合并提取来源】 {merged_modes_text}"
+                )
+            native_xref = meta.get("native_xref") or extra.get("native_xref")
+            if native_xref is not None and "【PDF原生图像】" not in content:
+                content = (
+                    f"{content}\n【PDF原生图像】 xref={native_xref}".strip()
+                    if content
+                    else f"【PDF原生图像】 xref={native_xref}"
+                )
+            context_chunks = meta.get("context_chunks") or extra.get("context_chunks") or []
+            if isinstance(context_chunks, list) and context_chunks:
+                chunk_lines: list[str] = []
+                for chunk in context_chunks[:3]:
+                    if not isinstance(chunk, dict):
+                        continue
+                    chunk_content = str(chunk.get("content") or "").strip()
+                    if not chunk_content:
+                        continue
+                    chunk_order_index = chunk.get("chunk_order_index")
+                    try:
+                        chunk_label = f"Chunk #{int(chunk_order_index) + 1}"
+                    except (TypeError, ValueError):
+                        chunk_label = "Chunk"
+                    chunk_lines.append(f"- {chunk_label}: {chunk_content[:500]}")
+                if chunk_lines and "【图像邻近上下文块】" not in content:
+                    chunk_block = "\n".join(chunk_lines)
+                    content = (
+                        f"{content}\n【图像邻近上下文块】\n{chunk_block}".strip()
+                        if content
+                        else f"【图像邻近上下文块】\n{chunk_block}"
+                    )
+            return content
+
+        search_top_k = query_param.chunk_top_k or query_param.top_k
+        cosine_threshold = images_vdb.cosine_better_than_threshold
+
+        results = await images_vdb.query(query, top_k=search_top_k)
+        if not results:
+            logger.info(
+                f"Image query: 0 hits "
+                f"(top_k:{search_top_k} cosine:{cosine_threshold})"
+            )
+            return []
+
+        # Batch-fetch annotation sidecars. Any missing entries are skipped
+        # silently — a stale VDB record without its KV counterpart is a
+        # corruption edge case, not a query-time failure.
+        blob_ids = [r.get("blob_id") for r in results if r.get("blob_id")]
+        metadata_records = await image_metadata.get_by_ids(blob_ids) if blob_ids else []
+        metadata_by_id: dict[str, dict[str, Any]] = {}
+        for bid, rec in zip(blob_ids, metadata_records):
+            if rec is not None:
+                metadata_by_id[bid] = rec
+
+        image_chunks: list[dict] = []
+        for r in results:
+            blob_id = r.get("blob_id")
+            if not blob_id:
+                continue
+            meta = metadata_by_id.get(blob_id) or {}
+            extra = meta.get("extra") if isinstance(meta.get("extra"), dict) else {}
+            # Prefer the full annotation text; fall back to caption if the
+            # KV record is missing or has no annotation (e.g. cases where
+            # vision captioning failed but embedding still ran).
+            annotation_text = meta.get("annotation_text")
+            if not annotation_text:
+                annotation_text = r.get("caption") or ""
+            annotation_text = _build_image_query_text(meta, annotation_text)
+            if not annotation_text:
+                # Nothing to feed the LLM — skip.
+                continue
+            image_chunks.append(
+                {
+                    "content": annotation_text,
+                    "file_path": meta.get("source_file_path")
+                    or r.get("file_path", "unknown_source"),
+                    # Use blob_id as chunk_id. The "img-" prefix makes it
+                    # naturally distinct from text chunks' "chunk-" prefix,
+                    # so the seen-chunks dedup set in _merge_all_chunks
+                    # can tell them apart and keep both when the same
+                    # image also surfaces via the text-side path.
+                    "chunk_id": blob_id,
+                    "source_type": "image_vector",
+                    "image_blob_id": blob_id,
+                    "blob_ref": r.get("blob_ref"),
+                    "distance": r.get("distance"),
+                    "created_at": r.get("created_at"),
+                    "source_doc_id": meta.get("source_doc_id"),
+                    "source_page": meta.get("source_page", extra.get("source_page")),
+                    "source_printed_page": meta.get(
+                        "source_printed_page", extra.get("source_printed_page")
+                    ),
+                    "source_page_label": meta.get(
+                        "source_page_label", extra.get("source_page_label")
+                    ),
+                    "source_bbox": meta.get("source_bbox", extra.get("source_bbox")),
+                    "picture_index": meta.get(
+                        "picture_index", extra.get("picture_index")
+                    ),
+                    "page_picture_index": meta.get(
+                        "page_picture_index", extra.get("page_picture_index")
+                    ),
+                    "context_text": meta.get("context_text")
+                    or extra.get("context_text")
+                    or extra.get("page_text_excerpt"),
+                    "context_chunk_ids": meta.get("context_chunk_ids")
+                    or extra.get("context_chunk_ids"),
+                    "context_chunks": meta.get("context_chunks")
+                    or extra.get("context_chunks"),
+                    "extraction_mode": meta.get("extraction_mode")
+                    or extra.get("extraction_mode"),
+                    "native_xref": meta.get("native_xref")
+                    or extra.get("native_xref"),
+                    "merged_extraction_modes": meta.get(
+                        "merged_extraction_modes"
+                    )
+                    or extra.get("merged_extraction_modes"),
+                    "extra": extra,
+                }
+            )
+
+        logger.info(
+            f"Image query: {len(image_chunks)} hits "
+            f"(top_k:{search_top_k} cosine:{cosine_threshold})"
+        )
+        return image_chunks
+    except Exception as e:
+        logger.error(f"Error in _get_image_context: {e}")
+        return []
+
+
 async def _get_vector_context(
     query: str,
     chunks_vdb: BaseVectorStorage,
@@ -3580,10 +4109,21 @@ async def _perform_kg_search(
     text_chunks_db: BaseKVStorage,
     query_param: QueryParam,
     chunks_vdb: BaseVectorStorage = None,
+    images_vdb: BaseVectorStorage = None,
+    image_metadata: BaseKVStorage = None,
 ) -> dict[str, Any]:
     """
     Pure search logic that retrieves raw entities, relations, and vector chunks.
     No token truncation or formatting - just raw search results.
+
+    When ``images_vdb`` and ``image_metadata`` are both provided, KG query
+    modes can run an additional cross-modal retrieval pass against the
+    image-side vector store. Image hits are resolved to their full annotation
+    text (via the KV store) and merged into ``vector_chunks`` so they flow
+    through the same truncation / merging / context-building pipeline as text
+    chunks. Image chunks are distinguished by a ``chunk_id`` starting with
+    ``img-`` (vs. ``chunk-`` for text) and carry
+    ``source_type="image_vector"``.
     """
 
     # Initialize result containers
@@ -3622,7 +4162,7 @@ async def _perform_kg_search(
         texts_to_embed: list[str] = []
         text_purposes: list[str] = []
 
-        if query and (kg_chunk_pick_method == "VECTOR" or chunks_vdb):
+        if query and (kg_chunk_pick_method == "VECTOR" or chunks_vdb or images_vdb):
             texts_to_embed.append(query)
             text_purposes.append("query")
 
@@ -3711,6 +4251,35 @@ async def _perform_kg_search(
                 else:
                     logger.warning(f"Vector chunk missing chunk_id: {chunk}")
 
+    # Multimodal: parallel cross-modal retrieval against images_vdb.
+    # Runs in all KG modes with the multimodal pipeline fully wired so the
+    # WebUI can surface retrieved PDF images regardless of the chosen KG mode.
+    # Falls through silently otherwise — text-only workloads are unaffected.
+    # Image hits are appended to vector_chunks so they flow through the
+    # same merge / truncate / context-build path.
+    if (
+        query_param.mode in ("mix", "hybrid", "local", "global")
+        and images_vdb is not None
+        and image_metadata is not None
+    ):
+        image_chunks = await _get_image_context(
+            query,
+            images_vdb,
+            image_metadata,
+            query_param,
+        )
+        # Track with source "I" (image) so the chunk-source audit log
+        # distinguishes them from text vector hits (source "C").
+        for i, chunk in enumerate(image_chunks):
+            chunk_id = chunk.get("chunk_id")
+            if chunk_id:
+                chunk_tracking[chunk_id] = {
+                    "source": "I",
+                    "frequency": 1,
+                    "order": i + 1,
+                }
+        vector_chunks.extend(image_chunks)
+
     # Round-robin merge entities
     final_entities = []
     seen_entities = set()
@@ -3767,8 +4336,15 @@ async def _perform_kg_search(
                 final_relations.append(relation)
                 seen_relations.add(rel_key)
 
+    num_image_chunks = sum(
+        1 for c in vector_chunks if c.get("source_type") == "image_vector"
+    )
+    num_text_vector_chunks = len(vector_chunks) - num_image_chunks
     logger.info(
-        f"Raw search results: {len(final_entities)} entities, {len(final_relations)} relations, {len(vector_chunks)} vector chunks"
+        f"Raw search results: {len(final_entities)} entities, "
+        f"{len(final_relations)} relations, "
+        f"{num_text_vector_chunks} text vector chunks, "
+        f"{num_image_chunks} image vector chunks"
     )
 
     return {
@@ -3997,6 +4573,36 @@ async def _merge_all_chunks(
             query_embedding=query_embedding,
         )
 
+    # Helper for creating a merged chunk entry with preserved multimodal markers
+    def _create_merged_entry(chunk, chunk_id):
+        entry = {
+            "content": chunk["content"],
+            "file_path": chunk.get("file_path", "unknown_source"),
+            "chunk_id": chunk_id,
+        }
+        # Preserve multimodal markers from ANY source (vector, entity, relation).
+        # While currently mainly image-vector hits carry these, preserving
+        # them globally ensures future extensions (e.g. caption chunks
+        # carrying their original blob IDs) work out of the box.
+        if chunk.get("source_type") == "image_vector":
+            entry["source_type"] = "image_vector"
+            entry["image_blob_id"] = chunk.get("image_blob_id")
+            if chunk.get("blob_ref"):
+                entry["blob_ref"] = chunk.get("blob_ref")
+            for field_name in (
+                "source_doc_id",
+                "source_page",
+                "source_bbox",
+                "picture_index",
+                "context_text",
+                "context_chunk_ids",
+                "context_chunks",
+                "extra",
+            ):
+                if chunk.get(field_name) is not None:
+                    entry[field_name] = chunk.get(field_name)
+        return entry
+
     # Round-robin merge chunks from different sources with deduplication
     merged_chunks = []
     seen_chunk_ids = set()
@@ -4004,19 +4610,13 @@ async def _merge_all_chunks(
     origin_len = len(vector_chunks) + len(entity_chunks) + len(relation_chunks)
 
     for i in range(max_len):
-        # Add from vector chunks first (Naive mode)
+        # Add from vector chunks first (Naive mode / Multimodal hits)
         if i < len(vector_chunks):
             chunk = vector_chunks[i]
             chunk_id = chunk.get("chunk_id") or chunk.get("id")
             if chunk_id and chunk_id not in seen_chunk_ids:
                 seen_chunk_ids.add(chunk_id)
-                merged_chunks.append(
-                    {
-                        "content": chunk["content"],
-                        "file_path": chunk.get("file_path", "unknown_source"),
-                        "chunk_id": chunk_id,
-                    }
-                )
+                merged_chunks.append(_create_merged_entry(chunk, chunk_id))
 
         # Add from entity chunks (Local mode)
         if i < len(entity_chunks):
@@ -4024,13 +4624,7 @@ async def _merge_all_chunks(
             chunk_id = chunk.get("chunk_id") or chunk.get("id")
             if chunk_id and chunk_id not in seen_chunk_ids:
                 seen_chunk_ids.add(chunk_id)
-                merged_chunks.append(
-                    {
-                        "content": chunk["content"],
-                        "file_path": chunk.get("file_path", "unknown_source"),
-                        "chunk_id": chunk_id,
-                    }
-                )
+                merged_chunks.append(_create_merged_entry(chunk, chunk_id))
 
         # Add from relation chunks (Global mode)
         if i < len(relation_chunks):
@@ -4038,13 +4632,7 @@ async def _merge_all_chunks(
             chunk_id = chunk.get("chunk_id") or chunk.get("id")
             if chunk_id and chunk_id not in seen_chunk_ids:
                 seen_chunk_ids.add(chunk_id)
-                merged_chunks.append(
-                    {
-                        "content": chunk["content"],
-                        "file_path": chunk.get("file_path", "unknown_source"),
-                        "chunk_id": chunk_id,
-                    }
-                )
+                merged_chunks.append(_create_merged_entry(chunk, chunk_id))
 
     logger.info(
         f"Round-robin merged chunks: {origin_len} -> {len(merged_chunks)} (deduplicated {origin_len - len(merged_chunks)})"
@@ -4246,12 +4834,19 @@ async def _build_query_context(
     text_chunks_db: BaseKVStorage,
     query_param: QueryParam,
     chunks_vdb: BaseVectorStorage = None,
+    images_vdb: BaseVectorStorage = None,
+    image_metadata: BaseKVStorage = None,
 ) -> QueryContextResult | None:
     """
     Main query context building function using the new 4-stage architecture:
     1. Search -> 2. Truncate -> 3. Merge chunks -> 4. Build LLM context
 
     Returns unified QueryContextResult containing both context and raw_data.
+
+    When the multimodal pipeline is wired in (``images_vdb`` and
+    ``image_metadata`` both non-None), KG query modes can also run a
+    cross-modal pass against the image-side vector store. See
+    ``_perform_kg_search`` for details.
     """
 
     if not query:
@@ -4269,14 +4864,17 @@ async def _build_query_context(
         text_chunks_db,
         query_param,
         chunks_vdb,
+        images_vdb=images_vdb,
+        image_metadata=image_metadata,
     )
 
-    if not search_result["final_entities"] and not search_result["final_relations"]:
-        if query_param.mode != "mix":
-            return None
-        else:
-            if not search_result["chunk_tracking"]:
-                return None
+    # Stage 2: Perform deduplication and filtering if necessary
+    if (
+        not search_result["final_entities"]
+        and not search_result["final_relations"]
+        and not search_result["chunk_tracking"]
+    ):
+        return None
 
     # Stage 2: Apply token truncation for LLM efficiency
     truncation_result = await _apply_token_truncation(
@@ -4935,6 +5533,8 @@ async def naive_query(
     hashing_kv: BaseKVStorage | None = None,
     system_prompt: str | None = None,
     return_raw_data: Literal[True] = True,
+    images_vdb: BaseVectorStorage = None,
+    image_metadata: BaseKVStorage = None,
 ) -> dict[str, Any]: ...
 
 
@@ -4947,6 +5547,8 @@ async def naive_query(
     hashing_kv: BaseKVStorage | None = None,
     system_prompt: str | None = None,
     return_raw_data: Literal[False] = False,
+    images_vdb: BaseVectorStorage = None,
+    image_metadata: BaseKVStorage = None,
 ) -> str | AsyncIterator[str]: ...
 
 
@@ -4957,6 +5559,8 @@ async def naive_query(
     global_config: dict[str, str],
     hashing_kv: BaseKVStorage | None = None,
     system_prompt: str | None = None,
+    images_vdb: BaseVectorStorage = None,
+    image_metadata: BaseKVStorage = None,
 ) -> QueryResult | None:
     """
     Execute naive query and return unified QueryResult object.
@@ -4984,6 +5588,9 @@ async def naive_query(
 
     if query_param.model_func:
         use_model_func = query_param.model_func
+    elif global_config.get("query_llm_model_func") is not None:
+        use_model_func = global_config["query_llm_model_func"]
+        use_model_func = partial(use_model_func, _priority=5)
     else:
         use_model_func = global_config["llm_model_func"]
         # Apply higher priority (5) to query relation LLM function
@@ -4995,6 +5602,18 @@ async def naive_query(
         return QueryResult(content=PROMPTS["fail_response"])
 
     chunks = await _get_vector_context(query, chunks_vdb, query_param, None)
+
+    # Multimodal: parallel cross-modal retrieval against images_vdb.
+    # Falls through silently when images_vdb/image_metadata are not provided.
+    if images_vdb is not None and image_metadata is not None:
+        image_chunks = await _get_image_context(
+            query,
+            images_vdb,
+            image_metadata,
+            query_param,
+        )
+        if image_chunks:
+            chunks.extend(image_chunks)
 
     if chunks is None or len(chunks) == 0:
         logger.info(

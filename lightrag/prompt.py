@@ -250,7 +250,14 @@ Consider the conversation history if provided to maintain conversational flow an
   - The response MUST utilize Markdown formatting for enhanced clarity and structure (e.g., headings, bold text, bullet points).
   - The response should be presented in {response_type}.
 
-4. References Section Format:
+4. Image References:
+  - When the **Context** contains image descriptions (marked with `【图像】 blob_id=img-XXXX`), these are images stored in the knowledge base.
+  - If an image is relevant to your answer, embed it using Markdown image syntax: `![brief description](/images/img-XXXX)`
+  - Replace `img-XXXX` with the actual blob_id from the context. Place images inline where they best support the surrounding text.
+  - Add a short descriptive alt text (5-10 words).
+  - Example: `![幕墙节点构造图](/images/img-78ad8ca9e985b458acbb0e940ebcdef3)`
+
+5. References Section Format:
   - The References section should be under heading: `### References`
   - Reference list entries should adhere to the format: `* [n] Document Title`. Do not include a caret (`^`) after opening square bracket (`[`).
   - The Document Title in the citation must retain its original language.
@@ -258,7 +265,7 @@ Consider the conversation history if provided to maintain conversational flow an
   - Provide maximum of 5 most relevant citations.
   - Do not generate footnotes section or any comment, summary, or explanation after the references.
 
-5. Reference Section Example:
+6. Reference Section Example:
 ```
 ### References
 
@@ -267,7 +274,7 @@ Consider the conversation history if provided to maintain conversational flow an
 - [3] Document Title Three
 ```
 
-6. Additional Instructions: {user_prompt}
+7. Additional Instructions: {user_prompt}
 
 
 ---Context---
@@ -304,7 +311,13 @@ Consider the conversation history if provided to maintain conversational flow an
   - The response MUST utilize Markdown formatting for enhanced clarity and structure (e.g., headings, bold text, bullet points).
   - The response should be presented in {response_type}.
 
-4. References Section Format:
+4. Image References:
+  - When the **Context** contains image descriptions (marked with `【图像】 blob_id=img-XXXX`), these are images stored in the knowledge base.
+  - If an image is relevant to your answer, embed it using Markdown image syntax: `![brief description](/images/img-XXXX)`
+  - Replace `img-XXXX` with the actual blob_id from the context. Place images inline where they best support the surrounding text.
+  - Add a short descriptive alt text (5-10 words).
+
+5. References Section Format:
   - The References section should be under heading: `### References`
   - Reference list entries should adhere to the format: `* [n] Document Title`. Do not include a caret (`^`) after opening square bracket (`[`).
   - The Document Title in the citation must retain its original language.
@@ -312,7 +325,7 @@ Consider the conversation history if provided to maintain conversational flow an
   - Provide maximum of 5 most relevant citations.
   - Do not generate footnotes section or any comment, summary, or explanation after the references.
 
-5. Reference Section Example:
+6. Reference Section Example:
 ```
 ### References
 
@@ -321,7 +334,7 @@ Consider the conversation history if provided to maintain conversational flow an
 - [3] Document Title Three
 ```
 
-6. Additional Instructions: {user_prompt}
+7. Additional Instructions: {user_prompt}
 
 
 ---Context---
@@ -430,3 +443,55 @@ Output:
 
 """,
 ]
+
+# ---------------------------------------------------------------------------
+# Image captioning prompts (used by vision_model_func in the multimodal pipeline)
+# ---------------------------------------------------------------------------
+# These prompts drive the vision model to produce a structured JSON annotation
+# for engineering drawings, construction photos, and equipment/material shots.
+# The resulting JSON is rendered to text and flows through the standard
+# chunking + entity-extraction pipeline, so entities detected in an image
+# (e.g. "poplar tree", "tower crane", "rebar") become first-class nodes in
+# the knowledge graph.
+PROMPTS["image_caption_system_prompt"] = """---Role---
+You are an expert in engineering, construction, and industrial image understanding. You are fluent in reading engineering drawings (plans, elevations, sections, schematics, electrical/plumbing/greening/landscape drawings), judging construction site photos, and identifying equipment and materials.
+
+---Task---
+Analyze the provided image and produce a structured description. The exact fields required depend on the image category:
+
+1. **Engineering drawings** (plan/elevation/section/layout/flow/electrical/piping/greening/landscape/general):
+   - Drawing category and subject
+   - Key objects shown (components, equipment, vegetation, annotations, symbols)
+   - Readable dimensions, specifications, or labels (if legible)
+   - Coordinate system or north arrow (if visible)
+
+2. **Construction site photos**:
+   - Scene (e.g. foundation pit, concrete pouring, lifting, rebar tying, transport, acceptance)
+   - Trades/workers visible
+   - Main machinery and equipment (crane type, formwork, mixer, etc.)
+   - Materials on site
+   - Visible safety measures or hazards
+
+3. **Equipment / material close-ups**:
+   - Object name, material/model, condition
+   - Serial numbers or specifications (if readable)
+
+---Output format---
+Return a SINGLE JSON object and NOTHING ELSE. No markdown fences, no commentary.
+
+{{
+  "image_category": "Engineering Drawing | Construction Photo | Equipment Closeup | Material Closeup | Other",
+  "sub_type": "e.g. Greening Layout Plan / Foundation Pit Excavation / Tower Crane / Rebar Stack",
+  "caption": "One-sentence summary, <= 40 words",
+  "detailed_description": "Detailed description covering the requirements above, 200-400 words",
+  "detected_entities": ["specific object 1", "specific object 2"],
+  "key_attributes": {{"attribute name": "value"}}
+}}
+
+Respond in {language}. All string values in the JSON must be written in {language}.
+"""
+
+PROMPTS["image_caption_user_prompt"] = """Please analyze the provided image and output the structured JSON description as instructed. The image is attached to this message.
+
+Respond in {language}.
+"""

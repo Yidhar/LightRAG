@@ -1,4 +1,4 @@
-import axios, { AxiosError } from 'axios'
+import axios, { AxiosError, type AxiosRequestConfig, type AxiosResponse } from 'axios'
 import { backendBaseUrl, popularLabelsDefaultLimit, searchLabelsDefaultLimit } from '@/lib/constants'
 import { errorMessage } from '@/lib/utils'
 import { useSettingsStore } from '@/stores/settings'
@@ -144,6 +144,110 @@ export type QueryResponse = {
   response: string
 }
 
+/**
+ * A single retrieved chunk as returned by `/query/data`.
+ *
+ * Text chunks (the common case) only have `chunk_id`, `content`, `file_path`
+ * and `reference_id`. Image chunks produced by the multimodal pipeline
+ * additionally carry `source_type === 'image_vector'`, `image_blob_id`
+ * (the content-hashed blob id, starts with "img-"), and `blob_ref` (the
+ * absolute path or URL the backend uses internally).
+ *
+ * Image bytes for an image chunk can be fetched via `GET /images/{blob_id}`
+ * and their full sidecar (caption JSON, source_doc_id backlink, etc.) via
+ * `GET /images/{blob_id}/metadata`.
+ */
+export type RetrievedChunk = {
+  chunk_id?: string
+  content?: string
+  file_path?: string
+  reference_id?: string
+  source_type?: 'image_vector' | string
+  image_blob_id?: string
+  blob_ref?: string
+  source_doc_id?: string
+  source_page?: number
+  source_printed_page?: number
+  source_page_label?: string | null
+  source_bbox?: Record<string, unknown> | null
+  picture_index?: number
+  page_picture_index?: number
+  context_text?: string
+  context_chunk_ids?: string[]
+  context_chunks?: ImageContextChunk[] | null
+  extraction_mode?: string | null
+  native_xref?: number | null
+  merged_extraction_modes?: string[] | null
+  extra?: Record<string, unknown> | null
+}
+
+export type ImageContextChunk = {
+  chunk_id?: string
+  chunk_order_index?: number
+  content?: string
+}
+
+export type QueryReference = {
+  reference_id: string
+  file_path: string
+}
+
+/**
+ * Structured response from `POST /query/data`.
+ *
+ * `data` is deliberately loose on the backend (`Dict[str, Any]`), so we
+ * type it as optional unknown buckets to avoid coupling the WebUI to
+ * every backend change.
+ */
+export type QueryDataResponse = {
+  status: 'success' | 'failure' | string
+  message: string
+  data?: {
+    entities?: unknown[]
+    relationships?: unknown[]
+    chunks?: RetrievedChunk[]
+    references?: QueryReference[]
+  }
+  metadata?: Record<string, unknown>
+}
+
+/**
+ * Sidecar metadata returned by `GET /images/{blob_id}/metadata`.
+ *
+ * Not every field is guaranteed — the backend falls back to a minimal
+ * shape when the image_metadata KV record is missing but the blob
+ * sidecar exists, so consumers should treat every field as optional.
+ */
+export type ImageMetadata = {
+  blob_id: string
+  blob_ref?: string | null
+  content_type?: string | null
+  source_doc_id?: string | null
+  source_file_path?: string | null
+  source_page?: number | null
+  source_printed_page?: number | null
+  source_page_label?: string | null
+  source_bbox?: Record<string, unknown> | null
+  picture_index?: number | null
+  page_picture_index?: number | null
+  context_text?: string | null
+  context_chunk_ids?: string[] | null
+  context_chunks?: ImageContextChunk[] | null
+  extraction_mode?: string | null
+  native_xref?: number | null
+  merged_extraction_modes?: string[] | null
+  annotation_text?: string | null
+  caption_json?: {
+    image_category?: string
+    sub_type?: string
+    caption?: string
+    detailed_description?: string
+    detected_entities?: string[]
+    key_attributes?: Record<string, unknown>
+  } | null
+  extra?: Record<string, unknown> | null
+}
+
 export type EntityUpdateResponse = {
   status: string
   message: string
@@ -163,6 +267,8 @@ export type DocActionResponse = {
   status: 'success' | 'partial_success' | 'failure' | 'duplicated'
   message: string
   track_id?: string
+  doc_id?: string
+  operation_metadata?: Record<string, any>
 }
 
 export type ScanResponse = {
@@ -175,6 +281,13 @@ export type ReprocessFailedResponse = {
   status: 'reprocessing_started'
   message: string
   track_id: string
+}
+
+export type RebuildMultimodalResponse = {
+  status: 'rebuild_started'
+  message: string
+  track_id: string
+  doc_id: string
 }
 
 export type DeleteDocResponse = {
@@ -503,6 +616,17 @@ export const reprocessFailedDocuments = async (): Promise<ReprocessFailedRespons
   return response.data
 }
 
+export const rebuildDocumentMultimodal = async (
+  docId: string,
+  request: { reuse_cache?: boolean } = {}
+): Promise<RebuildMultimodalResponse> => {
+  const response = await axiosInstance.post(
+    `/documents/${encodeURIComponent(docId)}/rebuild_multimodal`,
+    request
+  )
+  return response.data
+}
+
 export const getDocumentsScanProgress = async (): Promise<LightragDocumentsScanProgress> => {
   const response = await axiosInstance.get('/documents/scan-progress')
   return response.data
@@ -511,6 +635,156 @@ export const getDocumentsScanProgress = async (): Promise<LightragDocumentsScanP
 export const queryText = async (request: QueryRequest): Promise<QueryResponse> => {
   const response = await axiosInstance.post('/query', request)
   return response.data
+}
+
+/**
+ * Fetch the structured retrieval data for a query (entities, relationships,
+ * chunks, references) without any LLM generation. Used by the WebUI to
+ * render image chunks returned by the multimodal pipeline alongside the
+ * streamed LLM answer.
+ *
+ * This runs a real retrieval pass on the backend — callers should only
+ * invoke it when they actually need the structured data (e.g. after the
+ * streamed answer completes and the user has multimodal enabled).
+ */
+export const queryData = async (request: QueryRequest): Promise<QueryDataResponse> => {
+  const response = await axiosInstance.post('/query/data', request)
+  return response.data
+}
+
+const viteBackendBaseUrl = (() => {
+  const viteEnv =
+    typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env : undefined
+  const processEnv =
+    typeof process !== 'undefined' && process.env ? process.env : undefined
+  const rawValue = (viteEnv?.VITE_BACKEND_URL || processEnv?.VITE_BACKEND_URL || '').trim()
+  return rawValue ? rawValue.replace(/\/+$/, '') : ''
+})()
+
+let fallbackBackendBaseUrl = viteBackendBaseUrl
+
+const buildRequestTargets = (path: string): string[] => {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`
+  const requestTargets = [normalizedPath]
+
+  if (fallbackBackendBaseUrl) {
+    requestTargets.push(`${fallbackBackendBaseUrl}${normalizedPath}`)
+  }
+
+  return Array.from(new Set(requestTargets))
+}
+
+const defaultApiRequestExecutor = <T = unknown>(
+  config: AxiosRequestConfig
+): Promise<AxiosResponse<T>> => axiosInstance.request<T>(config)
+
+let apiRequestExecutor = defaultApiRequestExecutor
+
+const requestWithBackendFallback = async <T = unknown>(
+  config: AxiosRequestConfig,
+  validateResponse?: (response: AxiosResponse<T>) => void
+): Promise<AxiosResponse<T>> => {
+  const requestTargets = buildRequestTargets(String(config.url ?? ''))
+  let lastError: unknown = null
+
+  for (const url of requestTargets) {
+    try {
+      const response = await apiRequestExecutor<T>({
+        ...config,
+        url
+      })
+      validateResponse?.(response)
+      return response
+    } catch (error) {
+      lastError = error
+    }
+  }
+
+  if (lastError instanceof Error) {
+    throw lastError
+  }
+
+  throw new Error(`Request failed for ${requestTargets.join(', ')}`)
+}
+
+/**
+ * Build the URL for fetching the raw bytes of an image blob. The WebUI's
+ * axios instance is configured with `baseURL` + auth interceptors, but
+ * `<img src>` cannot go through axios — so we inline the base URL and
+ * rely on the Authorization header being forwarded by the browser via
+ * the api-key query / same-origin cookie. When neither is in play,
+ * callers can use `fetchImageBlobUrl` below to get a signed object URL.
+ */
+export const buildImageBlobUrl = (blobId: string): string =>
+  `${backendBaseUrl}/images/${encodeURIComponent(blobId)}`
+
+/**
+ * Fetch an image blob through the authenticated axios instance and
+ * return an object URL suitable for `<img src>`. The caller MUST call
+ * `URL.revokeObjectURL(url)` when the component unmounts to avoid leaks.
+ */
+export const fetchImageBlobUrl = async (blobId: string): Promise<string> => {
+  const response = await requestWithBackendFallback<Blob>(
+    {
+      method: 'get',
+      url: `/images/${encodeURIComponent(blobId)}`,
+      responseType: 'blob'
+    },
+    (result) => {
+      const headerContentType = String(
+        result.headers?.['content-type'] ?? ''
+      ).toLowerCase()
+      const blobContentType =
+        typeof Blob !== 'undefined' && result.data instanceof Blob
+          ? result.data.type.toLowerCase()
+          : ''
+      const effectiveContentType = headerContentType || blobContentType
+
+      if (effectiveContentType && !effectiveContentType.startsWith('image/')) {
+        throw new Error(
+          `Unexpected image content type: ${effectiveContentType}`
+        )
+      }
+    }
+  )
+  return URL.createObjectURL(response.data as Blob)
+}
+
+/**
+ * Fetch the sidecar metadata (caption JSON, source-doc backlink, etc.)
+ * for an image blob. Returns `null` on 404 so callers can show the
+ * image without a caption instead of throwing.
+ */
+export const fetchImageMetadata = async (
+  blobId: string
+): Promise<ImageMetadata | null> => {
+  try {
+    const response = await requestWithBackendFallback<ImageMetadata>({
+      method: 'get',
+      url: `/images/${encodeURIComponent(blobId)}/metadata`
+    })
+    return response.data as ImageMetadata
+  } catch (err: any) {
+    if (err?.response?.status === 404) {
+      return null
+    }
+    throw err
+  }
+}
+
+export const __resetApiRequestExecutorForTests = (): void => {
+  apiRequestExecutor = defaultApiRequestExecutor
+  fallbackBackendBaseUrl = viteBackendBaseUrl
+}
+
+export const __setApiRequestExecutorForTests = (
+  executor: typeof defaultApiRequestExecutor
+): void => {
+  apiRequestExecutor = executor
+}
+
+export const __setFallbackBackendBaseUrlForTests = (url: string): void => {
+  fallbackBackendBaseUrl = url.trim().replace(/\/+$/, '')
 }
 
 export const queryTextStream = async (
@@ -1040,10 +1314,10 @@ const releasePaginatedDocumentSubscriber = (
 const subscribeToPaginatedDocumentsRequest = (
   request: DocumentsRequest
 ): {
-    requestKey: string
-    requestEntry: InFlightPaginatedDocumentRequest
-    release: (abortIfLastSubscriber: boolean) => void
-  } => {
+  requestKey: string
+  requestEntry: InFlightPaginatedDocumentRequest
+  release: (abortIfLastSubscriber: boolean) => void
+} => {
   const requestKey = getPaginatedDocumentsRequestKey(request)
   let requestEntry = inFlightPaginatedDocumentRequests.get(requestKey)
 

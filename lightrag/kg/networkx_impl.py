@@ -207,12 +207,9 @@ class NetworkXStorage(BaseGraphStorage):
             [label1, label2, ...]  # Alphabetically sorted label list
         """
         graph = await self._get_graph()
-        labels = set()
-        for node in graph.nodes():
-            labels.add(str(node))  # Add node id as a label
-
-        # Return sorted list
-        return sorted(list(labels))
+        # Direct sorted generator — avoids intermediate set + list copies.
+        # NetworkX nodes() is already unique so dedup via set is unnecessary.
+        return sorted(str(node) for node in graph.nodes())
 
     async def get_popular_labels(self, limit: int = 300) -> list[str]:
         """
