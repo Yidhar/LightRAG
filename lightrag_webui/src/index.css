@@ -33,7 +33,7 @@
   --chart-3: hsl(197 37% 24%);
   --chart-4: hsl(43 74% 66%);
   --chart-5: hsl(27 87% 67%);
-  --radius: 0.6rem;
+  --radius: 0.75rem;
   --sidebar-background: hsl(0 0% 98%);
   --sidebar-foreground: hsl(240 5.3% 26.1%);
   --sidebar-primary: hsl(240 5.9% 10%);
@@ -42,6 +42,19 @@
   --sidebar-accent-foreground: hsl(240 5.9% 10%);
   --sidebar-border: hsl(220 13% 91%);
   --sidebar-ring: hsl(217.2 91.2% 59.8%);
+  --brand-emerald: 16 185 129;
+  --glass-surface: rgba(255, 255, 255, 0.96);
+  --glass-border: rgba(148, 163, 184, 0.18);
+  --panel-surface: rgba(255, 255, 255, 0.98);
+  --shadow-soft:
+    0 1px 2px rgba(15, 23, 42, 0.05),
+    0 6px 18px rgba(15, 23, 42, 0.08);
+  --shadow-elevated:
+    0 2px 4px rgba(15, 23, 42, 0.08),
+    0 14px 28px rgba(15, 23, 42, 0.12);
+  --header-height: 4rem;
+  --header-blur: 8px;
+  --motion-standard: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .dark {
@@ -77,6 +90,15 @@
   --sidebar-accent-foreground: hsl(240 4.8% 95.9%);
   --sidebar-border: hsl(240 3.7% 15.9%);
   --sidebar-ring: hsl(217.2 91.2% 59.8%);
+  --glass-surface: rgba(15, 23, 42, 0.94);
+  --glass-border: rgba(148, 163, 184, 0.16);
+  --panel-surface: rgba(15, 23, 42, 0.96);
+  --shadow-soft:
+    0 1px 2px rgba(0, 0, 0, 0.28),
+    0 8px 18px rgba(0, 0, 0, 0.24);
+  --shadow-elevated:
+    0 2px 6px rgba(0, 0, 0, 0.3),
+    0 14px 32px rgba(0, 0, 0, 0.3);
 }
 
 @theme inline {
@@ -122,36 +144,58 @@
 }
 
 @layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
   * {
     @apply border-border outline-ring/50;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground antialiased;
   }
 }
 
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
 }
 
 ::-webkit-scrollbar-thumb {
-  background-color: hsl(0 0% 80%);
-  border-radius: 5px;
+  background-color: rgba(100, 116, 139, 0.35);
+  border-radius: 9999px;
 }
 
 ::-webkit-scrollbar-track {
-  background-color: hsl(0 0% 95%);
+  background-color: transparent;
 }
 
 .dark {
   ::-webkit-scrollbar-thumb {
-    background-color: hsl(0 0% 90%);
+    background-color: rgba(148, 163, 184, 0.25);
   }
+}
 
-  ::-webkit-scrollbar-track {
-    background-color: hsl(0 0% 0%);
-  }
+.surface-glass {
+  background: var(--glass-surface);
+  border-color: var(--glass-border);
+  box-shadow: var(--shadow-elevated);
+  backdrop-filter: blur(var(--header-blur));
+}
+
+.surface-panel {
+  background: var(--panel-surface);
+  box-shadow: var(--shadow-soft);
+}
+
+.brand-glow {
+  filter: drop-shadow(0 4px 10px rgba(var(--brand-emerald), 0.18));
+}
+
+.motion-standard {
+  transition: var(--motion-standard);
 }
 
 /* KaTeX Math Formula Styles */

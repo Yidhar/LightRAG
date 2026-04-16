@@ -19,6 +19,7 @@
  * Phase 6 — LightRAG multimodal WebUI.
  */
 
+import type { TFunction } from 'i18next'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ImageIcon, LoaderIcon } from 'lucide-react'
@@ -73,27 +74,27 @@ function resolveShortCaption(
   return chunk.image_blob_id ?? chunk.chunk_id ?? 'image'
 }
 
-function resolveLocationSummary(metadata: ImageMetadata | null): string | null {
+function resolveLocationSummary(metadata: ImageMetadata | null, t: TFunction): string | null {
   if (!metadata) {
     return null
   }
 
   const parts: string[] = []
   if (typeof metadata.source_page === 'number') {
-    parts.push(`PDF Page ${metadata.source_page}`)
+    parts.push(t('retrievePanel.retrieval.imageLocation.pdfPage', { page: metadata.source_page }))
   }
   if (
     typeof metadata.source_printed_page === 'number' &&
     metadata.source_printed_page !== metadata.source_page
   ) {
-    parts.push(`Document Page ${metadata.source_printed_page}`)
+    parts.push(t('retrievePanel.retrieval.imageLocation.documentPage', { page: metadata.source_printed_page }))
   }
   if (
     metadata.source_page_label &&
     metadata.source_page_label !== String(metadata.source_page ?? '') &&
     metadata.source_page_label !== String(metadata.source_printed_page ?? '')
   ) {
-    parts.push(`Page Label ${metadata.source_page_label}`)
+    parts.push(t('retrievePanel.retrieval.imageLocation.pageLabel', { label: metadata.source_page_label }))
   }
 
   const bbox = metadata.source_bbox
@@ -108,7 +109,14 @@ function resolveLocationSummary(metadata: ImageMetadata | null): string | null {
     )
 
     if ([x0, y0, width, height].every((v) => Number.isFinite(v))) {
-      parts.push(`x=${x0.toFixed(1)}, y=${y0.toFixed(1)}, w=${width.toFixed(1)}, h=${height.toFixed(1)}`)
+      parts.push(
+        t('retrievePanel.retrieval.imageLocation.bounds', {
+          x: x0.toFixed(1),
+          y: y0.toFixed(1),
+          w: width.toFixed(1),
+          h: height.toFixed(1),
+        })
+      )
     }
   }
 
@@ -200,7 +208,7 @@ export function ChunkImage({ chunk }: ChunkImageProps) {
 
   const shortCaption = resolveShortCaption(chunk, metadata)
   const cj = metadata?.caption_json
-  const locationSummary = resolveLocationSummary(metadata)
+  const locationSummary = resolveLocationSummary(metadata, t)
   const contextText = resolveContextText(metadata)
   const contextChunks = resolveContextChunks(metadata)
 
@@ -223,7 +231,7 @@ export function ChunkImage({ chunk }: ChunkImageProps) {
             ) : loadError ? (
               <div className="text-muted-foreground flex flex-col items-center justify-center gap-1 p-2 text-center text-[10px]">
                 <ImageIcon className="size-6" />
-                <span>{t('retrievePanel.retrieval.imageLoadError', 'Failed to load image')}</span>
+                <span>{t('retrievePanel.retrieval.imageLoadError')}</span>
               </div>
             ) : (
               <LoaderIcon className="text-muted-foreground size-6 animate-spin" />
@@ -266,7 +274,7 @@ export function ChunkImage({ chunk }: ChunkImageProps) {
             <div className="text-muted-foreground flex flex-col items-center gap-2 p-8">
               <ImageIcon className="size-10" />
               <span className="text-xs">
-                {t('retrievePanel.retrieval.imageLoadError', 'Failed to load image')}
+                {t('retrievePanel.retrieval.imageLoadError')}
               </span>
             </div>
           ) : (
@@ -278,7 +286,7 @@ export function ChunkImage({ chunk }: ChunkImageProps) {
         {cj?.detailed_description && (
           <div className="space-y-1">
             <div className="text-muted-foreground text-[11px] font-medium uppercase tracking-wide">
-              {t('retrievePanel.retrieval.imageDescription', 'Description')}
+              {t('retrievePanel.retrieval.imageDescription')}
             </div>
             <p className="text-foreground whitespace-pre-wrap text-sm leading-relaxed">
               {cj.detailed_description}
@@ -288,7 +296,7 @@ export function ChunkImage({ chunk }: ChunkImageProps) {
         {cj?.detected_entities && cj.detected_entities.length > 0 && (
           <div className="space-y-1">
             <div className="text-muted-foreground text-[11px] font-medium uppercase tracking-wide">
-              {t('retrievePanel.retrieval.imageEntities', 'Detected entities')}
+              {t('retrievePanel.retrieval.imageEntities')}
             </div>
             <div className="flex flex-wrap gap-1.5">
               {cj.detected_entities.map((entity, i) => (
@@ -305,7 +313,7 @@ export function ChunkImage({ chunk }: ChunkImageProps) {
         {contextText && (
           <div className="space-y-1">
             <div className="text-muted-foreground text-[11px] font-medium uppercase tracking-wide">
-              {t('retrievePanel.retrieval.imageContext', 'Nearby text context')}
+              {t('retrievePanel.retrieval.imageContext')}
             </div>
             <p className="text-foreground whitespace-pre-wrap text-sm leading-relaxed">
               {contextText}
@@ -315,17 +323,19 @@ export function ChunkImage({ chunk }: ChunkImageProps) {
         {contextChunks.length > 0 && (
           <div className="space-y-1">
             <div className="text-muted-foreground text-[11px] font-medium uppercase tracking-wide">
-              {t('retrievePanel.retrieval.imageContextChunks', 'Nearby text chunks')}
+              {t('retrievePanel.retrieval.imageContextChunks')}
             </div>
             <div className="space-y-2">
               {contextChunks.map((contextChunk, index) => {
                 const chunkKey =
                   contextChunk.chunk_id ??
                   `${contextChunk.chunk_order_index ?? 'chunk'}-${index}`
-                const chunkTitle =
-                  typeof contextChunk.chunk_order_index === 'number'
-                    ? `Chunk #${contextChunk.chunk_order_index + 1}`
-                    : `Chunk ${index + 1}`
+                const chunkTitle = t('retrievePanel.retrieval.imageContextChunk', {
+                  index:
+                    typeof contextChunk.chunk_order_index === 'number'
+                      ? contextChunk.chunk_order_index + 1
+                      : index + 1,
+                })
                 return (
                   <div
                     key={chunkKey}
@@ -345,48 +355,48 @@ export function ChunkImage({ chunk }: ChunkImageProps) {
         )}
         <div className="text-muted-foreground space-y-0.5 border-t pt-2 text-[10px]">
           <div>
-            <span className="font-medium">blob_id:</span> {blobId}
+            <span className="font-medium">{t('retrievePanel.retrieval.imageMetadata.blobId')}</span> {blobId}
           </div>
           {metadata?.source_file_path && (
             <div className="break-all">
-              <span className="font-medium">source:</span>{' '}
+              <span className="font-medium">{t('retrievePanel.retrieval.imageMetadata.source')}</span>{' '}
               {metadata.source_file_path}
             </div>
           )}
           {metadata?.source_doc_id && (
             <div className="break-all">
-              <span className="font-medium">doc_id:</span>{' '}
+              <span className="font-medium">{t('retrievePanel.retrieval.imageMetadata.docId')}</span>{' '}
               {metadata.source_doc_id}
             </div>
           )}
           {typeof metadata?.picture_index === 'number' && (
             <div>
-              <span className="font-medium">picture_index:</span>{' '}
+              <span className="font-medium">{t('retrievePanel.retrieval.imageMetadata.pictureIndex')}</span>{' '}
               {metadata.picture_index}
             </div>
           )}
           {typeof metadata?.page_picture_index === 'number' && (
             <div>
-              <span className="font-medium">page_picture_index:</span>{' '}
+              <span className="font-medium">{t('retrievePanel.retrieval.imageMetadata.pagePictureIndex')}</span>{' '}
               {metadata.page_picture_index}
             </div>
           )}
           {metadata?.extraction_mode && (
             <div>
-              <span className="font-medium">extraction:</span>{' '}
+              <span className="font-medium">{t('retrievePanel.retrieval.imageMetadata.extraction')}</span>{' '}
               {metadata.extraction_mode}
             </div>
           )}
           {typeof metadata?.native_xref === 'number' && (
             <div>
-              <span className="font-medium">native_xref:</span>{' '}
+              <span className="font-medium">{t('retrievePanel.retrieval.imageMetadata.nativeXref')}</span>{' '}
               {metadata.native_xref}
             </div>
           )}
           {Array.isArray(metadata?.merged_extraction_modes) &&
             metadata.merged_extraction_modes.length > 0 && (
             <div className="break-all">
-              <span className="font-medium">merged_extraction_modes:</span>{' '}
+              <span className="font-medium">{t('retrievePanel.retrieval.imageMetadata.mergedExtractionModes')}</span>{' '}
               {metadata.merged_extraction_modes.join(', ')}
             </div>
           )}
@@ -418,7 +428,7 @@ export function ChunkImageGrid({ chunks }: ChunkImageGridProps) {
   return (
     <div className="mt-3 flex flex-col gap-2">
       <div className="text-muted-foreground text-[11px] font-medium uppercase tracking-wide">
-        {t('retrievePanel.retrieval.retrievedImages', 'Retrieved images')}{' '}
+        {t('retrievePanel.retrieval.retrievedImages')}{' '}
         ({imageChunks.length})
       </div>
       <div className="flex flex-wrap gap-2">

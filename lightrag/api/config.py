@@ -53,6 +53,33 @@ load_dotenv(dotenv_path=".env", override=False)
 ollama_server_infos = OllamaServerInfos()
 DEFAULT_TOKEN_SECRET = "lightrag-jwt-default-secret-key!"
 
+MANUAL_KB_ISOLATION_MIGRATION_BACKENDS = {
+    "kv_storage": {
+        "RedisKVStorage",
+        "MongoKVStorage",
+        "OpenSearchKVStorage",
+    },
+    "doc_status_storage": {
+        "RedisDocStatusStorage",
+        "MongoDocStatusStorage",
+        "OpenSearchDocStatusStorage",
+    },
+    "graph_storage": {
+        "PGGraphStorage",
+        "Neo4JStorage",
+        "MongoGraphStorage",
+        "MemgraphStorage",
+        "OpenSearchGraphStorage",
+    },
+    "vector_storage": {
+        "FaissVectorDBStorage",
+        "MilvusVectorDBStorage",
+        "QdrantVectorDBStorage",
+        "MongoVectorDBStorage",
+        "OpenSearchVectorDBStorage",
+    },
+}
+
 
 class DefaultRAGStorageConfig:
     KV_STORAGE = "JsonKVStorage"
@@ -76,14 +103,70 @@ def get_default_host(binding_type: str) -> str:
     )  # fallback to ollama if unknown
 
 
+def sanitize_platform_identifier(
+    value: str | None, *, label: str, fallback: str | None = None
+) -> str | None:
+    """Normalize platform-scoped identifiers used by upcoming auth/KB features."""
+    if value is None:
+        return fallback
+
+    normalized = value.strip()
+    if not normalized:
+        return fallback
+
+    sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", normalized)
+    if sanitized != normalized:
+        logging.warning(
+            f"{label} value '{normalized}' contains invalid characters. "
+            f"It has been sanitized to '{sanitized}'. "
+            "Only alphanumeric characters and underscores are allowed."
+        )
+    return sanitized
+
+
+def sanitize_kb_separator(value: str | None, *, fallback: str = "__") -> str:
+    """Normalize KB separator into a filesystem-safe token."""
+    if value is None:
+        return fallback
+
+    normalized = value.strip()
+    if not normalized:
+        return fallback
+
+    if re.fullmatch(r"[A-Za-z0-9_-]+", normalized):
+        return normalized
+
+    logging.warning(
+        "KB_SEPARATOR value '%s' contains unsafe characters. Falling back to '%s'.",
+        normalized,
+        fallback,
+    )
+    return fallback
+
+
+def collect_manual_kb_isolation_migration_backends(
+    args: argparse.Namespace,
+) -> list[str]:
+    """Return selected backends that currently require operator-managed WS5 migration."""
+    selected: list[str] = []
+    for attr_name, backend_names in MANUAL_KB_ISOLATION_MIGRATION_BACKENDS.items():
+        value = getattr(args, attr_name, None)
+        if value in backend_names:
+            selected.append(f"{attr_name}={value}")
+    return selected
+
+
 def validate_auth_configuration(args: argparse.Namespace) -> None:
     """Reject insecure JWT auth settings before the API starts."""
     auth_accounts = (getattr(args, "auth_accounts", "") or "").strip()
     token_secret = (getattr(args, "token_secret", "") or "").strip()
+    use_db_auth = bool(getattr(args, "use_db_auth", False))
 
-    if auth_accounts and (not token_secret or token_secret == DEFAULT_TOKEN_SECRET):
+    if (auth_accounts or use_db_auth) and (
+        not token_secret or token_secret == DEFAULT_TOKEN_SECRET
+    ):
         raise ValueError(
-            "TOKEN_SECRET must be explicitly set to a non-default value when AUTH_ACCOUNTS is configured."
+            "TOKEN_SECRET must be explicitly set to a non-default value when local authentication is configured."
         )
 
 
@@ -160,6 +243,40 @@ def parse_args() -> argparse.Namespace:
             "SUMMARY_LENGTH_RECOMMENDED", DEFAULT_SUMMARY_LENGTH_RECOMMENDED, int
         ),
         help=f"LLM Summary Context size (default: from env or {DEFAULT_SUMMARY_LENGTH_RECOMMENDED})",
+    )
+    parser.add_argument(
+        "--entity-extraction-mode",
+        choices=["auto", "realtime", "batch"],
+        default=get_env_value("ENTITY_EXTRACTION_MODE", "auto", str),
+        help="Entity extraction execution mode: auto (default), realtime, or batch",
+    )
+    parser.add_argument(
+        "--entity-extraction-batch-min-chunks",
+        type=int,
+        default=get_env_value("ENTITY_EXTRACTION_BATCH_MIN_CHUNKS", 120, int),
+        help="Minimum chunk count before auto mode switches entity extraction to batch mode",
+    )
+    parser.add_argument(
+        "--entity-extraction-batch-poll-interval-seconds",
+        type=int,
+        default=get_env_value(
+            "ENTITY_EXTRACTION_BATCH_POLL_INTERVAL_SECONDS", 5, int
+        ),
+        help="Polling interval in seconds while waiting for entity extraction batch jobs",
+    )
+    parser.add_argument(
+        "--entity-extraction-batch-timeout-seconds",
+        type=int,
+        default=get_env_value("ENTITY_EXTRACTION_BATCH_TIMEOUT_SECONDS", 3600, int),
+        help="Timeout in seconds for entity extraction batch jobs before fallback/cancel",
+    )
+    parser.add_argument(
+        "--entity-extraction-batch-fallback-to-realtime",
+        default=get_env_value(
+            "ENTITY_EXTRACTION_BATCH_FALLBACK_TO_REALTIME", True, bool
+        ),
+        action=argparse.BooleanOptionalAction,
+        help="Fallback to realtime entity extraction if batch extraction fails",
     )
 
     # Logging configuration
@@ -407,11 +524,25 @@ def parse_args() -> argparse.Namespace:
     args.token_secret = get_env_value("TOKEN_SECRET", None)
     args.token_expire_hours = get_env_value("TOKEN_EXPIRE_HOURS", 48, float)
     args.guest_token_expire_hours = get_env_value("GUEST_TOKEN_EXPIRE_HOURS", 24, float)
+    args.refresh_token_expire_hours = get_env_value(
+        "REFRESH_TOKEN_EXPIRE_HOURS", 168, float
+    )
     args.jwt_algorithm = get_env_value("JWT_ALGORITHM", "HS256")
 
     # Token auto-renewal configuration (sliding window expiration)
     args.token_auto_renew = get_env_value("TOKEN_AUTO_RENEW", True, bool)
     args.token_renew_threshold = get_env_value("TOKEN_RENEW_THRESHOLD", 0.5, float)
+
+    # Platform V2 feature flags (env-only; keep argparse surface unchanged)
+    args.use_db_auth = get_env_value("USE_DB_AUTH", False, bool)
+    args.enable_kb_isolation = get_env_value("ENABLE_KB_ISOLATION", False, bool)
+    args.kb_separator = sanitize_kb_separator(
+        get_env_value("KB_SEPARATOR", "__", str),
+        fallback="__",
+    )
+    args.db_url = get_env_value(
+        "DB_URL", "sqlite+aiosqlite:///./lightrag_auth.db"
+    )
 
     # Rerank model configuration
     args.rerank_model = get_env_value("RERANK_MODEL", None)
@@ -479,6 +610,18 @@ def parse_args() -> argparse.Namespace:
                 "Only alphanumeric characters and underscores are allowed."
             )
             args.workspace = sanitized
+
+    default_workspace_fallback = args.workspace or "default"
+    args.default_workspace_id = sanitize_platform_identifier(
+        get_env_value("DEFAULT_WORKSPACE_ID", default_workspace_fallback),
+        label="DEFAULT_WORKSPACE_ID",
+        fallback=default_workspace_fallback,
+    )
+    args.default_kb_id = sanitize_platform_identifier(
+        get_env_value("DEFAULT_KB_ID", "default"),
+        label="DEFAULT_KB_ID",
+        fallback="default",
+    )
 
     validate_auth_configuration(args)
     return args

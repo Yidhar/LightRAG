@@ -3,6 +3,7 @@ import { createSelectors } from '@/lib/utils'
 import { checkHealth, LightragStatus } from '@/api/lightrag'
 import { useSettingsStore } from './settings'
 import { healthCheckInterval } from '@/lib/constants'
+import { type MembershipClaim, normalizeMembershipClaims } from '@/lib/permissions'
 
 interface BackendState {
   health: boolean
@@ -27,16 +28,17 @@ interface BackendState {
 
 interface AuthState {
   isAuthenticated: boolean;
-  isGuestMode: boolean;  // Add guest mode flag
   coreVersion: string | null;
   apiVersion: string | null;
   username: string | null; // login username
+  role: string | null; // raw token role
+  memberships: MembershipClaim[]; // JWT membership claims
   webuiTitle: string | null; // Custom title
   webuiDescription: string | null; // Title description
   lastTokenRenewal: string | null; // Human-readable local time of last token renewal (for debugging and monitoring)
   tokenExpiresAt: number | null; // Token expiration timestamp (extracted from JWT)
 
-  login: (token: string, isGuest?: boolean, coreVersion?: string | null, apiVersion?: string | null, webuiTitle?: string | null, webuiDescription?: string | null) => void;
+  login: (token: string, coreVersion?: string | null, apiVersion?: string | null, webuiTitle?: string | null, webuiDescription?: string | null) => void;
   logout: () => void;
   setVersion: (coreVersion: string | null, apiVersion: string | null) => void;
   setCustomTitle: (webuiTitle: string | null, webuiDescription: string | null) => void;
@@ -171,13 +173,21 @@ const formatTimestampToLocalString = (timestamp: number): string => {
   return `${localTime} (UTC${offsetSign}${offsetHours})`;
 };
 
-const parseTokenPayload = (token: string): { sub?: string; role?: string; exp?: number } => {
+const parseTokenPayload = (token: string): {
+  sub?: string
+  role?: string
+  exp?: number
+  memberships?: MembershipClaim[]
+} => {
   try {
     // JWT tokens are in the format: header.payload.signature
     const parts = token.split('.');
     if (parts.length !== 3) return {};
     const payload = JSON.parse(atob(parts[1]));
-    return payload;
+    return {
+      ...payload,
+      memberships: normalizeMembershipClaims(payload.memberships),
+    };
   } catch (e) {
     console.error('Error parsing token payload:', e);
     return {};
@@ -189,9 +199,9 @@ const getUsernameFromToken = (token: string): string | null => {
   return payload.sub || null;
 };
 
-const isGuestToken = (token: string): boolean => {
+const getRoleFromToken = (token: string): string | null => {
   const payload = parseTokenPayload(token);
-  return payload.role === 'guest';
+  return payload.role || null;
 };
 
 const getTokenExpiresAt = (token: string): number | null => {
@@ -199,7 +209,12 @@ const getTokenExpiresAt = (token: string): number | null => {
   return payload.exp ? payload.exp * 1000 : null; // Convert to milliseconds
 };
 
-const initAuthState = (): { isAuthenticated: boolean; isGuestMode: boolean; coreVersion: string | null; apiVersion: string | null; username: string | null; webuiTitle: string | null; webuiDescription: string | null; lastTokenRenewal: string | null; tokenExpiresAt: number | null } => {
+const getMembershipsFromToken = (token: string): MembershipClaim[] => {
+  const payload = parseTokenPayload(token);
+  return payload.memberships || [];
+};
+
+const initAuthState = (): { isAuthenticated: boolean; coreVersion: string | null; apiVersion: string | null; username: string | null; role: string | null; memberships: MembershipClaim[]; webuiTitle: string | null; webuiDescription: string | null; lastTokenRenewal: string | null; tokenExpiresAt: number | null } => {
   const token = localStorage.getItem('LIGHTRAG-API-TOKEN');
   const coreVersion = localStorage.getItem('LIGHTRAG-CORE-VERSION');
   const apiVersion = localStorage.getItem('LIGHTRAG-API-VERSION');
@@ -207,15 +222,18 @@ const initAuthState = (): { isAuthenticated: boolean; isGuestMode: boolean; core
   const webuiDescription = localStorage.getItem('LIGHTRAG-WEBUI-DESCRIPTION');
   const lastTokenRenewal = localStorage.getItem('LIGHTRAG-LAST-TOKEN-RENEWAL');
   const username = token ? getUsernameFromToken(token) : null;
+  const role = token ? getRoleFromToken(token) : null;
+  const memberships = token ? getMembershipsFromToken(token) : [];
   const tokenExpiresAt = token ? getTokenExpiresAt(token) : null;
 
   if (!token) {
     return {
       isAuthenticated: false,
-      isGuestMode: false,
       coreVersion: coreVersion,
       apiVersion: apiVersion,
       username: null,
+      role: null,
+      memberships: [],
       webuiTitle: webuiTitle,
       webuiDescription: webuiDescription,
       lastTokenRenewal: null,
@@ -225,10 +243,11 @@ const initAuthState = (): { isAuthenticated: boolean; isGuestMode: boolean; core
 
   return {
     isAuthenticated: true,
-    isGuestMode: isGuestToken(token),
     coreVersion: coreVersion,
     apiVersion: apiVersion,
     username: username,
+    role: role,
+    memberships: memberships,
     webuiTitle: webuiTitle,
     webuiDescription: webuiDescription,
     lastTokenRenewal: lastTokenRenewal,
@@ -242,16 +261,17 @@ export const useAuthStore = create<AuthState>(set => {
 
   return {
     isAuthenticated: initialState.isAuthenticated,
-    isGuestMode: initialState.isGuestMode,
     coreVersion: initialState.coreVersion,
     apiVersion: initialState.apiVersion,
     username: initialState.username,
+    role: initialState.role,
+    memberships: initialState.memberships,
     webuiTitle: initialState.webuiTitle,
     webuiDescription: initialState.webuiDescription,
     lastTokenRenewal: initialState.lastTokenRenewal,
     tokenExpiresAt: initialState.tokenExpiresAt,
 
-    login: (token, isGuest = false, coreVersion = null, apiVersion = null, webuiTitle = null, webuiDescription = null) => {
+    login: (token, coreVersion = null, apiVersion = null, webuiTitle = null, webuiDescription = null) => {
       localStorage.setItem('LIGHTRAG-API-TOKEN', token);
 
       if (coreVersion) {
@@ -274,6 +294,8 @@ export const useAuthStore = create<AuthState>(set => {
       }
 
       const username = getUsernameFromToken(token);
+      const role = getRoleFromToken(token);
+      const memberships = getMembershipsFromToken(token);
       const tokenExpiresAt = getTokenExpiresAt(token);
       const now = Date.now();
       const formattedTime = formatTimestampToLocalString(now);
@@ -283,8 +305,9 @@ export const useAuthStore = create<AuthState>(set => {
 
       set({
         isAuthenticated: true,
-        isGuestMode: isGuest,
         username: username,
+        role: role,
+        memberships: memberships,
         coreVersion: coreVersion,
         apiVersion: apiVersion,
         webuiTitle: webuiTitle,
@@ -305,8 +328,9 @@ export const useAuthStore = create<AuthState>(set => {
 
       set({
         isAuthenticated: false,
-        isGuestMode: false,
         username: null,
+        role: null,
+        memberships: [],
         coreVersion: coreVersion,
         apiVersion: apiVersion,
         webuiTitle: webuiTitle,

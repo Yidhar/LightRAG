@@ -19,6 +19,7 @@ import { cn } from '@/lib/utils'
 type DialogPosition = 'left' | 'center' | 'right'
 
 interface PipelineStatusDialogProps {
+  canCancelPipeline?: boolean
   open: boolean
   onOpenChange: (open: boolean) => void
 }
@@ -46,39 +47,75 @@ function formatDuration(ms: number | null): string {
 }
 
 function getProgressMetrics(status: PipelineStatusResponse | null, nowMs: number) {
-  const totalBatches = Math.max(status?.batchs ?? 0, 0)
-  const currentBatch = Math.min(Math.max(status?.cur_batch ?? 0, 0), totalBatches || Number.MAX_SAFE_INTEGER)
-  const processedBatches = totalBatches > 0 ? currentBatch : 0
-  const remainingBatches = totalBatches > 0 ? Math.max(totalBatches - processedBatches, 0) : 0
-  const progressPercent = totalBatches > 0
-    ? Math.min(100, Math.max(0, (processedBatches / totalBatches) * 100))
+  const stageTotal = Math.max(status?.stage_total ?? 0, 0)
+  const fallbackTotal = Math.max(status?.batchs ?? 0, 0)
+  const totalItems = stageTotal > 0 ? stageTotal : fallbackTotal
+
+  const stageProcessed = Math.max(status?.stage_processed ?? 0, 0)
+  const fallbackProcessed = totalItems > 0
+    ? Math.min(Math.max(status?.cur_batch ?? 0, 0), totalItems || Number.MAX_SAFE_INTEGER)
+    : 0
+  const processedItems = totalItems > 0
+    ? Math.min(stageTotal > 0 ? stageProcessed : fallbackProcessed, totalItems)
+    : 0
+
+  const remainingItems = totalItems > 0
+    ? Math.max(
+      typeof status?.stage_remaining === 'number' && stageTotal > 0
+        ? status.stage_remaining
+        : totalItems - processedItems,
+      0
+    )
+    : 0
+
+  const progressPercent = totalItems > 0
+    ? Math.min(100, Math.max(0, (processedItems / totalItems) * 100))
     : 0
 
   const jobStartMs = status?.job_start ? new Date(status.job_start).getTime() : Number.NaN
-  const elapsedMs = Number.isFinite(jobStartMs)
-    ? Math.max(0, nowMs - jobStartMs)
-    : null
-
-  const etaMs = elapsedMs !== null && progressPercent > 0 && progressPercent < 100
-    ? elapsedMs * ((100 - progressPercent) / progressPercent)
-    : progressPercent >= 100
-      ? 0
+  const elapsedMs = typeof status?.stage_elapsed_seconds === 'number'
+    ? Math.max(0, status.stage_elapsed_seconds * 1000)
+    : Number.isFinite(jobStartMs)
+      ? Math.max(0, nowMs - jobStartMs)
       : null
 
+  const etaMs = typeof status?.stage_eta_seconds === 'number'
+    ? Math.max(0, status.stage_eta_seconds * 1000)
+    : elapsedMs !== null && progressPercent > 0 && progressPercent < 100
+      ? elapsedMs * ((100 - progressPercent) / progressPercent)
+      : progressPercent >= 100
+        ? 0
+        : null
+
+  const unit = status?.stage_unit?.trim()
+    || (stageTotal > 0 ? 'chunks' : 'documents')
+  const stageLabel = status?.current_stage_label?.trim() || null
+
   return {
-    totalBatches,
-    processedBatches,
-    remainingBatches,
+    totalItems,
+    processedItems,
+    remainingItems,
     progressPercent,
     elapsedMs,
-    etaMs
+    etaMs,
+    unit,
+    stageLabel
   }
 }
 
 export default function PipelineStatusDialog({
+  canCancelPipeline = true,
   open,
   onOpenChange
 }: PipelineStatusDialogProps) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      {open ? <PipelineStatusDialogContent canCancelPipeline={canCancelPipeline} /> : null}
+    </Dialog>
+  )
+}
+
+function PipelineStatusDialogContent({ canCancelPipeline }: { canCancelPipeline: boolean }) {
   const { t } = useTranslation()
   const [status, setStatus] = useState<PipelineStatusResponse | null>(null)
   const [position, setPosition] = useState<DialogPosition>('center')
@@ -87,26 +124,15 @@ export default function PipelineStatusDialog({
   const [nowMs, setNowMs] = useState(() => Date.now())
   const historyRef = useRef<HTMLDivElement>(null)
 
-  // Reset UI state whenever the controlling open prop changes.
   useEffect(() => {
-    if (open) {
-      // Resetting local dialog UI when the controlling prop changes is intentional.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setPosition('center')
-      setIsUserScrolled(false)
-      return
+    const tick = () => setNowMs(Date.now())
+    const timeout = setTimeout(tick, 0)
+    const interval = setInterval(tick, CLOCK_TICK_INTERVAL_MS)
+    return () => {
+      clearTimeout(timeout)
+      clearInterval(interval)
     }
-
-    setShowCancelConfirm(false)
-  }, [open])
-
-  useEffect(() => {
-    if (!open) return
-
-    setNowMs(Date.now())
-    const interval = setInterval(() => setNowMs(Date.now()), CLOCK_TICK_INTERVAL_MS)
-    return () => clearInterval(interval)
-  }, [open])
+  }, [])
 
   // Handle scroll position
   useEffect(() => {
@@ -133,8 +159,6 @@ export default function PipelineStatusDialog({
 
   // Refresh status every 2 seconds
   useEffect(() => {
-    if (!open) return
-
     const fetchStatus = async () => {
       try {
         const data = await getPipelineStatus()
@@ -147,7 +171,7 @@ export default function PipelineStatusDialog({
     fetchStatus()
     const interval = setInterval(fetchStatus, STATUS_POLL_INTERVAL_MS)
     return () => clearInterval(interval)
-  }, [open, t])
+  }, [t])
 
   // Handle cancel pipeline confirmation
   const handleConfirmCancel = async () => {
@@ -165,25 +189,24 @@ export default function PipelineStatusDialog({
   }
 
   // Determine if cancel button should be enabled
-  const canCancel = status?.busy === true && !status?.cancellation_requested
+  const canCancel = canCancelPipeline && status?.busy === true && !status?.cancellation_requested
 
   const metrics = useMemo(() => getProgressMetrics(status, nowMs), [status, nowMs])
 
   const currentStep = status?.latest_message?.trim()
     || (status?.busy
-      ? t('documentPanel.pipelineStatus.currentStepStarting', 'Starting…')
-      : t('documentPanel.pipelineStatus.noActiveJob', 'No active job'))
+      ? t('documentPanel.pipelineStatus.currentStepStarting')
+      : t('documentPanel.pipelineStatus.noActiveJob'))
 
   const progressSummary = status
-    ? `${Math.round(metrics.progressPercent)}% · ${metrics.processedBatches}/${metrics.totalBatches || 0} ${t('documentPanel.pipelineStatus.unit')}`
-    : '—'
-
+    ? `${Math.round(metrics.progressPercent)}% · ${metrics.processedItems}/${metrics.totalItems || 0} ${metrics.unit}`
+    : t('platformShell.common.loadingCount')
   const accessibleDescription = status?.job_name
     ? `${t('documentPanel.pipelineStatus.jobName')}: ${status.job_name}, ${t('documentPanel.pipelineStatus.progress')}: ${progressSummary}`
-    : t('documentPanel.pipelineStatus.noActiveJob', 'No active job')
+    : t('documentPanel.pipelineStatus.noActiveJob')
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <>
       <DialogContent
         className={cn(
           'sm:max-w-[860px] transition-all duration-200 fixed',
@@ -262,7 +285,7 @@ export default function PipelineStatusDialog({
             </div>
 
             {/* Right side: Cancel button - only show when pipeline is busy */}
-            {status?.busy && (
+            {status?.busy && canCancelPipeline && (
               <Button
                 variant="destructive"
                 size="sm"
@@ -279,11 +302,20 @@ export default function PipelineStatusDialog({
             )}
           </div>
 
+          {status?.busy && !canCancelPipeline && (
+            <div className="rounded-md border border-dashed px-3 py-2 text-sm text-zinc-600 dark:text-zinc-400">
+              Pipeline cancellation is limited to KB settings managers in this scope.
+            </div>
+          )}
+
           {/* Job / Progress Information */}
           <div className="rounded-md border p-4 space-y-4">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div className="space-y-1">
                 <div className="text-sm font-medium">{t('documentPanel.pipelineStatus.jobName')}: {status?.job_name || '-'}</div>
+                <div className="text-sm text-zinc-600 dark:text-zinc-400">
+                  {t('documentPanel.pipelineStatus.currentStep')}: {metrics.stageLabel || currentStep}
+                </div>
                 <div className="text-sm text-zinc-600 dark:text-zinc-400">
                   {t('documentPanel.pipelineStatus.startTime')}: {status?.job_start
                     ? new Date(status.job_start).toLocaleString(undefined, {
@@ -310,14 +342,14 @@ export default function PipelineStatusDialog({
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-3 text-xs text-zinc-600 dark:text-zinc-400">
                 <span>{t('documentPanel.pipelineStatus.progress')}</span>
-                <span>{status ? `${metrics.processedBatches}/${metrics.totalBatches || 0} ${t('documentPanel.pipelineStatus.unit')}` : '—'}</span>
+                <span>{status ? `${metrics.processedItems}/${metrics.totalItems || 0} ${metrics.unit}` : t('platformShell.common.loadingCount')}</span>
               </div>
               <Progress value={metrics.progressPercent} className="h-2" />
             </div>
 
             <div className="rounded-md border bg-zinc-50/70 p-3 dark:bg-zinc-900/50">
               <div className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-                {t('documentPanel.pipelineStatus.currentStep', 'Current step')}
+                {t('documentPanel.pipelineStatus.currentStep')}
               </div>
               <div className="mt-1 text-sm break-words">
                 {currentStep}
@@ -327,32 +359,32 @@ export default function PipelineStatusDialog({
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <div className="rounded-md border p-3">
                 <div className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-                  {t('documentPanel.pipelineStatus.remaining', 'Remaining')}
+                  {t('documentPanel.pipelineStatus.remaining')}
                 </div>
-                <div className="mt-1 text-lg font-semibold">{metrics.remainingBatches}</div>
+                <div className="mt-1 text-lg font-semibold">{metrics.remainingItems}</div>
                 <div className="text-xs text-zinc-600 dark:text-zinc-400">
-                  {t('documentPanel.pipelineStatus.unit')}
+                  {metrics.unit}
                 </div>
               </div>
               <div className="rounded-md border p-3">
                 <div className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-                  {t('documentPanel.pipelineStatus.elapsed', 'Elapsed')}
+                  {t('documentPanel.pipelineStatus.elapsed')}
                 </div>
                 <div className="mt-1 text-lg font-semibold">{formatDuration(metrics.elapsedMs)}</div>
               </div>
               <div className="rounded-md border p-3">
                 <div className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-                  {t('documentPanel.pipelineStatus.eta', 'ETA')}
+                  {t('documentPanel.pipelineStatus.eta')}
                 </div>
                 <div className="mt-1 text-lg font-semibold">
                   {metrics.progressPercent > 0
                     ? formatDuration(metrics.etaMs)
-                    : t('documentPanel.pipelineStatus.etaUnavailable', 'Estimating…')}
+                    : t('documentPanel.pipelineStatus.etaUnavailable')}
                 </div>
               </div>
               <div className="rounded-md border p-3">
                 <div className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-                  {t('documentPanel.pipelineStatus.totalDocuments', 'Total documents')}
+                  {t('documentPanel.pipelineStatus.totalDocuments')}
                 </div>
                 <div className="mt-1 text-lg font-semibold">{status?.docs ?? 0}</div>
               </div>
@@ -402,6 +434,6 @@ export default function PipelineStatusDialog({
           </div>
         </DialogContent>
       </Dialog>
-    </Dialog>
+    </>
   )
 }

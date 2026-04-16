@@ -644,6 +644,17 @@ def test_should_add_page_raster_fallback_when_exact_crops_are_too_small():
 
 
 @pytest.mark.offline
+def test_resolve_multimodal_max_images_auto_expands_for_large_documents():
+    mod = _reload_document_routes()
+
+    assert mod._resolve_multimodal_max_images(12, None) == 256
+    assert mod._resolve_multimodal_max_images(150, None) == 512
+    assert mod._resolve_multimodal_max_images(300, None) == 768
+    assert mod._resolve_multimodal_max_images(462, None) == 1024
+    assert mod._resolve_multimodal_max_images(462, 320) == 320
+
+
+@pytest.mark.offline
 def test_convert_with_docling_multimodal_extracts_pymupdf_native_images(tmp_path: Path):
     mod = _reload_document_routes()
     pdf_path = tmp_path / "native-image.pdf"

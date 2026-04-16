@@ -4,7 +4,20 @@
     "theme": "主题",
     "light": "浅色",
     "dark": "深色",
-    "system": "系统"
+    "system": "系统",
+    "languages": {
+      "en": "English",
+      "zh": "简体中文",
+      "fr": "Français",
+      "ar": "العربية",
+      "zh_TW": "繁體中文",
+      "ru": "Русский",
+      "ja": "日本語",
+      "de": "Deutsch",
+      "uk": "Українська",
+      "ko": "한국어",
+      "vi": "Tiếng Việt"
+    }
   },
   "header": {
     "documents": "文档",
@@ -17,7 +30,14 @@
     "themeToggle": {
       "switchToLight": "切换到浅色主题",
       "switchToDark": "切换到深色主题"
-    }
+    },
+    "overview": "总览",
+    "kbSettings": "知识库设置",
+    "members": "成员",
+    "workspaceSettings": "工作区设置",
+    "workspace": "工作区",
+    "knowledgeBase": "知识库",
+    "workspaces": "工作区"
   },
   "login": {
     "description": "请输入您的账号和密码登录系统",
@@ -31,13 +51,27 @@
     "errorEmptyFields": "请输入您的用户名和密码",
     "errorInvalidCredentials": "登录失败，请检查用户名和密码",
     "authDisabled": "认证已禁用，使用无需登陆模式。",
-    "guestMode": "无需登陆"
+    "materialConsoleLabel": "Material 工作台控制台",
+    "secureWorkspaceLabel": "安全工作区访问",
+    "continueDescription": "登录后继续进入当前作用域下的知识工作区与检索控制台。",
+    "continueToWorkspace": "进入工作区",
+    "rememberUsername": "记住用户名",
+    "localAuthOnly": "本地认证",
+    "brandCardTitle": "品牌系统",
+    "brandCardDescription": "Ragenging ui 采用克制的 Material 风格外壳，让高密度知识操作依然清晰、分层、可信。",
+    "workflowCardTitle": "操作流",
+    "workflowCardDescription": "在不丢失当前工作区 / 知识库作用域的前提下，于总览、文档、检索、图谱与设置之间流畅切换。",
+    "usernameRequired": "请输入用户名。",
+    "passwordRequired": "请输入密码。",
+    "showPassword": "显示密码",
+    "hidePassword": "隐藏密码"
   },
   "common": {
     "cancel": "取消",
     "save": "保存",
     "saving": "保存中...",
-    "saveFailed": "保存失败"
+    "saveFailed": "保存失败",
+    "close": "关闭"
   },
   "documentPanel": {
     "clearDocuments": {
@@ -159,13 +193,20 @@
         "loadFailed": "加载文档失败\n{{error}}",
         "scanFailed": "扫描文档失败\n{{error}}",
         "scanProgressFailed": "获取扫描进度失败\n{{error}}",
-        "rebuildMultimodalFailed": "重建多模态失败\n{{error}}"
+        "rebuildMultimodalFailed": "重建多模态失败\n{{error}}",
+        "scanDisabled": "当前知识库作用域下已禁用上传与扫描触发操作。"
       },
       "fileNameLabel": "文件名",
       "showButton": "显示",
       "hideButton": "隐藏",
       "showFileNameTooltip": "显示文件名",
-      "hideFileNameTooltip": "隐藏文件名"
+      "hideFileNameTooltip": "隐藏文件名",
+      "scopedPermissions": "当前知识库的文档权限",
+      "accessMessages": {
+        "readOnly": "当前会话可以查看此知识库中的文档，但上传、重建、删除和清空操作会受到作用域权限限制。",
+        "uploadDisabled": "当前知识库角色下已禁用上传与多模态重建操作。",
+        "deleteDisabled": "当前知识库角色下已禁用删除、批量清空和缓存清理操作。"
+      }
     },
     "pipelineStatus": {
       "title": "流水线状态",
@@ -203,7 +244,7 @@
   "graphPanel": {
     "dataIsTruncated": "图数据已截断至最大返回节点数",
     "statusDialog": {
-      "title": "LightRAG 服务器设置",
+      "title": "Ragenging ui 服务器设置",
       "description": "查看当前系统状态和连接信息"
     },
     "legend": "图例",
@@ -405,7 +446,12 @@
       "copyManualInstruction": "请手动选择并复制文本",
       "thinking": "正在思考...",
       "thinkingTime": "思考用时 {{time}} 秒",
-      "thinkingInProgress": "思考进行中..."
+      "thinkingInProgress": "思考进行中...",
+      "copyUnknownError": "发生未知错误",
+      "answerLabel": "已落地答案",
+      "sources": "参考来源",
+      "sourcesCount": "{{count}} 个支撑分块",
+      "sourceLabel": "来源 {{index}}"
     },
     "retrieval": {
       "startPrompt": "输入查询开始检索",
@@ -420,7 +466,24 @@
       "imageDescription": "详细描述",
       "imageEntities": "识别到的实体",
       "imageContext": "邻近文本上下文",
-      "imageContextChunks": "邻近文本分块"
+      "imageContextChunks": "邻近文本分块",
+      "imageContextChunk": "分块 {{index}}",
+      "imageLocation": {
+        "pdfPage": "PDF 页 {{page}}",
+        "documentPage": "文档页 {{page}}",
+        "pageLabel": "页面标签 {{label}}",
+        "bounds": "x={{x}}, y={{y}}, w={{w}}, h={{h}}"
+      },
+      "imageMetadata": {
+        "blobId": "blob_id：",
+        "source": "来源：",
+        "docId": "doc_id：",
+        "pictureIndex": "picture_index：",
+        "pagePictureIndex": "page_picture_index：",
+        "extraction": "提取方式：",
+        "nativeXref": "native_xref：",
+        "mergedExtractionModes": "merged_extraction_modes："
+      }
     },
     "querySettings": {
       "parametersTitle": "参数",
@@ -467,11 +530,14 @@
       "userPromptTooltip": "向LLM提供额外的响应要求（与查询内容无关，仅用于处理输出）。",
       "userPromptPlaceholder": "输入自定义提示词（可选）",
       "enableRerank": "启用重排",
-      "enableRerankTooltip": "为检索到的文本块启用重排。如果为True但未配置重排模型，将发出警告。默认为True。"
+      "enableRerankTooltip": "为检索到的文本块启用重排。如果为True但未配置重排模型，将发出警告。默认为True。",
+      "resetToDefault": "恢复默认值",
+      "resetModeToDefault": "恢复默认值（{{value}}）"
     }
   },
   "apiSite": {
-    "loading": "正在加载 API 文档..."
+    "loading": "正在加载 API 文档...",
+    "iframeTitle": "Ragenging ui API 文档"
   },
   "apiKeyAlert": {
     "title": "需要 API Key",
@@ -487,5 +553,448 @@
     "prevPage": "上一页",
     "nextPage": "下一页",
     "lastPage": "末页"
+  },
+  "brand": {
+    "name": "Ragenging ui",
+    "logoAlt": "{{name}} 标志"
+  },
+  "permissions": {
+    "roles": {
+      "owner": "所有者",
+      "admin": "管理员",
+      "editor": "编辑者",
+      "viewer": "查看者"
+    },
+    "roleDescriptions": {
+      "owner": "拥有工作区与知识库的完整控制权",
+      "admin": "可管理工作区成员与知识库设置",
+      "editor": "可维护内容、文档与图谱数据",
+      "viewer": "拥有只读工作区与检索访问权限"
+    },
+    "capabilities": {
+      "manageMembers": "管理成员",
+      "adjustWorkspaceSettings": "调整工作区设置",
+      "editKbSettings": "编辑知识库设置",
+      "curateContent": "维护内容",
+      "uploadDocuments": "上传文档",
+      "runRetrieval": "运行检索",
+      "editGraphContent": "编辑图谱内容",
+      "browseDocuments": "浏览文档",
+      "viewGraphAndApiDocs": "查看图谱与 API 文档"
+    },
+    "accessBadge": "{{role}}权限"
+  },
+  "navigation": {
+    "sidebar": {
+      "scopedWorkspaceShell": "分域工作区外壳",
+      "workspaceAdminUnavailable": "{{role}}权限不包含工作区管理操作。"
+    },
+    "workspaceSwitcher": {
+      "summary_single": "{{count}} 个工作区 · {{role}}",
+      "summary_plural": "{{count}} 个工作区 · {{role}}"
+    },
+    "knowledgeBaseSwitcher": {
+      "workspaceDetail": "工作区 {{workspaceId}}"
+    }
+  },
+  "graphViewer": {
+    "editingDisabled": "当前知识库角色不可编辑图谱。",
+    "switchingTheme": "正在切换主题...",
+    "loadingData": "正在加载图数据..."
+  },
+  "retrievalRichContent": {
+    "imageFailed": "[图片 {{blobId}} 加载失败]",
+    "loading": "加载中...",
+    "diagramInteractionsLimited": "图表交互可能受限。",
+    "mermaidError": "Mermaid 图表错误：{{error}}"
+  },
+  "platformShell": {
+    "common": {
+      "backToOverview": "返回总览",
+      "openRetrieval": "打开检索",
+      "openDocuments": "打开文档",
+      "openGraph": "打开图谱",
+      "openApiDocs": "打开 API 文档",
+      "returnToOverview": "返回总览",
+      "workspace": "工作区",
+      "knowledgeBase": "知识库",
+      "surfaceState": "界面状态",
+      "currentPath": "当前路径",
+      "operatorNotes": "操作提示",
+      "unavailable": "不可用",
+      "enabled": "已启用",
+      "locked": "已锁定",
+      "readOnly": "只读",
+      "status": "状态",
+      "loadingCount": "—",
+      "backToDocuments": "返回文档",
+      "open": "打开",
+      "documents": "文档",
+      "members": "成员",
+      "workspaceSettings": "工作区设置",
+      "edit": "编辑",
+      "remove": "移除",
+      "removing": "移除中...",
+      "deleting": "删除中...",
+      "delete": "删除",
+      "kbSettings": "知识库设置"
+    },
+    "api": {
+      "loadingLabel": "正在加载 API 参考",
+      "loadingTitle": "正在准备在线文档区域",
+      "loadingDescription": "我们正在连接当前知识库范围内的 API 参考，方便工程师在不离开当前流程的情况下查看后端在线文档。",
+      "badge": "API",
+      "title": "范围化 API 参考",
+      "description": "Ragenging ui 将在线 API 参考保留在知识库外壳内，便于开发者从文档与检索校验直接切换到集成工作，同时不丢失当前上下文。",
+      "openDocsInNewTab": "在新标签页打开文档",
+      "docsSource": "文档来源",
+      "developerAccess": "开发者访问",
+      "referenceReady": "参考就绪",
+      "awaitingQueryAccess": "等待知识库查询权限",
+      "unavailableTitle": "当前会话无法访问 API 文档",
+      "unavailableDescription": "该页面仍保留在知识库外壳中用于定位，但打开嵌入式参考需要当前路由范围拥有知识库查询权限。",
+      "referenceNotes": "参考说明",
+      "referenceNotesDescription": "该嵌入式参考直接反映后端在线文档，工程师可以在不离开当前知识库流程的情况下查看接口、载荷与认证要求。",
+      "liveDocs": "在线 API 文档",
+      "liveDocsDescription": "在保持当前工作区与知识库上下文的同时，查看下方交互式后端参考。",
+      "queryAccessRequired": "需要知识库查询权限",
+      "iframeHidden": "在当前会话具备知识库查询权限之前，API iframe 会保持隐藏。",
+      "accessAvailableHint": "一旦权限可用，此卡片将渲染来自后端 docs 端点的在线 API 参考。",
+      "interactiveBackendReference": "交互式后端参考",
+      "embeddedFrom": "嵌入自 {{apiDocsUrl}}",
+      "liveDocsBadge": "在线文档"
+    },
+    "documents": {
+      "loadingLabel": "正在加载文档操作",
+      "loadingTitle": "正在准备知识库文档管理器",
+      "loadingDescription": "我们正在加载当前知识库范围内的导入队列、文件操作与文档健康状态区域。",
+      "badge": "文档",
+      "title": "知识库文档操作",
+      "description": "将导入、审阅与清理明确限定在单个知识库中，让文档生命周期工作更像产品界面，而不是隐藏的后端流水线。",
+      "managedOperations": "可管理的文档操作",
+      "readOnlyReview": "只读查看",
+      "accessAndOperations": "访问与操作",
+      "operationMode": "操作模式",
+      "noDocumentAccess": "无文档访问权限",
+      "upload": "上传",
+      "deleteOrClear": "删除 / 清空",
+      "pipelineControls": "流水线控制",
+      "extended": "扩展",
+      "standard": "标准",
+      "unavailableTitle": "当前会话无法访问文档",
+      "unavailableDescription": "该知识库路由仍然可见以便定位，但要列出和管理文档，需要当前范围具备知识库查看权限。",
+      "readOnlyTitle": "文档操作为只读",
+      "readOnlyDescription": "你可以在此查看导入进度和已处理文档，但上传、重建、删除与清空操作仍受范围权限限制。",
+      "operatorNotesDescription": "你可以在此进行日常导入与清理，然后跳转到检索验证回答质量，或跳转到图谱查看抽取结构。",
+      "documentManager": "知识库文档管理器",
+      "documentManagerDescription": "查看当前知识库的文档状态、导入进度与范围化操作。",
+      "viewAccessRequired": "需要知识库查看权限",
+      "documentManagerHidden": "在当前会话具备知识库访问权限之前，文档管理器会保持隐藏。",
+      "accessAvailableHint": "一旦具备知识库查看权限，这里就会渲染完整的文档管理器。"
+    },
+    "graph": {
+      "loadingLabel": "正在加载图谱工作区",
+      "loadingTitle": "正在准备知识图谱画布",
+      "loadingDescription": "我们正在加载当前知识库范围内的图谱控制、关系画布与属性区域。",
+      "badge": "图谱",
+      "title": "知识图谱工作区",
+      "description": "将实体结构、关系审查与图谱编辑锚定在当前知识库，让图谱工作更易理解，而不是隐藏在技术化可视化后面。",
+      "editableWorkspace": "可编辑图谱工作区",
+      "readOnlyInspection": "只读图谱查看",
+      "accessAndRole": "访问与图谱角色",
+      "editingMode": "编辑模式",
+      "editableProperties": "可编辑属性",
+      "readOnlyProperties": "只读属性",
+      "noGraphAccess": "无图谱访问权限",
+      "visibility": "图谱可见性",
+      "graphEditing": "图谱编辑",
+      "unavailableTitle": "当前会话无法访问图谱",
+      "unavailableDescription": "该路由仍然可见以保持知识库外壳的可理解性，但打开图谱需要当前范围具备知识库查看权限。",
+      "readOnlyTitle": "图谱可查看，但编辑为只读",
+      "readOnlyDescription": "你可以在此浏览实体和关系，但除非当前知识库角色拥有图谱编辑权限，否则属性修改会保持锁定。",
+      "operatorNotesDescription": "使用此图谱界面查看抽取结构、确认关系质量，并在不离开当前知识库上下文的情况下细化属性。",
+      "viewer": "知识图谱查看器",
+      "viewerDescription": "在范围化图谱画布中探索当前知识库的实体与关系结构。",
+      "viewAccessRequired": "需要知识库查看权限",
+      "canvasHidden": "在当前会话具备知识库访问权限之前，图谱画布会保持隐藏。",
+      "accessAvailableHint": "一旦具备知识库查看权限，这里就会渲染完整的图谱查看器。"
+    },
+    "retrieval": {
+      "loadingLabel": "正在加载检索控制台",
+      "loadingTitle": "正在准备知识库提示实验台",
+      "loadingDescription": "我们正在加载当前知识库范围内的检索工作区、查询控制与回答审阅界面。",
+      "badge": "检索",
+      "title": "知识库检索控制台",
+      "description": "Ragenging ui 将提示测试、回答质量检查和查询模式实验限定在当前知识库中，帮助团队一次只评估一个可信来源。",
+      "queryAccess": "查询访问",
+      "interactive": "可交互",
+      "accessAndScope": "访问与范围",
+      "queryReadyPromptLab": "检索实验台已就绪",
+      "awaitingQueryAccess": "等待知识库查询权限",
+      "unavailableTitle": "当前会话无法使用检索",
+      "unavailableDescription": "当前路由仍保持可见以维持知识库外壳的完整性，但交互式检索需要当前范围具备知识库查询权限。",
+      "readOnlyAdminTitle": "检索可用，但管理界面保持只读",
+      "readOnlyAdminDescription": "即使你当前角色无法访问知识库设置与成员管理，也可以在这里验证有根据的回答并比较不同检索模式。",
+      "operatorNotesDescription": "该界面用于快速检查提示、审阅回答与调优检索，而无需离开当前知识库上下文。若需处理文档、图谱或策略，请使用周边外壳导航。",
+      "askKnowledgeBase": "询问此知识库",
+      "askKnowledgeBaseDescription": "在下方运行知识库范围内的提示，以审阅检索质量、溯源行为与多模态上下文。",
+      "queryAccessRequired": "需要知识库查询权限",
+      "testingDisabled": "当前会话已禁用检索测试。请返回知识库总览，或让知识库所有者为此路由范围授予查询权限。",
+      "accessAvailableHint": "一旦具备知识库查询权限，这里就会直接渲染完整的检索控制台。"
+    },
+    "kbOverview": {
+      "loadFailed": "加载知识库失败。",
+      "badge": "知识库",
+      "fallbackDescription": "该总览会持续展示范围、权限与下一步操作，让知识库隔离更像产品界面，而不是后端细节。",
+      "runRetrieval": "运行检索",
+      "manageDirectory": "管理知识库目录",
+      "configOverrides": "配置覆盖项",
+      "scopeAndAccess": "范围与访问",
+      "loadingMetadata": "正在加载知识库元数据...",
+      "compatibilityMode": "兼容模式",
+      "nextActions": "下一步操作",
+      "nextActionsDescription": "这些路由感知快捷入口会让知识库外壳始终围绕文档、检索质量与范围化设置运转。",
+      "compatibilityDescription": "当前环境尚未从注册表中提供知识库元数据。核心路由仍可用，该总览会回退到当前 URL 中的路由范围。",
+      "quickActions": {
+        "documents": {
+          "label": "文档",
+          "description": "在当前知识库中上传、检查并处理内容。"
+        },
+        "retrieval": {
+          "label": "检索",
+          "description": "测试提示词并验证知识库范围内的回答质量。"
+        },
+        "graph": {
+          "label": "知识图谱",
+          "description": "查看当前知识库的实体与关系结构。"
+        },
+        "api": {
+          "label": "API",
+          "description": "使用范围化 API 视图处理嵌入、查询与自动化。"
+        },
+        "settings": {
+          "label": "知识库设置",
+          "description": "查看当前知识库的元数据、状态与策略控制。"
+        }
+      }
+    },
+    "workspaceSettings": {
+      "badge": "工作区设置",
+      "title": "工作区设置",
+      "description": "这个页面现在是工作区范围管理的稳定落点。它会持续显示访问上下文、策略意图和下一步导航，同时等待更丰富的表单接入。",
+      "openMembers": "打开工作区成员",
+      "openDefaultKbOverview": "打开默认知识库总览",
+      "workspaceScope": "工作区范围",
+      "currentAccess": "当前访问级别",
+      "accessPosture": "访问态势",
+      "accessPostureDescription": "工作区设置与驱动可见导航的同一套角色模型保持一致。",
+      "whatLandsHereNext": "这里接下来会放什么",
+      "whatLandsHereNextDescription": "这个页面不再是死路：它说明即将到来的控制界面，并保持信息架构稳定。",
+      "workspacePolicy": "工作区策略",
+      "workspacePolicyDescription": "命名、安全默认项以及未来的工作区元数据控制都会出现在这里。",
+      "securityPosture": "安全态势",
+      "securityPostureDescription": "成员可见性、角色提升流程与审计上下文接下来会接入这个界面。"
+    },
+    "workspaceMembers": {
+      "enterUsername": "请输入要添加到工作区的用户名。",
+      "username": "用户名",
+      "usernamePlaceholder": "alice",
+      "workspaceRole": "工作区角色",
+      "selectRole": "选择角色",
+      "addMember": "添加成员",
+      "saveRole": "保存角色",
+      "usernameRequired": "用户名为必填项。",
+      "badge": "成员",
+      "title": "工作区成员管理",
+      "description": "清晰展示当前访问模型：谁属于这个工作区、有哪些角色，以及成员变更会如何影响认证后的界面。",
+      "openWorkspaceSettings": "打开工作区设置",
+      "workspaceScope": "工作区范围",
+      "loadedMembers": "已加载成员",
+      "roleSummary": "角色摘要",
+      "roleCardDescription": "当前分配到此角色的成员数。",
+      "readOnlyTitle": "只读成员视图",
+      "readOnlyDescription": "你可以查看工作区成员列表，但修改成员需要管理员或所有者权限。",
+      "workspaceRoster": "工作区成员表",
+      "workspaceRosterDescription": "这张表是基于数据库的工作区成员管理入口。",
+      "unavailableTitle": "成员管理暂不可用",
+      "unavailableDescription": "当前环境尚未启用基于数据库的成员管理，但工作区外壳仍保留了稳定路由，以承载权限感知导航。",
+      "loadingMembers": "正在加载工作区成员...",
+      "empty": "当前还没有返回任何工作区成员。",
+      "removeMember": "移除成员",
+      "dialog": {
+        "createTitle": "添加工作区成员",
+        "editTitle": "更新工作区角色",
+        "createDescription": "输入一个现有用户名，并为其分配工作区角色。",
+        "editDescription": "调整该成员的工作区角色。之后仍可叠加知识库级别角色。",
+        "usernameHint": "当前的成员邀请流程接收现有用户名，因为用户目录选择器尚未接入。"
+      },
+      "table": {
+        "user": "用户",
+        "role": "角色",
+        "source": "来源",
+        "updated": "更新时间",
+        "actions": "操作"
+      },
+      "removeDialog": {
+        "title": "移除工作区成员？",
+        "descriptionWithUser": "此操作会将 {{username}} 从工作区 '{{workspaceId}}' 中移除。依赖该工作区的知识库级权限也可能随之失效。",
+        "description": "移除此工作区成员。"
+      }
+    },
+    "workspaceDirectory": {
+      "configOverrideObject": "配置覆盖项必须是 JSON 对象。",
+      "invalidJsonConfigOverride": "配置覆盖 JSON 无效：{{error}}",
+      "kbId": "知识库 ID",
+      "kbIdPlaceholder": "finance.primary",
+      "displayName": "显示名称",
+      "displayNamePlaceholder": "Finance KB",
+      "descriptionLabel": "描述",
+      "descriptionPlaceholder": "概述这个知识库的用途。",
+      "statusPlaceholder": "active",
+      "statusHint": "建议值：active、archived、maintenance。",
+      "configOverride": "配置覆盖（JSON 对象）",
+      "createKb": "创建知识库",
+      "saveChanges": "保存更改",
+      "badge": "工作区",
+      "title": "工作区目录",
+      "description": "让认证后的外壳保持简单：一个清晰可见的工作区范围、一个明确的访问级别，以及进入文档、知识库和管理界面的快捷路径。",
+      "openActiveWorkspace": "打开当前工作区",
+      "reviewDefaultKnowledgeBase": "查看默认知识库",
+      "activeWorkspace": "当前工作区",
+      "accessibleWorkspaces": "可访问工作区",
+      "knowledgeBasesSurfaced": "已展示知识库",
+      "accessSummary": "访问摘要",
+      "accessSummaryDescription": "你当前的角色决定了哪些管理界面会在此工作区内保持可见。",
+      "visible": "可见",
+      "hidden": "隐藏",
+      "knowledgeBaseDirectory": "知识库目录",
+      "knowledgeBaseDirectoryDescription": "在同一个工作区级别界面中创建、查看并管理知识库范围。",
+      "compatibilityMode": "兼容模式",
+      "compatibilityDescription": "当前环境尚未提供知识库注册表端点。你仍可继续使用默认知识库，同时等待知识库隔离能力逐步上线。",
+      "readOnlyTitle": "只读知识库目录",
+      "readOnlyDescription": "你可以浏览此工作区中的知识库，但创建或修改知识库需要工作区管理员权限。",
+      "loadingKnowledgeBases": "正在加载知识库...",
+      "defaultBadge": "默认",
+      "noDescription": "暂未填写描述。打开此知识库即可管理文档、检索与图谱视图。",
+      "empty": "当前没有返回任何知识库注册项。请继续使用默认知识库，直到注册表管理功能启用。",
+      "deleteKb": "删除知识库",
+      "dialog": {
+        "createTitle": "创建知识库",
+        "editTitle": "编辑知识库",
+        "createDescription": "在此工作区中创建一个范围化知识库。知识库 ID 中的非法字符会被后端注册表自动清洗为下划线。",
+        "editDescription": "无需离开工作区目录即可更新知识库元数据与覆盖项。"
+      },
+      "deleteDialog": {
+        "title": "删除知识库？",
+        "descriptionWithName": "从工作区 '{{workspaceId}}' 删除 '{{knowledgeBaseName}}'。后端会保留已有存储数据，但注册表条目将被移除。",
+        "description": "删除这个知识库。"
+      }
+    },
+    "kbSettings": {
+      "loadFailed": "加载知识库设置失败。",
+      "title": "知识库设置",
+      "description": "将知识库范围内的元数据、本地覆盖项和权限分层保持在一个平静清晰的界面中，让团队无需深入后端细节也能理解和管理当前范围。",
+      "manageDirectory": "管理知识库目录",
+      "overrides": "覆盖项",
+      "directMembers": "直接知识库成员",
+      "ownerOnly": "仅所有者",
+      "effectiveAccessTitle": "当前生效的访问权限",
+      "effectiveAccessDescription": "让当前路由作用域保持清晰可读，帮助操作人员理解哪些设置仍可编辑，哪些仅供查看。",
+      "kbRole": "知识库角色",
+      "workspaceFallback": "工作区回退角色",
+      "currentStatus": "当前状态",
+      "loadingMetadata": "正在加载知识库元数据...",
+      "compatibilityMode": "兼容模式",
+      "metadataAndOverridesTitle": "知识库元数据与覆盖项",
+      "metadataAndOverridesDescription": "让注册表界面保持清晰易读，同时允许知识库管理员和所有者在当前上下文中完成日常元数据更新。",
+      "registryUnavailableTitle": "知识库注册表暂不可用",
+      "registryUnavailableDescription": "当前环境暂未提供基于注册表的知识库设置。核心知识库路由仍可使用，但元数据编辑仍处于分阶段上线中。",
+      "noDescription": "尚未设置知识库描述。",
+      "createdAt": "创建时间",
+      "notExposedYet": "暂未提供",
+      "lifecycleStatus": "生命周期状态",
+      "configOverrideKeys": "配置覆盖键",
+      "noOverrides": "当前未暴露任何知识库专属覆盖值。",
+      "metadataReadOnlyTitle": "元数据编辑为只读",
+      "metadataReadOnlyDescription": "你可以在这里查看知识库元数据和覆盖值，但保存更改需要当前作用域具备知识库设置权限。",
+      "metadataPlaceholder": "当注册表记录可用后，知识库元数据将在这里变为可编辑。",
+      "permissionScopeTitle": "知识库权限范围",
+      "directAssignmentsUsingRole": "当前直接以此角色分配的知识库成员。",
+      "permissionsOwnerManagedTitle": "知识库权限仅限所有者管理",
+      "permissionsOwnerManagedDescription": "你可以在此页面查看知识库元数据，但修改知识库专属角色需要该知识库的所有者权限。",
+      "permissionLayeringTitle": "权限分层",
+      "permissionLayeringDescription": "知识库专属角色只会覆盖当前知识库的工作区回退角色。先将用户加入工作区，再按需为其分配更窄或更高的知识库角色。",
+      "openWorkspaceMembers": "打开工作区成员",
+      "memberAssignmentsTitle": "知识库成员分配",
+      "memberAssignmentsDescription": "让知识库范围内的访问关系保持明确。所有者可以叠加直接角色，而不必修改更大范围的工作区成员关系。",
+      "directAssignmentManagementTitle": "直接分配管理",
+      "directAssignmentManagementDescription": "先添加已有工作区成员，再仅为此知识库调整其角色。",
+      "memberEditingHidden": "只有当前会话对该知识库拥有所有者级权限时，才会显示知识库成员编辑。",
+      "memberManagementUnavailableTitle": "知识库权限管理不可用",
+      "memberManagementUnavailableDescription": "当前环境尚未启用基于数据库的知识库成员管理，或注册表暂未准备好返回成员数据。",
+      "loadingMembers": "正在加载知识库成员...",
+      "noMembers": "尚未分配任何知识库专属成员。当前访问将继承工作区角色。",
+      "currentSession": "当前会话",
+      "currentSessionLocked": "为降低权限管理仍在逐步上线期间误丢失访问权限的风险，当前会话对应的知识库分配会在此页面保持锁定。",
+      "table": {
+        "user": "用户",
+        "role": "知识库角色",
+        "source": "来源",
+        "updated": "更新时间",
+        "actions": "操作"
+      },
+      "removeDialog": {
+        "title": "移除知识库成员？",
+        "descriptionWithUser": "这将把 {{username}} 从 '{{knowledgeBaseName}}' 的直接知识库访问中移除。如果其存在工作区级访问，则将回退到工作区级权限。",
+        "description": "移除此知识库成员。"
+      },
+      "members": {
+        "usernameRequired": "用户名为必填项。",
+        "removeMember": "移除成员",
+        "dialog": {
+          "enterUsername": "请输入要添加为知识库成员的用户名。",
+          "createTitle": "添加知识库成员",
+          "editTitle": "更新知识库角色",
+          "createDescription": "知识库专属权限会叠加在工作区成员关系之上。请添加一个已有工作区成员并为其分配知识库角色。",
+          "editDescription": "调整该成员在知识库范围内的角色，而不改变其工作区级访问权限。",
+          "username": "用户名",
+          "usernamePlaceholder": "alice",
+          "usernameHint": "只有已经属于该工作区的用户，才能被分配知识库专属角色。",
+          "kbRole": "知识库角色",
+          "selectRole": "选择角色",
+          "addMember": "添加成员",
+          "saveRole": "保存角色"
+        }
+      },
+      "metadataEditor": {
+        "title": "编辑知识库元数据",
+        "description": "无需离开当前设置页，即可更新显示名称、描述、生命周期状态以及 JSON 覆盖块。",
+        "idBadge": "知识库 ID：{{kbId}}",
+        "idFixedHint": "知识库 ID 在创建后即固定。你可以在这里修改显示名称，而不改变底层路由 ID。",
+        "reset": "重置",
+        "saveChanges": "保存知识库更改",
+        "noChanges": "没有可保存的知识库元数据更改。",
+        "errors": {
+          "displayNameEmpty": "显示名称不能为空。",
+          "statusEmpty": "状态不能为空。"
+        }
+      }
+    }
+  },
+  "appRouter": {
+    "fullScreenTitle": "正在加载 {{name}}...",
+    "fullScreenDescription": "正在准备下一个工作区界面。",
+    "routeTitle": "正在加载工作区视图...",
+    "routeDescription": "正在获取下一个知识库界面及其作用域工具。"
+  },
+  "app": {
+    "initializing": "正在初始化..."
+  },
+  "promptInput": {
+    "deleteHistoryItem": "删除这条历史记录"
+  },
+  "numberInput": {
+    "increase": "增加数值",
+    "decrease": "减少数值"
   }
 }

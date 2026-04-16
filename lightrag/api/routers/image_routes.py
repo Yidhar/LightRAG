@@ -21,11 +21,12 @@ import mimetypes
 import os
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from lightrag import LightRAG
+from lightrag.api.dependencies import get_current_rag
 from lightrag.api.utils_api import get_combined_auth_dependency
 from lightrag.utils import logger
 
@@ -62,7 +63,7 @@ class ImageMetadataResponse(BaseModel):
 
 
 def create_image_routes(
-    rag: LightRAG, api_key: Optional[str] = None
+    rag: LightRAG | None = None, api_key: Optional[str] = None
 ) -> Optional[APIRouter]:
     """Build the ``/images`` router.
 
@@ -70,7 +71,9 @@ def create_image_routes(
     given ``rag`` instance, so the caller can skip registering it without
     special-casing.
     """
-    if rag.image_blob_store is None or rag.image_metadata is None:
+    if rag is not None and (
+        rag.image_blob_store is None or rag.image_metadata is None
+    ):
         logger.debug(
             "Skipping image routes: multimodal pipeline not enabled on this "
             "LightRAG instance (image_embedding_func is None)."
@@ -80,8 +83,30 @@ def create_image_routes(
     router = APIRouter(prefix="/images", tags=["images"])
     combined_auth = get_combined_auth_dependency(api_key)
 
+    async def resolve_route_rag(request: Request) -> LightRAG:
+        if rag is not None:
+            return rag
+        return await get_current_rag(request)
+
+    def require_image_runtime(active_rag: LightRAG) -> LightRAG:
+        if (
+            active_rag.image_blob_store is None
+            or active_rag.image_metadata is None
+        ):
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "Image routes are unavailable because the multimodal pipeline "
+                    "is not enabled for the current knowledge base."
+                ),
+            )
+        return active_rag
+
     @router.get("/{blob_id}", dependencies=[Depends(combined_auth)])
-    async def get_image_blob(blob_id: str):
+    async def get_image_blob(
+        blob_id: str,
+        active_rag: LightRAG = Depends(resolve_route_rag),
+    ):
         """Return the original bytes of an image blob.
 
         The response ``Content-Type`` is taken from the sidecar metadata
@@ -94,9 +119,10 @@ def create_image_routes(
                 status_code=400,
                 detail="blob_id must start with 'img-' (content-hashed image id)",
             )
+        active_rag = require_image_runtime(active_rag)
 
         # Try to read sidecar first to get the content type.
-        sidecar = await rag.image_blob_store.get_metadata(blob_id)
+        sidecar = await active_rag.image_blob_store.get_metadata(blob_id)
         content_type = (
             sidecar.get("content_type")
             if sidecar
@@ -105,7 +131,7 @@ def create_image_routes(
 
         # Fast path: filesystem backend — serve via FileResponse so FastAPI
         # streams the file with sendfile/zero-copy.
-        ref = await rag.image_blob_store.get_reference(blob_id)
+        ref = await active_rag.image_blob_store.get_reference(blob_id)
         if ref and os.path.isfile(ref):
             filename = os.path.basename(ref)
             return FileResponse(
@@ -115,7 +141,7 @@ def create_image_routes(
             )
 
         # Generic fallback: load bytes into memory and return them.
-        data = await rag.image_blob_store.get(blob_id)
+        data = await active_rag.image_blob_store.get(blob_id)
         if data is None:
             raise HTTPException(
                 status_code=404,
@@ -131,7 +157,10 @@ def create_image_routes(
         response_model=ImageMetadataResponse,
         dependencies=[Depends(combined_auth)],
     )
-    async def get_image_metadata(blob_id: str) -> ImageMetadataResponse:
+    async def get_image_metadata(
+        blob_id: str,
+        active_rag: LightRAG = Depends(resolve_route_rag),
+    ) -> ImageMetadataResponse:
         """Return the sidecar record for an image blob.
 
         The record includes the structured caption JSON produced by the
@@ -144,14 +173,15 @@ def create_image_routes(
                 status_code=400,
                 detail="blob_id must start with 'img-' (content-hashed image id)",
             )
+        active_rag = require_image_runtime(active_rag)
 
         # The image_metadata KV store holds the semantic record written by
         # ainsert_image (annotation_text, caption_json, source_doc_id, ...).
-        kv_record = await rag.image_metadata.get_by_id(blob_id)
+        kv_record = await active_rag.image_metadata.get_by_id(blob_id)
         if kv_record is None:
             # Fall back to blob_store's sidecar-only metadata if the KV
             # record is missing (stale state, partial restore, etc).
-            fs_side = await rag.image_blob_store.get_metadata(blob_id)
+            fs_side = await active_rag.image_blob_store.get_metadata(blob_id)
             if fs_side is None:
                 raise HTTPException(
                     status_code=404,

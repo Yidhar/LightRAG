@@ -35,10 +35,18 @@ const Label = ({
 )
 
 interface ClearDocumentsDialogProps {
+  disabled?: boolean
+  disabledReason?: string
+  canClearCache?: boolean
   onDocumentsCleared?: () => Promise<void>
 }
 
-export default function ClearDocumentsDialog({ onDocumentsCleared }: ClearDocumentsDialogProps) {
+export default function ClearDocumentsDialog({
+  disabled = false,
+  disabledReason,
+  canClearCache = true,
+  onDocumentsCleared,
+}: ClearDocumentsDialogProps) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
   const [confirmText, setConfirmText] = useState('')
@@ -76,7 +84,7 @@ export default function ClearDocumentsDialog({ onDocumentsCleared }: ClearDocume
   }, [])
 
   const handleClear = useCallback(async () => {
-    if (!isConfirmEnabled || isClearing) return
+    if (disabled || !isConfirmEnabled || isClearing) return
 
     setIsClearing(true)
 
@@ -100,7 +108,7 @@ export default function ClearDocumentsDialog({ onDocumentsCleared }: ClearDocume
 
       toast.success(t('documentPanel.clearDocuments.success'))
 
-      if (clearCacheOption) {
+      if (clearCacheOption && canClearCache) {
         try {
           await clearCache()
           toast.success(t('documentPanel.clearDocuments.cacheCleared'))
@@ -127,15 +135,25 @@ export default function ClearDocumentsDialog({ onDocumentsCleared }: ClearDocume
       }
       setIsClearing(false)
     }
-  }, [isConfirmEnabled, isClearing, clearCacheOption, setOpen, t, onDocumentsCleared, CLEAR_TIMEOUT])
+  }, [canClearCache, clearCacheOption, disabled, isConfirmEnabled, isClearing, setOpen, t, onDocumentsCleared, CLEAR_TIMEOUT])
+
+  const trigger = (
+    <span className="inline-flex" title={disabled ? disabledReason : undefined}>
+      <Button
+        variant="outline"
+        side="bottom"
+        tooltip={disabled ? undefined : t('documentPanel.clearDocuments.tooltip')}
+        size="sm"
+        disabled={disabled}
+      >
+        <EraserIcon/> {t('documentPanel.clearDocuments.button')}
+      </Button>
+    </span>
+  )
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button variant="outline" side="bottom" tooltip={t('documentPanel.clearDocuments.tooltip')} size="sm">
-          <EraserIcon/> {t('documentPanel.clearDocuments.button')}
-        </Button>
-      </DialogTrigger>
+    <Dialog open={open} onOpenChange={(nextOpen) => !disabled && setOpen(nextOpen)}>
+      <DialogTrigger asChild>{trigger}</DialogTrigger>
       <DialogContent className="sm:max-w-xl" onCloseAutoFocus={(e) => e.preventDefault()}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-red-500 dark:text-red-400 font-bold">
@@ -169,17 +187,23 @@ export default function ClearDocumentsDialog({ onDocumentsCleared }: ClearDocume
             />
           </div>
 
-          <div className="flex items-center space-x-2">
-            <Checkbox
-              id="clear-cache"
-              checked={clearCacheOption}
-              onCheckedChange={(checked: boolean | 'indeterminate') => setClearCacheOption(checked === true)}
-              disabled={isClearing}
-            />
-            <Label htmlFor="clear-cache" className="text-sm font-medium cursor-pointer">
-              {t('documentPanel.clearDocuments.clearCache')}
-            </Label>
-          </div>
+          {canClearCache ? (
+            <div className="flex items-center space-x-2">
+              <Checkbox
+                id="clear-cache"
+                checked={clearCacheOption}
+                onCheckedChange={(checked: boolean | 'indeterminate') => setClearCacheOption(checked === true)}
+                disabled={isClearing}
+              />
+              <Label htmlFor="clear-cache" className="text-sm font-medium cursor-pointer">
+                {t('documentPanel.clearDocuments.clearCache')}
+              </Label>
+            </div>
+          ) : (
+            <div className="rounded-md border border-dashed border-border/70 bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
+              Clearing shared LLM cache remains limited to KB settings managers.
+            </div>
+          )}
         </div>
 
         <DialogFooter>

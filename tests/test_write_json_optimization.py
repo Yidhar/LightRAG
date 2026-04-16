@@ -11,6 +11,7 @@ This test verifies:
 import os
 import json
 import tempfile
+from pathlib import Path
 import pytest
 from lightrag.utils import (
     write_json,
@@ -344,6 +345,65 @@ class TestWriteJsonOptimization:
             ), "Empty dict evaluates to False (the critical check)"
 
         finally:
+            os.unlink(temp_file)
+
+    def test_load_json_recovers_truncated_object_without_raising(self):
+        """Corrupted top-level dict JSON should auto-recover and keep startup safe."""
+        corrupted_json = '{\n  "first": {\n    "value": 1\n  },\n  "second": {\n    "value": '
+
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json") as f:
+            temp_file = f.name
+            f.write(corrupted_json)
+
+        try:
+            loaded_data = load_json(temp_file)
+
+            assert loaded_data == {"first": {"value": 1}}
+
+            # The file on disk should now be valid JSON again
+            with open(temp_file, encoding="utf-8") as repaired_file:
+                repaired_on_disk = json.load(repaired_file)
+            assert repaired_on_disk == loaded_data
+
+            backup_files = list(
+                Path(temp_file).parent.glob(f"{Path(temp_file).name}.corrupt.*.bak")
+            )
+            assert backup_files, "Recovery should preserve a backup of the corrupted file"
+        finally:
+            backup_files = list(
+                Path(temp_file).parent.glob(f"{Path(temp_file).name}.corrupt.*.bak")
+            )
+            for backup in backup_files:
+                backup.unlink(missing_ok=True)
+            os.unlink(temp_file)
+
+    def test_load_json_quarantines_unrecoverable_json_to_empty_container(self):
+        """Malformed non-truncated JSON should not bubble raw parse errors to callers."""
+        unrecoverable_json = "this is not valid json"
+
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json") as f:
+            temp_file = f.name
+            f.write(unrecoverable_json)
+
+        try:
+            loaded_data = load_json(temp_file)
+
+            assert loaded_data == {}
+
+            with open(temp_file, encoding="utf-8") as repaired_file:
+                repaired_on_disk = json.load(repaired_file)
+            assert repaired_on_disk == {}
+
+            backup_files = list(
+                Path(temp_file).parent.glob(f"{Path(temp_file).name}.corrupt.*.bak")
+            )
+            assert backup_files, "Recovery should back up unrecoverable JSON too"
+        finally:
+            backup_files = list(
+                Path(temp_file).parent.glob(f"{Path(temp_file).name}.corrupt.*.bak")
+            )
+            for backup in backup_files:
+                backup.unlink(missing_ok=True)
             os.unlink(temp_file)
 
 

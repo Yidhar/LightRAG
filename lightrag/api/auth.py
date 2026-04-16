@@ -1,11 +1,13 @@
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 
 import jwt
 from dotenv import load_dotenv
 from fastapi import HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ValidationError
 
 from ..utils import logger
+from .auth_accounts import parse_auth_accounts
 from .config import DEFAULT_TOKEN_SECRET, global_args
 from .passwords import verify_password
 
@@ -15,26 +17,37 @@ from .passwords import verify_password
 load_dotenv(dotenv_path=".env", override=False)
 
 
+class MembershipClaim(BaseModel):
+    workspace_id: str
+    kb_id: str | None = None
+    role: str
+
+
 class TokenPayload(BaseModel):
     sub: str  # Username
     exp: datetime  # Expiration time
+    username: str | None = None
+    uid: str | None = None
     role: str = "user"  # User role, default is regular user
-    metadata: dict = {}  # Additional metadata
+    memberships: list[MembershipClaim] = Field(default_factory=list)
+    jti: str = ""
+    metadata: dict = Field(default_factory=dict)  # Additional metadata
 
 
 class AuthHandler:
     def __init__(self):
         auth_accounts = global_args.auth_accounts
+        use_db_auth = bool(getattr(global_args, "use_db_auth", False))
         self.secret = global_args.token_secret
         if not self.secret:
-            if auth_accounts:
+            if auth_accounts or use_db_auth:
                 raise ValueError(
-                    "TOKEN_SECRET must be explicitly set to a non-default value when AUTH_ACCOUNTS is configured."
+                    "TOKEN_SECRET must be explicitly set to a non-default value when local authentication is configured."
                 )
             self.secret = DEFAULT_TOKEN_SECRET
             logger.warning(
-                "TOKEN_SECRET not set and AUTH_ACCOUNTS is not configured. "
-                "Falling back to the default guest-mode JWT secret. "
+                "TOKEN_SECRET not set and no local auth provider is configured. "
+                "Falling back to the default development JWT secret."
             )
         algorithm = global_args.jwt_algorithm
         if not algorithm or algorithm.lower() == "none":
@@ -45,23 +58,12 @@ class AuthHandler:
         self.algorithm = algorithm
         self.expire_hours = global_args.token_expire_hours
         self.guest_expire_hours = global_args.guest_token_expire_hours
-        self.accounts = {}
-        invalid_accounts = []
-        if auth_accounts:
-            for account in auth_accounts.split(","):
-                try:
-                    username, password = account.split(":", 1)
-                    if not username or not password:
-                        raise ValueError
-                    self.accounts[username] = password
-                except ValueError:
-                    invalid_accounts.append(account)
-        if invalid_accounts:
-            invalid_entries = ", ".join(invalid_accounts)
-            logger.error(f"Invalid account format in AUTH_ACCOUNTS: {invalid_entries}")
-            raise ValueError(
-                "AUTH_ACCOUNTS must use comma-separated user:password pairs."
-            )
+        self.refresh_expire_hours = getattr(global_args, "refresh_token_expire_hours", 168)
+        try:
+            self.accounts = parse_auth_accounts(auth_accounts)
+        except ValueError as exc:
+            logger.error(str(exc))
+            raise
 
     def verify_password(self, username: str, plain_password: str) -> bool:
         """
@@ -86,6 +88,9 @@ class AuthHandler:
         role: str = "user",
         custom_expire_hours: int = None,
         metadata: dict = None,
+        memberships: Sequence[MembershipClaim | dict] | None = None,
+        jti: str = "",
+        user_id: str | None = None,
     ) -> str:
         """
         Create JWT token
@@ -110,9 +115,23 @@ class AuthHandler:
 
         expire = datetime.now(timezone.utc) + timedelta(hours=expire_hours)
 
+        membership_claims = [
+            claim
+            if isinstance(claim, MembershipClaim)
+            else MembershipClaim.model_validate(claim)
+            for claim in (memberships or [])
+        ]
+
         # Create payload
         payload = TokenPayload(
-            sub=username, exp=expire, role=role, metadata=metadata or {}
+            sub=username,
+            exp=expire,
+            username=username,
+            uid=user_id,
+            role=role,
+            memberships=membership_claims,
+            jti=jti or "",
+            metadata=metadata or {},
         )
 
         return jwt.encode(payload.model_dump(), self.secret, algorithm=self.algorithm)
@@ -147,14 +166,25 @@ class AuthHandler:
                     status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired"
                 )
 
+            memberships = payload.get("memberships") or []
+            validated_memberships = [
+                MembershipClaim.model_validate(claim).model_dump()
+                for claim in memberships
+            ]
+
+            username = payload.get("username") or payload["sub"]
+
             # Return complete payload instead of just username
             return {
-                "username": payload["sub"],
+                "username": username,
+                "user_id": payload.get("uid"),
                 "role": payload.get("role", "user"),
+                "memberships": validated_memberships,
+                "jti": payload.get("jti", ""),
                 "metadata": payload.get("metadata", {}),
                 "exp": expire_time,
             }
-        except jwt.PyJWTError:
+        except (jwt.PyJWTError, KeyError, TypeError, ValidationError):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
             )

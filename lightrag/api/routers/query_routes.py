@@ -4,9 +4,10 @@ This module contains all query-related routes for the LightRAG API.
 
 import json
 from typing import Any, Dict, List, Literal, Optional
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from lightrag.base import QueryParam
-from lightrag.api.utils_api import get_combined_auth_dependency
+from lightrag.api.dependencies import get_current_rag
+from lightrag.api.permissions import Action, require_permission
 from lightrag.utils import logger
 from pydantic import BaseModel, Field, field_validator
 
@@ -190,13 +191,22 @@ class StreamChunkResponse(BaseModel):
     )
 
 
-def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
-    combined_auth = get_combined_auth_dependency(api_key)
+def create_query_routes(
+    rag: Any | None = None,
+    api_key: Optional[str] = None,
+    top_k: int = 60,
+):
+    query_permission = require_permission(Action.KB_QUERY, api_key)
+
+    async def resolve_route_rag(request: Request) -> Any:
+        if rag is not None:
+            return rag
+        return await get_current_rag(request)
 
     @router.post(
         "/query",
         response_model=QueryResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(query_permission)],
         responses={
             200: {
                 "description": "Successful RAG query response",
@@ -322,7 +332,10 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             },
         },
     )
-    async def query_text(request: QueryRequest):
+    async def query_text(
+        request: QueryRequest,
+        active_rag: Any = Depends(resolve_route_rag),
+    ):
         """
         Comprehensive RAG query endpoint with non-streaming response. Parameter "stream" is ignored.
 
@@ -409,7 +422,7 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             param.stream = False
 
             # Unified approach: always use aquery_llm for both cases
-            result = await rag.aquery_llm(request.query, param=param)
+            result = await active_rag.aquery_llm(request.query, param=param)
 
             # Extract LLM response and references from unified result
             llm_response = result.get("llm_response", {})
@@ -455,7 +468,7 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
 
     @router.post(
         "/query/stream",
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(query_permission)],
         responses={
             200: {
                 "description": "Flexible RAG query response - format depends on stream parameter",
@@ -532,7 +545,10 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             },
         },
     )
-    async def query_text_stream(request: QueryRequest):
+    async def query_text_stream(
+        request: QueryRequest,
+        active_rag: Any = Depends(resolve_route_rag),
+    ):
         """
         Advanced RAG query endpoint with flexible streaming response.
 
@@ -667,7 +683,7 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             from fastapi.responses import StreamingResponse
 
             # Unified approach: always use aquery_llm for all cases
-            result = await rag.aquery_llm(request.query, param=param)
+            result = await active_rag.aquery_llm(request.query, param=param)
 
             async def stream_generator():
                 # Extract references and LLM response from unified result
@@ -742,7 +758,7 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
     @router.post(
         "/query/data",
         response_model=QueryDataResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(query_permission)],
         responses={
             200: {
                 "description": "Successful data retrieval response with structured RAG data",
@@ -1035,7 +1051,10 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             },
         },
     )
-    async def query_data(request: QueryRequest):
+    async def query_data(
+        request: QueryRequest,
+        active_rag: Any = Depends(resolve_route_rag),
+    ):
         """
         Advanced data retrieval endpoint for structured RAG analysis.
 
@@ -1140,7 +1159,7 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
         """
         try:
             param = request.to_query_params(False)  # No streaming for data endpoint
-            response = await rag.aquery_data(request.query, param=param)
+            response = await active_rag.aquery_data(request.query, param=param)
 
             # aquery_data returns the new format with status, message, data, and metadata
             if isinstance(response, dict):

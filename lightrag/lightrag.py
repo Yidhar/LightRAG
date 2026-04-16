@@ -1041,6 +1041,59 @@ class LightRAG:
     llm_model_kwargs: dict[str, Any] = field(default_factory=dict)
     """Additional keyword arguments passed to the LLM model function."""
 
+    llm_binding: str = field(default_factory=lambda: get_env_value("LLM_BINDING", "", str))
+    """Logical LLM binding name (for example ``openai`` or ``azure_openai``)."""
+
+    llm_binding_host: str | None = field(
+        default_factory=lambda: get_env_value("LLM_BINDING_HOST", None, special_none=True)
+    )
+    """Provider host/base URL for OpenAI-compatible batch workflows."""
+
+    llm_binding_api_key: str | None = field(
+        default_factory=lambda: get_env_value(
+            "LLM_BINDING_API_KEY",
+            os.getenv("OPENAI_API_KEY"),
+            special_none=True,
+        )
+    )
+    """Provider API key for OpenAI-compatible batch workflows."""
+
+    llm_openai_options: dict[str, Any] = field(default_factory=dict)
+    """Resolved OpenAI-compatible request options for indexing calls."""
+
+    entity_extraction_mode: str = field(
+        default_factory=lambda: get_env_value("ENTITY_EXTRACTION_MODE", "auto", str)
+    )
+    """Entity extraction execution mode: ``auto``, ``realtime``, or ``batch``."""
+
+    entity_extraction_batch_min_chunks: int = field(
+        default_factory=lambda: get_env_value(
+            "ENTITY_EXTRACTION_BATCH_MIN_CHUNKS", 120, int
+        )
+    )
+    """Minimum chunk count before ``auto`` mode switches to batch extraction."""
+
+    entity_extraction_batch_poll_interval_seconds: int = field(
+        default_factory=lambda: get_env_value(
+            "ENTITY_EXTRACTION_BATCH_POLL_INTERVAL_SECONDS", 5, int
+        )
+    )
+    """Polling interval in seconds for OpenAI-compatible batch entity extraction."""
+
+    entity_extraction_batch_timeout_seconds: int = field(
+        default_factory=lambda: get_env_value(
+            "ENTITY_EXTRACTION_BATCH_TIMEOUT_SECONDS", 3600, int
+        )
+    )
+    """Timeout in seconds before an entity extraction batch is cancelled/fallback begins."""
+
+    entity_extraction_batch_fallback_to_realtime: bool = field(
+        default_factory=lambda: get_env_value(
+            "ENTITY_EXTRACTION_BATCH_FALLBACK_TO_REALTIME", True, bool
+        )
+    )
+    """Fallback to realtime extraction when batch mode fails or returns partial results."""
+
     default_llm_timeout: int = field(
         default=int(os.getenv("LLM_TIMEOUT", DEFAULT_LLM_TIMEOUT))
     )
@@ -3815,6 +3868,16 @@ class LightRAG:
                         "docs": 0,
                         "batchs": 0,  # Total number of files to be processed
                         "cur_batch": 0,  # Number of files already processed
+                        "total_chunks": 0,
+                        "processed_chunks": 0,
+                        "current_stage": "",
+                        "current_stage_label": "",
+                        "stage_unit": "",
+                        "stage_total": 0,
+                        "stage_processed": 0,
+                        "stage_remaining": 0,
+                        "stage_elapsed_seconds": 0,
+                        "stage_eta_seconds": None,
                         "request_pending": False,  # Clear any previous request
                         "cancellation_requested": False,  # Initialize cancellation flag
                         "latest_message": "",
@@ -3877,6 +3940,16 @@ class LightRAG:
                 pipeline_status["docs"] = len(to_process_docs)
                 pipeline_status["batchs"] = len(to_process_docs)
                 pipeline_status["cur_batch"] = 0
+                pipeline_status["total_chunks"] = 0
+                pipeline_status["processed_chunks"] = 0
+                pipeline_status["current_stage"] = "document_queue"
+                pipeline_status["current_stage_label"] = "Preparing document queue"
+                pipeline_status["stage_unit"] = "documents"
+                pipeline_status["stage_total"] = len(to_process_docs)
+                pipeline_status["stage_processed"] = 0
+                pipeline_status["stage_remaining"] = len(to_process_docs)
+                pipeline_status["stage_elapsed_seconds"] = 0
+                pipeline_status["stage_eta_seconds"] = None
                 pipeline_status["latest_message"] = log_message
                 pipeline_status["history_messages"].append(log_message)
 
@@ -4021,6 +4094,32 @@ class LightRAG:
                             # Record processing start time
                             processing_start_time = int(time.time())
 
+                            async with pipeline_status_lock:
+                                total_chunks_known = int(
+                                    pipeline_status.get("total_chunks", 0) or 0
+                                )
+                                pipeline_status["total_chunks"] = (
+                                    total_chunks_known + len(chunks)
+                                )
+                                pipeline_status["current_stage"] = "document_chunking"
+                                pipeline_status["current_stage_label"] = (
+                                    "Chunking documents"
+                                )
+                                pipeline_status["stage_unit"] = "chunks"
+                                pipeline_status["stage_total"] = int(
+                                    pipeline_status["total_chunks"]
+                                )
+                                pipeline_status["stage_processed"] = int(
+                                    pipeline_status.get("processed_chunks", 0) or 0
+                                )
+                                pipeline_status["stage_remaining"] = max(
+                                    int(pipeline_status["stage_total"])
+                                    - int(pipeline_status["stage_processed"]),
+                                    0,
+                                )
+                                pipeline_status["stage_elapsed_seconds"] = 0
+                                pipeline_status["stage_eta_seconds"] = None
+
                             # Check for cancellation before entity extraction
                             async with pipeline_status_lock:
                                 if pipeline_status.get("cancellation_requested", False):
@@ -4046,7 +4145,15 @@ class LightRAG:
                                             "file_path": file_path,
                                             "track_id": status_doc.track_id,  # Preserve existing track_id
                                             "metadata": {
-                                                "processing_start_time": processing_start_time
+                                                "processing_start_time": processing_start_time,
+                                                "processing_stage": "entity_extraction_prepare",
+                                                "processing_stage_label": "Preparing entity extraction",
+                                                "processing_progress_percent": 0.0,
+                                                "processing_items_processed": 0,
+                                                "processing_items_total": len(chunks),
+                                                "processing_items_remaining": len(chunks),
+                                                "processing_elapsed_seconds": 0,
+                                                "processing_eta_seconds": None,
                                             },
                                         }
                                     }
@@ -4357,6 +4464,7 @@ class LightRAG:
                 pipeline_status_lock=pipeline_status_lock,
                 llm_response_cache=self.llm_response_cache,
                 text_chunks_storage=self.text_chunks,
+                doc_status_storage=self.doc_status,
             )
             return chunk_results
         except Exception as e:
@@ -5280,6 +5388,16 @@ class LightRAG:
                         "docs": 1,
                         "batchs": 1,
                         "cur_batch": 0,
+                        "total_chunks": 0,
+                        "processed_chunks": 0,
+                        "current_stage": "document_deletion",
+                        "current_stage_label": "Deleting single document",
+                        "stage_unit": "documents",
+                        "stage_total": 1,
+                        "stage_processed": 0,
+                        "stage_remaining": 1,
+                        "stage_elapsed_seconds": 0,
+                        "stage_eta_seconds": None,
                         "request_pending": False,
                         "cancellation_requested": False,
                         "latest_message": f"Starting deletion for document: {doc_id}",

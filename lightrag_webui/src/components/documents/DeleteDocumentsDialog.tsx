@@ -34,11 +34,18 @@ const Label = ({
 )
 
 interface DeleteDocumentsDialogProps {
+  disabled?: boolean
+  disabledReason?: string
   selectedDocIds: string[]
   onDocumentsDeleted?: () => Promise<void>
 }
 
-export default function DeleteDocumentsDialog({ selectedDocIds, onDocumentsDeleted }: DeleteDocumentsDialogProps) {
+export default function DeleteDocumentsDialog({
+  disabled = false,
+  disabledReason,
+  selectedDocIds,
+  onDocumentsDeleted,
+}: DeleteDocumentsDialogProps) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
   const [confirmText, setConfirmText] = useState('')
@@ -58,7 +65,7 @@ export default function DeleteDocumentsDialog({ selectedDocIds, onDocumentsDelet
   }, [open])
 
   const handleDelete = useCallback(async () => {
-    if (!isConfirmEnabled || selectedDocIds.length === 0) return
+    if (disabled || !isConfirmEnabled || selectedDocIds.length === 0) return
 
     setIsDeleting(true)
     try {
@@ -96,20 +103,25 @@ export default function DeleteDocumentsDialog({ selectedDocIds, onDocumentsDelet
     } finally {
       setIsDeleting(false)
     }
-  }, [isConfirmEnabled, selectedDocIds, deleteFile, deleteLLMCache, setOpen, t, onDocumentsDeleted])
+  }, [disabled, isConfirmEnabled, selectedDocIds, deleteFile, deleteLLMCache, setOpen, t, onDocumentsDeleted])
+
+  const trigger = (
+    <span className="inline-flex" title={disabled ? disabledReason : undefined}>
+      <Button
+        variant="destructive"
+        side="bottom"
+        tooltip={disabled ? undefined : t('documentPanel.deleteDocuments.tooltip', { count: selectedDocIds.length })}
+        size="sm"
+        disabled={disabled}
+      >
+        <TrashIcon/> {t('documentPanel.deleteDocuments.button')}
+      </Button>
+    </span>
+  )
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button
-          variant="destructive"
-          side="bottom"
-          tooltip={t('documentPanel.deleteDocuments.tooltip', { count: selectedDocIds.length })}
-          size="sm"
-        >
-          <TrashIcon/> {t('documentPanel.deleteDocuments.button')}
-        </Button>
-      </DialogTrigger>
+    <Dialog open={open} onOpenChange={(nextOpen) => !disabled && setOpen(nextOpen)}>
+      <DialogTrigger asChild>{trigger}</DialogTrigger>
       <DialogContent className="sm:max-w-xl" onCloseAutoFocus={(e) => e.preventDefault()}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-red-500 dark:text-red-400 font-bold">

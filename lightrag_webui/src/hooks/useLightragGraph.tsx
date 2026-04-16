@@ -370,7 +370,7 @@ const useLightrangeGraph = () => {
         }
 
         if (result?.is_truncated) {
-          toast.info(t('graphPanel.dataIsTruncated', 'Graph data is truncated to Max Nodes'));
+          toast.info(t('graphPanel.dataIsTruncated'));
         }
 
         // Reset state

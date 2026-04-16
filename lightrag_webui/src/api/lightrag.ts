@@ -4,6 +4,8 @@ import { errorMessage } from '@/lib/utils'
 import { useSettingsStore } from '@/stores/settings'
 import { useAuthStore } from '@/stores/state'
 import { navigationService } from '@/services/navigation'
+import { toast } from 'sonner'
+import { normalizeMembershipClaims, type MembershipClaim } from '@/lib/permissions'
 
 // Types
 export type LightragNodeType = {
@@ -59,7 +61,7 @@ export type LightragStatus = {
   update_status?: Record<string, any>
   core_version?: string
   api_version?: string
-  auth_mode?: 'enabled' | 'disabled'
+  auth_mode?: 'local' | 'setup_required'
   pipeline_busy: boolean
   keyed_locks?: {
     process_id: number
@@ -352,9 +354,11 @@ export type StatusCountsResponse = {
 
 export type AuthStatusResponse = {
   auth_configured: boolean
-  access_token?: string
-  token_type?: string
-  auth_mode?: 'enabled' | 'disabled'
+  auth_mode?: 'local' | 'setup_required'
+  available_providers?: string[]
+  supports_password_login?: boolean
+  supports_refresh_tokens?: boolean
+  supports_user_management?: boolean
   message?: string
   core_version?: string
   api_version?: string
@@ -370,6 +374,16 @@ export type PipelineStatusResponse = {
   docs: number
   batchs: number
   cur_batch: number
+  total_chunks?: number
+  processed_chunks?: number
+  current_stage?: string
+  current_stage_label?: string
+  stage_unit?: string
+  stage_total?: number
+  stage_processed?: number
+  stage_remaining?: number
+  stage_elapsed_seconds?: number
+  stage_eta_seconds?: number | null
   request_pending: boolean
   cancellation_requested?: boolean
   latest_message: string
@@ -380,12 +394,86 @@ export type PipelineStatusResponse = {
 export type LoginResponse = {
   access_token: string
   token_type: string
-  auth_mode?: 'enabled' | 'disabled'  // Authentication mode identifier
+  auth_mode?: 'local' | 'setup_required'
   message?: string                    // Optional message
   core_version?: string
   api_version?: string
   webui_title?: string
   webui_description?: string
+}
+
+export type MembershipEntry = {
+  membership_id: string
+  user_id: string
+  username: string
+  workspace_id: string
+  kb_id?: string | null
+  role: 'owner' | 'admin' | 'editor' | 'viewer'
+  source: string
+  created_at: string
+  updated_at: string
+}
+
+export type MembershipListResponse = {
+  members: MembershipEntry[]
+  total_count: number
+}
+
+export type MembershipMutationResponse = {
+  status: 'created' | 'updated'
+  message: string
+  member: MembershipEntry
+}
+
+export type MembershipDeleteResponse = {
+  status: 'deleted'
+  message: string
+  user_id: string
+  workspace_id: string
+  kb_id?: string | null
+}
+
+export type KnowledgeBaseRecord = {
+  id: string
+  workspace_id: string
+  name: string
+  description: string
+  created_at: string
+  config_override: Record<string, any>
+  status: string
+}
+
+export type KnowledgeBaseListResponse = {
+  items: KnowledgeBaseRecord[]
+  total_count: number
+}
+
+export type KnowledgeBaseCreateRequest = {
+  kb_id?: string
+  name?: string
+  description?: string
+  config_override?: Record<string, any>
+  status?: string
+}
+
+export type KnowledgeBaseUpdateRequest = {
+  name?: string
+  description?: string
+  config_override?: Record<string, any>
+  status?: string
+}
+
+export type KnowledgeBaseMutationResponse = {
+  status: 'created' | 'updated'
+  message: string
+  kb: KnowledgeBaseRecord
+}
+
+export type KnowledgeBaseDeleteResponse = {
+  status: 'deleted'
+  message: string
+  workspace_id: string
+  kb_id: string
 }
 
 export const InvalidApiKeyError = 'Invalid API Key'
@@ -399,53 +487,25 @@ const axiosInstance = axios.create({
   }
 })
 
-// ========== Token Management ==========
-// Prevent multiple requests from triggering token refresh simultaneously
-let isRefreshingGuestToken = false;
-let refreshTokenPromise: Promise<string> | null = null;
-
-// Silent refresh for guest token
-const silentRefreshGuestToken = async (): Promise<string> => {
-  // If already refreshing, return the same Promise
-  if (isRefreshingGuestToken && refreshTokenPromise) {
-    return refreshTokenPromise;
-  }
-
-  isRefreshingGuestToken = true;
-  refreshTokenPromise = (async () => {
-    try {
-      // Call /auth-status to get new guest token
-      const response = await axios.get('/auth-status', {
-        baseURL: backendBaseUrl,
-        // This request must skip the interceptor to avoid adding expired token
-        headers: { 'X-Skip-Interceptor': 'true' }
-      });
-
-      if (response.data.access_token && !response.data.auth_configured) {
-        const newToken = response.data.access_token;
-        // Update localStorage
-        localStorage.setItem('LIGHTRAG-API-TOKEN', newToken);
-        // Update auth state
-        useAuthStore.getState().login(
-          newToken,
-          true,
-          response.data.core_version,
-          response.data.api_version,
-          response.data.webui_title || null,
-          response.data.webui_description || null
-        );
-        return newToken;
-      } else {
-        throw new Error('Failed to get guest token');
-      }
-    } finally {
-      isRefreshingGuestToken = false;
-      refreshTokenPromise = null;
+const decodeTokenClaims = (
+  token: string
+): {
+  sub?: string
+  role?: string
+  exp?: number
+  memberships?: MembershipClaim[]
+} => {
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1] || ''))
+    return {
+      ...payload,
+      memberships: normalizeMembershipClaims(payload.memberships),
     }
-  })();
-
-  return refreshTokenPromise;
-};
+  } catch (error) {
+    console.warn('[Auth] Failed to decode token claims:', error)
+    return {}
+  }
+}
 
 // Interceptor: add api key and check authentication
 axiosInstance.interceptors.request.use((config) => {
@@ -483,20 +543,19 @@ axiosInstance.interceptors.response.use(
 
       // Update auth state with renewal tracking
       try {
-        const payload = JSON.parse(atob(newToken.split('.')[1]));
+        const payload = decodeTokenClaims(newToken)
         const authStore = useAuthStore.getState();
         if (authStore.isAuthenticated) {
           // Track token renewal time and expiration
           const renewalTime = Date.now();
           const expiresAt = payload.exp ? payload.exp * 1000 : 0;
           authStore.setTokenRenewal(renewalTime, expiresAt);
-
-          // Update username (usually unchanged, but just in case)
-          const newUsername = payload.sub;
-          if (newUsername && newUsername !== authStore.username) {
-            // Need to add setUsername method or just update via login
-            // For now, we'll skip username update as it's rare
-          }
+          useAuthStore.setState({
+            username: payload.sub || authStore.username,
+            role: payload.role || authStore.role,
+            memberships: payload.memberships || authStore.memberships,
+            tokenExpiresAt: expiresAt || authStore.tokenExpiresAt,
+          })
         }
       } catch (error) {
         console.warn('[Auth] Failed to parse renewed token:', error);
@@ -522,35 +581,16 @@ axiosInstance.interceptors.response.use(
           return Promise.reject(new Error('Authentication required'));
         }
 
-        // 3. Check if in guest mode
-        const authStore = useAuthStore.getState();
-        const currentToken = localStorage.getItem('LIGHTRAG-API-TOKEN');
-        const isGuest = currentToken && authStore.isGuestMode;
-
-        // 4. Guest mode: silent refresh and retry
-        if (isGuest && originalRequest) {
-          try {
-            const newToken = await silentRefreshGuestToken();
-
-            // Mark as retried to prevent infinite loop
-            (originalRequest as any)._retry = true;
-
-            // Update token in request headers
-            originalRequest.headers['Authorization'] = `Bearer ${newToken}`;
-
-            // Retry original request
-            return axiosInstance(originalRequest);
-          } catch (refreshError) {
-            console.error('Failed to refresh guest token:', refreshError);
-            // Refresh failed, navigate to login
-            navigationService.navigateToLogin();
-            return Promise.reject(new Error('Failed to refresh authentication'));
-          }
-        }
-
-        // 5. Non-guest mode: navigate to login page
+        // 3. Any 401 means the current session is no longer valid and the user must sign in again.
         navigationService.navigateToLogin();
         return Promise.reject(new Error('Authentication required'));
+      }
+      if (error.response?.status === 403) {
+        const detail =
+          typeof error.response.data === 'object' && error.response.data && 'detail' in error.response.data
+            ? String((error.response.data as Record<string, unknown>).detail)
+            : 'You do not have permission to perform this action.'
+        toast.error(detail)
       }
       throw new Error(
         `${error.response.status} ${error.response.statusText}\n${JSON.stringify(
@@ -603,6 +643,142 @@ export const checkHealth = async (): Promise<
 
 export const getDocuments = async (): Promise<DocsStatusesResponse> => {
   const response = await axiosInstance.get('/documents')
+  return response.data
+}
+
+export const listWorkspaceMembers = async (
+  workspaceId: string
+): Promise<MembershipListResponse> => {
+  const response = await axiosInstance.get(`/workspaces/${encodeURIComponent(workspaceId)}/members`)
+  return response.data
+}
+
+export const createWorkspaceMember = async (
+  workspaceId: string,
+  payload: { username: string; role: MembershipEntry['role'] }
+): Promise<MembershipMutationResponse> => {
+  const response = await axiosInstance.post(
+    `/workspaces/${encodeURIComponent(workspaceId)}/members`,
+    payload
+  )
+  return response.data
+}
+
+export const updateWorkspaceMemberRole = async (
+  workspaceId: string,
+  userId: string,
+  role: MembershipEntry['role']
+): Promise<MembershipMutationResponse> => {
+  const response = await axiosInstance.put(
+    `/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}`,
+    { role }
+  )
+  return response.data
+}
+
+export const deleteWorkspaceMember = async (
+  workspaceId: string,
+  userId: string
+): Promise<MembershipDeleteResponse> => {
+  const response = await axiosInstance.delete(
+    `/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}`
+  )
+  return response.data
+}
+
+export const listKnowledgeBaseMembers = async (
+  workspaceId: string,
+  kbId: string
+): Promise<MembershipListResponse> => {
+  const response = await axiosInstance.get(
+    `/workspaces/${encodeURIComponent(workspaceId)}/kb/${encodeURIComponent(kbId)}/members`
+  )
+  return response.data
+}
+
+export const createKnowledgeBaseMember = async (
+  workspaceId: string,
+  kbId: string,
+  payload: { username: string; role: MembershipEntry['role'] }
+): Promise<MembershipMutationResponse> => {
+  const response = await axiosInstance.post(
+    `/workspaces/${encodeURIComponent(workspaceId)}/kb/${encodeURIComponent(kbId)}/members`,
+    payload
+  )
+  return response.data
+}
+
+export const updateKnowledgeBaseMemberRole = async (
+  workspaceId: string,
+  kbId: string,
+  userId: string,
+  role: MembershipEntry['role']
+): Promise<MembershipMutationResponse> => {
+  const response = await axiosInstance.put(
+    `/workspaces/${encodeURIComponent(workspaceId)}/kb/${encodeURIComponent(kbId)}/members/${encodeURIComponent(userId)}`,
+    { role }
+  )
+  return response.data
+}
+
+export const deleteKnowledgeBaseMember = async (
+  workspaceId: string,
+  kbId: string,
+  userId: string
+): Promise<MembershipDeleteResponse> => {
+  const response = await axiosInstance.delete(
+    `/workspaces/${encodeURIComponent(workspaceId)}/kb/${encodeURIComponent(kbId)}/members/${encodeURIComponent(userId)}`
+  )
+  return response.data
+}
+
+export const listKnowledgeBases = async (
+  workspaceId: string
+): Promise<KnowledgeBaseListResponse> => {
+  const response = await axiosInstance.get(`/workspaces/${encodeURIComponent(workspaceId)}/kb`)
+  return response.data
+}
+
+export const getKnowledgeBase = async (
+  workspaceId: string,
+  kbId: string
+): Promise<KnowledgeBaseRecord> => {
+  const response = await axiosInstance.get(
+    `/workspaces/${encodeURIComponent(workspaceId)}/kb/${encodeURIComponent(kbId)}`
+  )
+  return response.data
+}
+
+export const createKnowledgeBase = async (
+  workspaceId: string,
+  payload: KnowledgeBaseCreateRequest
+): Promise<KnowledgeBaseMutationResponse> => {
+  const response = await axiosInstance.post(
+    `/workspaces/${encodeURIComponent(workspaceId)}/kb`,
+    payload
+  )
+  return response.data
+}
+
+export const updateKnowledgeBase = async (
+  workspaceId: string,
+  kbId: string,
+  payload: KnowledgeBaseUpdateRequest
+): Promise<KnowledgeBaseMutationResponse> => {
+  const response = await axiosInstance.patch(
+    `/workspaces/${encodeURIComponent(workspaceId)}/kb/${encodeURIComponent(kbId)}`,
+    payload
+  )
+  return response.data
+}
+
+export const deleteKnowledgeBase = async (
+  workspaceId: string,
+  kbId: string
+): Promise<KnowledgeBaseDeleteResponse> => {
+  const response = await axiosInstance.delete(
+    `/workspaces/${encodeURIComponent(workspaceId)}/kb/${encodeURIComponent(kbId)}`
+  )
   return response.data
 }
 
@@ -815,88 +991,6 @@ export const queryTextStream = async (
     if (!response.ok) {
       // Handle 401 Unauthorized error specifically
       if (response.status === 401) {
-        // Check if in guest mode
-        const authStore = useAuthStore.getState();
-        const currentToken = localStorage.getItem('LIGHTRAG-API-TOKEN');
-        const isGuest = currentToken && authStore.isGuestMode;
-
-        if (isGuest) {
-          try {
-            // Silent refresh token for guest mode
-            const newToken = await silentRefreshGuestToken();
-
-            // Retry stream request with new token
-            const retryHeaders = { ...headers };
-            retryHeaders['Authorization'] = `Bearer ${newToken}`;
-
-            const retryResponse = await fetch(`${backendBaseUrl}/query/stream`, {
-              method: 'POST',
-              headers: retryHeaders,
-              body: JSON.stringify(request),
-            });
-
-            if (!retryResponse.ok) {
-              throw new Error(`HTTP error! status: ${retryResponse.status}`);
-            }
-
-            // Retry successful, process stream response
-            // Re-execute the stream processing logic with retryResponse
-            if (!retryResponse.body) {
-              throw new Error('Response body is null');
-            }
-
-            const reader = retryResponse.body.getReader();
-            const decoder = new TextDecoder();
-            let buffer = '';
-
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-
-              buffer += decoder.decode(value, { stream: true });
-              const lines = buffer.split('\n');
-              buffer = lines.pop() || '';
-
-              for (const line of lines) {
-                if (line.trim()) {
-                  try {
-                    const parsed = JSON.parse(line);
-                    if (parsed.response) {
-                      onChunk(parsed.response);
-                    } else if (parsed.error) {
-                      onError?.(parsed.error);
-                    }
-                  } catch (parseError) {
-                    console.error('Failed to parse JSON:', parseError, 'Line:', line);
-                    onError?.(`JSON parse error: ${parseError}`);
-                  }
-                }
-              }
-            }
-
-            // Process any remaining data in buffer
-            if (buffer.trim()) {
-              try {
-                const parsed = JSON.parse(buffer);
-                if (parsed.response) {
-                  onChunk(parsed.response);
-                } else if (parsed.error) {
-                  onError?.(parsed.error);
-                }
-              } catch (parseError) {
-                console.error('Failed to parse final buffer:', parseError);
-              }
-            }
-
-            return; // Successfully completed retry
-          } catch (refreshError) {
-            console.error('Failed to refresh guest token for streaming:', refreshError);
-            navigationService.navigateToLogin();
-            throw new Error('Failed to refresh authentication', { cause: refreshError });
-          }
-        }
-
-        // Non-guest mode: navigate to login page
         navigationService.navigateToLogin();
 
         // Create a specific authentication error
@@ -1139,7 +1233,7 @@ export const getAuthStatus = async (): Promise<AuthStatusResponse> => {
       console.warn('Received HTML response instead of JSON for auth-status endpoint');
       return {
         auth_configured: true,
-        auth_mode: 'enabled'
+        auth_mode: 'local'
       };
     }
 
@@ -1148,18 +1242,7 @@ export const getAuthStatus = async (): Promise<AuthStatusResponse> => {
         typeof response.data === 'object' &&
         'auth_configured' in response.data &&
         typeof response.data.auth_configured === 'boolean') {
-
-      // For unconfigured auth, ensure we have an access token
-      if (!response.data.auth_configured) {
-        if (response.data.access_token && typeof response.data.access_token === 'string') {
-          return response.data;
-        } else {
-          console.warn('Auth not configured but no valid access token provided');
-        }
-      } else {
-        // For configured auth, just return the data
-        return response.data;
-      }
+      return response.data;
     }
 
     // If response data is invalid but we got a response, log it
@@ -1168,14 +1251,14 @@ export const getAuthStatus = async (): Promise<AuthStatusResponse> => {
     // Default to auth configured if response is invalid
     return {
       auth_configured: true,
-      auth_mode: 'enabled'
+      auth_mode: 'local'
     };
   } catch (error) {
     // If the request fails, assume authentication is configured
     console.error('Failed to get auth status:', errorMessage(error));
     return {
       auth_configured: true,
-      auth_mode: 'enabled'
+      auth_mode: 'local'
     };
   }
 }

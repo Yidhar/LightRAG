@@ -187,7 +187,7 @@ describe('getDocumentsPaginated', () => {
     }
 
     let callCount = 0
-    let resolveSharedRequest: ((value: any) => void) | null = null
+    let resolveSharedRequest!: (value: any) => void
     let abortCount = 0
 
     apiModule.__setPaginatedDocumentsPostForTests((_request, controller) => {
@@ -214,7 +214,7 @@ describe('getDocumentsPaginated', () => {
     expect(callCount).toBe(1)
     expect(abortCount).toBe(0)
 
-    resolveSharedRequest?.({
+    resolveSharedRequest({
       documents: [],
       pagination: {
         page: 1,

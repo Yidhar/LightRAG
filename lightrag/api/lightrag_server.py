@@ -2,7 +2,7 @@
 LightRAG FastAPI Server
 """
 
-from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi import FastAPI, Depends, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.openapi.docs import (
@@ -28,7 +28,11 @@ from lightrag.api.utils_api import (
     display_splash_screen,
     check_env_file,
 )
+from lightrag.api.dependencies import get_request_context, install_platform_state
+from lightrag.api.kb_registry import KnowledgeBaseRegistry
+from lightrag.api.rag_factory import RagFactory
 from .config import (
+    collect_manual_kb_isolation_migration_backends,
     global_args,
     update_uvicorn_mode_config,
     get_default_host,
@@ -49,6 +53,10 @@ from lightrag.api.routers.document_routes import (
     DocumentManager,
     create_document_routes,
 )
+from lightrag.api.routers.auth_routes import create_auth_routes, issue_login_tokens
+from lightrag.api.auth_provider import get_auth_provider
+from lightrag.api.routers.kb_routes import create_kb_routes
+from lightrag.api.routers.membership_routes import create_membership_routes
 from lightrag.api.routers.query_routes import create_query_routes
 from lightrag.api.routers.graph_routes import create_graph_routes
 from lightrag.api.routers.image_routes import create_image_routes
@@ -63,7 +71,6 @@ from lightrag.kg.shared_storage import (
     finalize_share_data,
 )
 from fastapi.security import OAuth2PasswordRequestForm
-from lightrag.api.auth import auth_handler
 
 # use the .env that is inside the current folder
 # allows to use different .env file for each lightrag instance
@@ -73,10 +80,6 @@ load_dotenv(dotenv_path=".env", override=False)
 
 webui_title = os.getenv("WEBUI_TITLE")
 webui_description = os.getenv("WEBUI_DESCRIPTION")
-
-# Global authentication configuration
-auth_configured = bool(auth_handler.accounts)
-
 
 class LLMConfigCache:
     """Smart LLM and Embedding configuration cache class"""
@@ -340,30 +343,91 @@ def create_app(args):
     # Check if API key is provided either through env var or args
     api_key = os.getenv("LIGHTRAG_API_KEY") or args.key
 
+    kb_separator = (getattr(args, "kb_separator", None) or "__").strip() or "__"
+    default_workspace_id = getattr(
+        args, "default_workspace_id", None
+    ) or args.workspace or "default"
+    default_kb_id = getattr(args, "default_kb_id", None) or "default"
+    default_runtime_workspace = args.workspace
+    if args.enable_kb_isolation:
+        default_runtime_workspace = (
+            f"{default_workspace_id}{kb_separator}{default_kb_id}"
+        )
+        if getattr(args, "workers", 1) > 1:
+            logger.warning(
+                "KB isolation is enabled while workers=%s. The current KB registry is file-backed and "
+                "best operated as a single writer during migration/initial rollout. Prefer one worker "
+                "or avoid concurrent KB metadata mutations across workers.",
+                args.workers,
+            )
+        manual_migration_backends = collect_manual_kb_isolation_migration_backends(
+            args
+        )
+        if manual_migration_backends:
+            logger.warning(
+                "KB isolation is enabled with backend(s) that do not yet have scripted "
+                "WS5 migration coverage: %s. New deployments are fine, but existing "
+                "deployments should follow docs/platform-v2/ws5-migration-validation-rollout.md "
+                "and complete backend-specific migration planning before enabling the flag.",
+                ", ".join(manual_migration_backends),
+            )
+
     # Initialize document manager with workspace support for data isolation
-    doc_manager = DocumentManager(args.input_dir, workspace=args.workspace)
+    doc_manager = DocumentManager(
+        args.input_dir,
+        workspace=default_runtime_workspace,
+    )
+
+    async def initialize_rag_runtime(rag_instance: LightRAG) -> None:
+        """Initialize the storage/runtime state for one LightRAG instance."""
+        await rag_instance.initialize_storages()
+        await rag_instance.check_and_migrate_data()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Lifespan context manager for startup and shutdown events"""
         # Store background tasks
         app.state.background_tasks = set()
+        app.state.db_ready = False
 
         try:
+            if args.use_db_auth:
+                from lightrag.api.db import init_db
+                from lightrag.api.identity_store import bootstrap_identity_store
+
+                try:
+                    await init_db(args.db_url)
+                    seed_summary = await bootstrap_identity_store(args.auth_accounts)
+                    app.state.db_ready = True
+                    app.state.identity_schema_ready = True
+                    app.state.env_account_seed_summary = seed_summary.to_dict()
+                except Exception as exc:
+                    raise RuntimeError(
+                        "Failed to initialize the Platform V2 DB/auth scaffold. "
+                        "Check DB_URL, AUTH_ACCOUNTS formatting, and async DB dependencies."
+                    ) from exc
+
             # Initialize database connections
             # Note: initialize_storages() now auto-initializes pipeline_status for rag.workspace
-            await rag.initialize_storages()
-
-            # Data migration regardless of storage implementation
-            await rag.check_and_migrate_data()
+            await initialize_rag_runtime(rag)
 
             ASCIIColors.green("\nServer is ready to accept connections! 🚀\n")
 
             yield
 
         finally:
+            if args.use_db_auth:
+                from lightrag.api.db import close_db
+
+                await close_db()
+                app.state.db_ready = False
+                app.state.identity_schema_ready = False
+
             # Clean up database connections
-            await rag.finalize_storages()
+            if args.enable_kb_isolation and getattr(app.state, "rag_factory", None):
+                await app.state.rag_factory.finalize_all()
+            else:
+                await rag.finalize_storages()
 
             if "LIGHTRAG_GUNICORN_MODE" not in os.environ:
                 # Only perform cleanup in Uvicorn single-process mode
@@ -402,6 +466,7 @@ def create_app(args):
     }
 
     app = FastAPI(**app_kwargs)
+    install_platform_state(app, args)
 
     # Add custom validation error handler for /query/data endpoint
     @app.exception_handler(RequestValidationError)
@@ -455,6 +520,16 @@ def create_app(args):
 
     # Create combined auth dependency for all endpoints
     combined_auth = get_combined_auth_dependency(api_key)
+
+    @app.middleware("http")
+    async def attach_request_context(request: Request, call_next):
+        request.state.db_user_id = None
+        request.state.token_info = None
+        request_context = get_request_context(request)
+        request.state.workspace_id = request_context.workspace_id
+        request.state.kb_id = request_context.kb_id
+        response = await call_next(request)
+        return response
 
     def get_workspace_from_request(request: Request) -> str | None:
         """
@@ -1151,71 +1226,120 @@ def create_app(args):
             )
             vision_model_func = None
 
+    def build_rag_instance(workspace_value: str | None) -> LightRAG:
+        """Create a configured LightRAG instance for one logical runtime."""
+        try:
+            return LightRAG(
+                working_dir=args.working_dir,
+                workspace=workspace_value,
+                llm_model_func=create_llm_model_func(args.llm_binding),
+                query_llm_model_func=query_llm_model_func,
+                llm_model_name=args.llm_model,
+                llm_model_max_async=args.max_async,
+                summary_max_tokens=args.summary_max_tokens,
+                summary_context_size=args.summary_context_size,
+                chunk_token_size=int(args.chunk_size),
+                chunk_overlap_token_size=int(args.chunk_overlap_size),
+                llm_model_kwargs=create_llm_model_kwargs(
+                    args.llm_binding, args, llm_timeout
+                ),
+                llm_binding=args.llm_binding,
+                llm_binding_host=args.llm_binding_host,
+                llm_binding_api_key=args.llm_binding_api_key,
+                llm_openai_options=dict(config_cache.openai_llm_options or {}),
+                embedding_func=embedding_func,
+                image_embedding_func=image_embedding_func,
+                vision_model_func=vision_model_func,
+                default_llm_timeout=llm_timeout,
+                default_embedding_timeout=embedding_timeout,
+                kv_storage=args.kv_storage,
+                graph_storage=args.graph_storage,
+                vector_storage=args.vector_storage,
+                doc_status_storage=args.doc_status_storage,
+                vector_db_storage_cls_kwargs={
+                    "cosine_better_than_threshold": args.cosine_threshold
+                },
+                enable_llm_cache_for_entity_extract=args.enable_llm_cache_for_extract,
+                enable_llm_cache=args.enable_llm_cache,
+                rerank_model_func=rerank_model_func,
+                max_parallel_insert=args.max_parallel_insert,
+                max_graph_nodes=args.max_graph_nodes,
+                entity_extraction_mode=args.entity_extraction_mode,
+                entity_extraction_batch_min_chunks=args.entity_extraction_batch_min_chunks,
+                entity_extraction_batch_poll_interval_seconds=args.entity_extraction_batch_poll_interval_seconds,
+                entity_extraction_batch_timeout_seconds=args.entity_extraction_batch_timeout_seconds,
+                entity_extraction_batch_fallback_to_realtime=args.entity_extraction_batch_fallback_to_realtime,
+                addon_params={
+                    "language": args.summary_language,
+                    "entity_types": args.entity_types,
+                },
+                ollama_server_infos=ollama_server_infos,
+            )
+        except Exception as e:
+            logger.error(f"Failed to initialize LightRAG: {e}")
+            raise
+
+    kb_registry = None
+    if args.enable_kb_isolation:
+        kb_registry = KnowledgeBaseRegistry(args.working_dir)
+        kb_registry.ensure_default_kb(default_workspace_id, default_kb_id)
+
     # Initialize RAG with unified configuration
-    try:
-        rag = LightRAG(
-            working_dir=args.working_dir,
-            workspace=args.workspace,
-            llm_model_func=create_llm_model_func(args.llm_binding),
-            query_llm_model_func=query_llm_model_func,
-            llm_model_name=args.llm_model,
-            llm_model_max_async=args.max_async,
-            summary_max_tokens=args.summary_max_tokens,
-            summary_context_size=args.summary_context_size,
-            chunk_token_size=int(args.chunk_size),
-            chunk_overlap_token_size=int(args.chunk_overlap_size),
-            llm_model_kwargs=create_llm_model_kwargs(
-                args.llm_binding, args, llm_timeout
-            ),
-            embedding_func=embedding_func,
-            image_embedding_func=image_embedding_func,
-            vision_model_func=vision_model_func,
-            default_llm_timeout=llm_timeout,
-            default_embedding_timeout=embedding_timeout,
-            kv_storage=args.kv_storage,
-            graph_storage=args.graph_storage,
-            vector_storage=args.vector_storage,
-            doc_status_storage=args.doc_status_storage,
-            vector_db_storage_cls_kwargs={
-                "cosine_better_than_threshold": args.cosine_threshold
-            },
-            enable_llm_cache_for_entity_extract=args.enable_llm_cache_for_extract,
-            enable_llm_cache=args.enable_llm_cache,
-            rerank_model_func=rerank_model_func,
-            max_parallel_insert=args.max_parallel_insert,
-            max_graph_nodes=args.max_graph_nodes,
-            addon_params={
-                "language": args.summary_language,
-                "entity_types": args.entity_types,
-            },
-            ollama_server_infos=ollama_server_infos,
+    rag = build_rag_instance(default_runtime_workspace)
+
+    rag_factory = None
+    if args.enable_kb_isolation:
+
+        async def build_isolated_rag(
+            workspace_id: str,
+            kb_id: str,
+            combined_workspace: str,
+            knowledge_base,
+        ) -> LightRAG:
+            isolated_rag = build_rag_instance(combined_workspace)
+            await initialize_rag_runtime(isolated_rag)
+            return isolated_rag
+
+        rag_factory = RagFactory(
+            builder=build_isolated_rag,
+            registry=kb_registry,
+            kb_separator=kb_separator,
         )
-    except Exception as e:
-        logger.error(f"Failed to initialize LightRAG: {e}")
-        raise
+        rag_factory.prime(default_workspace_id, default_kb_id, rag)
+
+    app.state.kb_registry = kb_registry
+    app.state.rag_factory = rag_factory
+    app.state.default_rag = rag
+    app.state.doc_manager_base_input_dir = args.input_dir
+    app.state.default_runtime_workspace = default_runtime_workspace
+    app.state.default_doc_manager = doc_manager
+    app.state.doc_manager_cache = {default_runtime_workspace: doc_manager}
 
     # Add routes
-    app.include_router(
-        create_document_routes(
-            rag,
-            doc_manager,
-            api_key,
-        )
-    )
-    app.include_router(create_query_routes(rag, api_key, args.top_k))
-    app.include_router(create_graph_routes(rag, api_key))
+    app.include_router(create_document_routes(api_key=api_key))
+    app.include_router(create_auth_routes())
+    app.include_router(create_membership_routes(api_key))
+    app.include_router(create_kb_routes(api_key))
+    app.include_router(create_query_routes(api_key=api_key, top_k=args.top_k))
+    app.include_router(create_graph_routes(api_key=api_key))
 
     # Multimodal image routes — only registered when the multimodal
     # pipeline is enabled on this LightRAG instance. create_image_routes
     # returns None on text-only deployments, so FastAPI never sees any
     # new endpoints unless image ingestion is actually wired up.
-    image_router = create_image_routes(rag, api_key)
+    image_router = None
+    if rag.image_blob_store is not None and rag.image_metadata is not None:
+        image_router = create_image_routes(api_key=api_key)
     if image_router is not None:
         app.include_router(image_router)
         logger.info("Registered multimodal image routes (/images/*)")
 
     # Add Ollama API routes
-    ollama_api = OllamaAPI(rag, top_k=args.top_k, api_key=api_key)
+    ollama_api = OllamaAPI(
+        top_k=args.top_k,
+        api_key=api_key,
+        ollama_server_infos=rag.ollama_server_infos,
+    )
     app.include_router(ollama_api.router, prefix="/api")
 
     # Custom Swagger UI endpoint for offline support
@@ -1246,29 +1370,16 @@ def create_app(args):
             return RedirectResponse(url="/docs")
 
     @app.get("/auth-status")
-    async def get_auth_status():
-        """Get authentication status and guest token if auth is not configured"""
+    async def get_auth_status(request: Request):
+        """
+        Return authentication capabilities without issuing implicit guest credentials.
 
-        if not auth_handler.accounts:
-            # Authentication not configured, return guest token
-            guest_token = auth_handler.create_token(
-                username="guest", role="guest", metadata={"auth_mode": "disabled"}
-            )
-            return {
-                "auth_configured": False,
-                "access_token": guest_token,
-                "token_type": "bearer",
-                "auth_mode": "disabled",
-                "message": "Authentication is disabled. Using guest access.",
-                "core_version": core_version,
-                "api_version": api_version_display,
-                "webui_title": webui_title,
-                "webui_description": webui_description,
-            }
-
+        This response is intentionally provider-shaped so future remote identity
+        integrations can keep the same login bootstrap contract.
+        """
+        provider_status = await get_auth_provider(request).get_auth_status(request)
         return {
-            "auth_configured": True,
-            "auth_mode": "enabled",
+            **provider_status.to_dict(),
             "core_version": core_version,
             "api_version": api_version_display,
             "webui_title": webui_title,
@@ -1276,34 +1387,31 @@ def create_app(args):
         }
 
     @app.post("/login")
-    async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-        if not auth_handler.accounts:
-            # Authentication not configured, return guest token
-            guest_token = auth_handler.create_token(
-                username="guest", role="guest", metadata={"auth_mode": "disabled"}
-            )
-            return {
-                "access_token": guest_token,
-                "token_type": "bearer",
-                "auth_mode": "disabled",
-                "message": "Authentication is disabled. Using guest access.",
-                "core_version": core_version,
-                "api_version": api_version_display,
-                "webui_title": webui_title,
-                "webui_description": webui_description,
-            }
-        username = form_data.username
-        if not auth_handler.verify_password(username, form_data.password):
+    async def login(
+        request: Request,
+        response: Response,
+        form_data: OAuth2PasswordRequestForm = Depends(),
+    ):
+        principal = await get_auth_provider(request).authenticate_password(
+            request,
+            form_data.username,
+            form_data.password,
+        )
+        if principal is None:
             raise HTTPException(status_code=401, detail="Incorrect credentials")
 
-        # Regular user login
-        user_token = auth_handler.create_token(
-            username=username, role="user", metadata={"auth_mode": "enabled"}
+        login_tokens = await issue_login_tokens(
+            request,
+            response,
+            username=principal.username,
+            user_id=principal.user_id,
+            role=principal.role,
+            memberships=principal.memberships,
+            metadata=principal.metadata,
         )
         return {
-            "access_token": user_token,
-            "token_type": "bearer",
-            "auth_mode": "enabled",
+            **login_tokens,
+            "auth_mode": "local",
             "core_version": core_version,
             "api_version": api_version_display,
             "webui_title": webui_title,
@@ -1346,18 +1454,42 @@ def create_app(args):
     async def get_status(request: Request):
         """Get current system status including WebUI availability"""
         try:
-            workspace = get_workspace_from_request(request)
-            default_workspace = get_default_workspace()
-            if workspace is None:
-                workspace = default_workspace
-            pipeline_status = await get_namespace_data(
-                "pipeline_status", workspace=workspace
-            )
-
-            if not auth_configured:
-                auth_mode = "disabled"
+            request_context = get_request_context(request)
+            runtime_default_workspace = get_default_workspace()
+            if args.enable_kb_isolation:
+                workspace = request_context.workspace_id or default_workspace_id
+                pipeline_workspace = (
+                    f"{workspace}{kb_separator}{request_context.kb_id or default_kb_id}"
+                )
             else:
-                auth_mode = "enabled"
+                default_rag = getattr(request.app.state, "default_rag", None)
+                pipeline_workspace = getattr(
+                    default_rag, "workspace", runtime_default_workspace
+                )
+
+            try:
+                pipeline_status = await get_namespace_data(
+                    "pipeline_status", workspace=pipeline_workspace
+                )
+            except Exception as exc:
+                from lightrag.exceptions import PipelineNotInitializedError
+
+                if not isinstance(exc, PipelineNotInitializedError):
+                    raise
+
+                from lightrag.kg.shared_storage import initialize_pipeline_status
+
+                logger.warning(
+                    "Pipeline status namespace '%s' was missing during /health; "
+                    "initializing on demand.",
+                    pipeline_workspace,
+                )
+                await initialize_pipeline_status(workspace=pipeline_workspace)
+                pipeline_status = await get_namespace_data(
+                    "pipeline_status", workspace=pipeline_workspace
+                )
+
+            auth_mode = "local"
 
             # Cleanup expired keyed locks and get status
             keyed_lock_info = cleanup_keyed_lock()
@@ -1384,7 +1516,7 @@ def create_app(args):
                     "vector_storage": args.vector_storage,
                     "enable_llm_cache_for_extract": args.enable_llm_cache_for_extract,
                     "enable_llm_cache": args.enable_llm_cache,
-                    "workspace": default_workspace,
+                    "workspace": runtime_default_workspace,
                     "max_graph_nodes": args.max_graph_nodes,
                     # Rerank configuration
                     "enable_rerank": rerank_model_func is not None,
@@ -1405,6 +1537,26 @@ def create_app(args):
                     "embedding_batch_num": args.embedding_batch_num,
                 },
                 "auth_mode": auth_mode,
+                "platform_features": {
+                    "use_db_auth": bool(args.use_db_auth),
+                    "enable_kb_isolation": bool(args.enable_kb_isolation),
+                    "db_ready": bool(getattr(app.state, "db_ready", False)),
+                    "identity_schema_ready": bool(
+                        getattr(app.state, "identity_schema_ready", False)
+                    ),
+                    "env_account_seed_summary": getattr(
+                        app.state, "env_account_seed_summary", {}
+                    ),
+                    "default_workspace_id": getattr(
+                        app.state, "default_workspace_id", None
+                    ),
+                    "default_kb_id": getattr(app.state, "default_kb_id", None),
+                    "kb_separator": getattr(app.state, "kb_separator", None),
+                    "kb_registry_ready": getattr(app.state, "kb_registry", None)
+                    is not None,
+                    "rag_factory_ready": getattr(app.state, "rag_factory", None)
+                    is not None,
+                },
                 "pipeline_busy": pipeline_status.get("busy", False),
                 "keyed_locks": keyed_lock_info,
                 "core_version": core_version,

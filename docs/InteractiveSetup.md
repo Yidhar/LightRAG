@@ -20,7 +20,7 @@ You do not need to call the underlying shell script directly.
 The setup wizard helps you configure LightRAG in three parts:
 
 - `env-base` sets up the LLM, embedding model, and optional reranker.
-- `env-storage` adds or changes storage backends such as PostgreSQL, Neo4j, Redis, Milvus, Qdrant, MongoDB, or Memgraph.
+- `env-storage` adds PostgreSQL after the base setup, or configures advanced compatibility backends when needed.
 - `env-server` sets server host and port, WebUI labels, authentication, API keys, and SSL.
 
 You can rerun each step later. The wizard loads your existing `.env` and shows current values as defaults, so you only need to change what is different.
@@ -33,6 +33,12 @@ You can rerun each step later. The wizard loads your existing `.env` and shows c
 - `make env-base` is the normal starting point because it creates the initial `.env`.
 - `make env-storage` and `make env-server` require an existing `.env`.
 - If you choose any wizard-managed Docker service, the wizard also prepares LightRAG for the Docker startup path.
+- The wizard does **not** fully orchestrate legacy-to-Platform-V2 migration for staged DB auth or KB isolation.
+- For most existing deployments, think about Platform V2 migration in two main tracks only:
+  file-backed storage or PostgreSQL. Other backends are secondary compatibility cases.
+- If you plan to enable `USE_DB_AUTH=true` or `ENABLE_KB_ISOLATION=true` on an existing deployment, review
+  [`docs/platform-v2/ws5-migration-validation-rollout.md`](./platform-v2/ws5-migration-validation-rollout.md)
+  before changing those flags.
 
 ## Choose Your Setup Path
 
@@ -119,9 +125,12 @@ docker compose -f docker-compose.final.yml up -d
 
 This starts the generated Docker-based LightRAG stack together with the selected local services.
 
-## Scenario 3: Add Storage After The Base Setup
+## Scenario 3: Add PostgreSQL After The Base Setup
 
-Use this when you already have `.env` from `make env-base` and now want to switch from default local-file storage to database-backed storage.
+Use this when you already have `.env` from `make env-base` and now want to
+switch from the default local-file storage to PostgreSQL. Advanced storage
+backends are still available, but they are better treated as compatibility
+options rather than the default upgrade path.
 
 **Command**
 
@@ -200,7 +209,35 @@ make env-security-check
 - If the stack uses Docker, recreate the LightRAG service with your compose file
 - If the stack runs on the host, restart `lightrag-server`
 
-For broader deployment guidance, see [DockerDeployment.md](/Users/ydh/mycode/ai/paper-RAG/docs/DockerDeployment.md).
+For broader deployment guidance, see [DockerDeployment.md](./DockerDeployment.md).
+
+## Scenario 5: Existing Deployment Migrating To KB Isolation
+
+Use this when you already have data in production or in a long-lived shared environment and want
+to adopt the staged Platform V2 model with database-backed auth and/or knowledge-base isolation.
+
+**Recommended order**
+
+1. Run your normal setup flow first:
+   - `make env-base`
+   - `make env-storage`
+   - `make env-server`
+2. Keep `ENABLE_KB_ISOLATION=false` while inventorying and backing up existing data
+3. Follow the dedicated rollout sequence in
+   [`docs/platform-v2/ws5-migration-validation-rollout.md`](./platform-v2/ws5-migration-validation-rollout.md)
+4. Only then enable:
+   - `USE_DB_AUTH=true`
+   - `ENABLE_KB_ISOLATION=true`
+   - `DEFAULT_WORKSPACE_ID=...`
+   - `DEFAULT_KB_ID=...`
+   - `KB_SEPARATOR=__`
+
+**Important**
+
+- The setup wizard does not perform the migration for you
+- For existing deployments, the mainline migration paths are file-backed and PostgreSQL
+- Non-file / non-PostgreSQL backends require backend-specific planning and are not the primary rollout path
+- During migration, prefer a single API worker if KB metadata can still be mutated
 
 ## Validate, Audit, And Backup
 
@@ -266,7 +303,7 @@ The base `docker-compose.yml` remains the general project compose file. The gene
 - If you need to fully rebuild wizard-managed compose services from the current bundled templates, use `make env-base-rewrite` or `make env-storage-rewrite`.
 - If you switch between host-oriented and Docker-oriented workflows, rerun the relevant setup step instead of trying to manually merge old settings.
 - If the generated stack includes local Milvus, make sure `MINIO_ACCESS_KEY_ID` and `MINIO_SECRET_ACCESS_KEY` are available before running `docker compose -f docker-compose.final.yml up -d`.
-- For Docker deployment details beyond the interactive wizard, see [DockerDeployment.md](/Users/ydh/mycode/ai/paper-RAG/docs/DockerDeployment.md).
+- For Docker deployment details beyond the interactive wizard, see [DockerDeployment.md](./DockerDeployment.md).
 
 ## Typical Command Sequences
 

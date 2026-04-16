@@ -1,254 +1,93 @@
-import { ReactNode, useEffect, useMemo, useRef, memo, useState } from 'react'
-import { Message, RetrievedChunk, fetchImageBlobUrl } from '@/api/lightrag'
-import useTheme from '@/hooks/useTheme'
-import { cn } from '@/lib/utils'
-import { ChunkImageGrid } from '@/components/retrieval/ChunkImage'
-
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import rehypeReact from 'rehype-react'
-import rehypeRaw from 'rehype-raw'
-import remarkMath from 'remark-math'
-import mermaid from 'mermaid'
-import { remarkFootnotes } from '@/utils/remarkFootnotes'
-
-
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
-import { oneLight, oneDark } from 'react-syntax-highlighter/dist/cjs/styles/prism'
-
-import { LoaderIcon, ChevronDownIcon } from 'lucide-react'
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
+import {
+  ChevronDownIcon,
+  FileTextIcon,
+  LoaderIcon,
+  ScanSearchIcon,
+  SparklesIcon,
+} from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
-// KaTeX configuration options interface
-interface KaTeXOptions {
-  errorColor?: string;
-  throwOnError?: boolean;
-  displayMode?: boolean;
-  strict?: boolean;
-  trust?: boolean;
-  errorCallback?: (error: string, latex: string) => void;
-}
+import { type Message, type QueryReference, type RetrievedChunk } from '@/api/lightrag'
+import { ChunkImageGrid } from '@/components/retrieval/ChunkImage'
+import { cn } from '@/lib/utils'
+
+const MarkdownMessageContent = lazy(() => import('@/components/retrieval/MarkdownMessageContent'))
 
 export type MessageWithError = Message & {
-  id: string // Unique identifier for stable React keys
+  id: string
   isError?: boolean
-  isThinking?: boolean // Flag to indicate if the message is in a "thinking" state
-  /**
-   * Indicates if the mermaid diagram in this message has been rendered.
-   * Used to persist the rendering state across updates and prevent flickering.
-   */
+  isThinking?: boolean
   mermaidRendered?: boolean
-  /**
-   * Indicates if the LaTeX formulas in this message are complete and ready for rendering.
-   * Used to prevent red error text during streaming of incomplete LaTeX formulas.
-   */
   latexRendered?: boolean
-  /**
-   * Multimodal image chunks retrieved alongside this assistant message.
-   * Populated by RetrievalTesting after the streaming answer finishes
-   * and a follow-up /query/data call lands. When empty or undefined,
-   * the UI renders text-only exactly as before — nothing gated on the
-   * multimodal pipeline changes the rendering path for text workloads.
-   */
   imageChunks?: RetrievedChunk[]
+  retrievedChunks?: RetrievedChunk[]
+  references?: QueryReference[]
 }
 
-/**
- * Renders an image fetched from the blob store via authenticated axios.
- *
- * Used by the markdown `img` component override to display images the LLM
- * embeds as `![alt](/images/img-xxx)`. A plain `<img src>` can't carry
- * the auth header, so we fetch the bytes through `fetchImageBlobUrl` and
- * display them via an object URL.
- */
-function InlineBlobImage({ blobId, alt }: { blobId: string; alt: string }) {
-  const [url, setUrl] = useState<string | null>(null)
-  const [error, setError] = useState(false)
-
-  useEffect(() => {
-    let cancelled = false
-    let objectUrl: string | null = null
-
-    fetchImageBlobUrl(blobId)
-      .then((u) => {
-        if (cancelled) {
-          URL.revokeObjectURL(u)
-          return
-        }
-        objectUrl = u
-        setUrl(u)
-      })
-      .catch(() => {
-        if (!cancelled) setError(true)
-      })
-
-    return () => {
-      cancelled = true
-      if (objectUrl) URL.revokeObjectURL(objectUrl)
-    }
-  }, [blobId])
-
-  if (error) {
-    return (
-      <span className="text-muted-foreground inline-flex items-center gap-1 text-xs">
-        [image {blobId} failed to load]
-      </span>
-    )
-  }
-  if (!url) {
-    return (
-      <span className="bg-muted my-2 inline-flex h-32 w-48 animate-pulse items-center justify-center rounded text-xs">
-        loading...
-      </span>
-    )
-  }
-  return (
-    <img
-      src={url}
-      alt={alt}
-      className="my-2 max-w-full rounded border shadow-sm"
-      loading="lazy"
-    />
-  )
-}
-
-// Restore original component definition and export
 export const ChatMessage = ({
   message,
-  isTabActive = true
+  isTabActive = true,
 }: {
   message: MessageWithError
   isTabActive?: boolean
 }) => {
   const { t } = useTranslation()
-  const { theme } = useTheme()
-  const [katexPlugin, setKatexPlugin] = useState<((options?: KaTeXOptions) => any) | null>(null)
-  const [isThinkingExpanded, setIsThinkingExpanded] = useState<boolean>(false)
+  const [isThinkingExpanded, setIsThinkingExpanded] = useState(false)
+  const [areSourcesExpanded, setAreSourcesExpanded] = useState(false)
 
-  // Directly use props passed from the parent.
   const { thinkingContent, displayContent, thinkingTime, isThinking } = message
 
-  // Reset expansion state when new thinking starts
   useEffect(() => {
     if (isThinking) {
-      // When thinking starts, always reset to collapsed state
-      setIsThinkingExpanded(false)
+      const resetTimer = requestAnimationFrame(() => {
+        setIsThinkingExpanded(false)
+      })
+
+      return () => cancelAnimationFrame(resetTimer)
     }
   }, [isThinking, message.id])
 
-  // The content to display is now non-ambiguous.
   const finalThinkingContent = thinkingContent
-  // For user messages, displayContent will be undefined, so we fall back to content.
-  // For assistant messages, we prefer displayContent but fallback to content for backward compatibility
-  const finalDisplayContent = message.role === 'user'
-    ? message.content
-    : (displayContent !== undefined ? displayContent : (message.content || ''))
+  const finalDisplayContent =
+    message.role === 'user'
+      ? message.content
+      : displayContent !== undefined
+        ? displayContent
+        : (message.content || '')
 
-  // Load KaTeX rehype plugin dynamically
-  // Note: KaTeX extensions (mhchem, copy-tex) are imported statically in main.tsx
-  useEffect(() => {
-    const loadKaTeX = async () => {
-      try {
-        const { default: rehypeKatex } = await import('rehype-katex');
-        setKatexPlugin(() => rehypeKatex);
-      } catch (error) {
-        console.error('Failed to load KaTeX plugin:', error);
-        setKatexPlugin(null);
-      }
-    };
-
-    loadKaTeX();
-  }, []);
-
-  const mainMarkdownComponents = useMemo(() => ({
-    code: (props: any) => {
-      const { inline, className, children, ...restProps } = props;
-      const match = /language-(\w+)/.exec(className || '');
-      const language = match ? match[1] : undefined;
-
-      // Handle math blocks ($$...$$) - provide better container and styling
-      if (language === 'math' && !inline) {
-        return (
-          <div className="katex-display-wrapper my-4 overflow-x-auto">
-            <div className="text-current">{children}</div>
-          </div>
-        );
-      }
-
-      // Handle inline math ($...$) - ensure proper inline display
-      if (language === 'math' && inline) {
-        return (
-          <span className="katex-inline-wrapper">
-            <span className="text-current">{children}</span>
-          </span>
-        );
-      }
-
-      // Handle all other code (inline and block)
-      return (
-        <CodeHighlight
-          inline={inline}
-          className={className}
-          {...restProps}
-          renderAsDiagram={message.mermaidRendered ?? false}
-          messageRole={message.role}
-        >
-          {children}
-        </CodeHighlight>
-      );
-    },
-    p: ({ children }: { children?: ReactNode }) => <div className="my-2">{children}</div>,
-    h1: ({ children }: { children?: ReactNode }) => <h1 className="text-xl font-bold mt-4 mb-2">{children}</h1>,
-    h2: ({ children }: { children?: ReactNode }) => <h2 className="text-lg font-bold mt-4 mb-2">{children}</h2>,
-    h3: ({ children }: { children?: ReactNode }) => <h3 className="text-base font-bold mt-3 mb-2">{children}</h3>,
-    h4: ({ children }: { children?: ReactNode }) => <h4 className="text-base font-semibold mt-3 mb-2">{children}</h4>,
-    ul: ({ children }: { children?: ReactNode }) => <ul className="list-disc pl-5 my-2">{children}</ul>,
-    ol: ({ children }: { children?: ReactNode }) => <ol className="list-decimal pl-5 my-2">{children}</ol>,
-    li: ({ children }: { children?: ReactNode }) => <li className="my-1">{children}</li>,
-    // Intercept markdown images whose src matches /images/img-* (our
-    // blob store URLs injected by the LLM via the prompt template).
-    // A plain <img src="/images/img-xxx"> won't carry auth headers, so
-    // we fetch the blob through the authenticated axios instance and
-    // render via an object URL instead.
-    img: (props: any) => {
-      const { src, alt } = props
-      if (src && /\/images\/img-/.test(src)) {
-        const blobId = src.split('/images/')[1]?.split(/[?#]/)[0]
-        if (blobId) {
-          return <InlineBlobImage blobId={blobId} alt={alt || ''} />
-        }
-      }
-      // Non-blob images (external URLs, data URIs): render normally.
-      return <img src={src} alt={alt} className="max-w-full rounded my-2" loading="lazy" />
-    }
-  }), [message.mermaidRendered, message.role]);
-
-  const thinkingMarkdownComponents = useMemo(() => ({
-    code: (props: any) => (<CodeHighlight {...props} renderAsDiagram={message.mermaidRendered ?? false} messageRole={message.role} />)
-  }), [message.mermaidRendered, message.role]);
+  const textSources = useMemo(
+    () =>
+      (message.retrievedChunks || []).filter(
+        (chunk) => chunk.source_type !== 'image_vector' && Boolean(chunk.content?.trim())
+      ),
+    [message.retrievedChunks]
+  )
+  const referenceItems = useMemo(() => message.references || [], [message.references])
 
   return (
     <div
-      className={`${
+      className={cn(
+        'rounded-[26px] border px-4 py-3 shadow-sm sm:px-5 sm:py-4',
         message.role === 'user'
-          ? 'max-w-[80%] bg-primary text-primary-foreground'
+          ? 'max-w-[86%] border-emerald-500/20 bg-emerald-600 text-primary-foreground shadow-[0_16px_40px_rgba(16,185,129,0.18)]'
           : message.isError
-            ? 'w-[95%] bg-red-100 text-red-600 dark:bg-red-950 dark:text-red-400'
-            : 'w-[95%] bg-muted'
-      } rounded-lg px-4 py-2`}
+            ? 'w-[97%] border-red-300/70 bg-red-50 text-red-700 dark:border-red-500/30 dark:bg-red-950/40 dark:text-red-300'
+            : 'w-[97%] border-border/70 bg-background/90'
+      )}
     >
-      {/* Thinking process display - only for assistant messages */}
-      {/* Always render to prevent layout shift when switching tabs */}
+      {message.role === 'assistant' && (
+        <div className="mb-3 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+          <SparklesIcon className="size-3.5 text-emerald-500" />
+          <span>{t('retrievePanel.chatMessage.answerLabel')}</span>
+        </div>
+      )}
+
       {message.role === 'assistant' && (isThinking || thinkingTime !== null) && (
-        <div className={cn(
-          'mb-2',
-          // Reduce visual priority in inactive tabs while maintaining layout
-          !isTabActive && 'opacity-50'
-        )}>
+        <div className={cn('mb-3 rounded-2xl border border-dashed border-emerald-500/25 bg-emerald-500/[0.04] p-3', !isTabActive && 'opacity-60')}>
           <div
-            className="flex items-center text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition-colors duration-200 text-sm cursor-pointer select-none"
+            className="flex cursor-pointer select-none items-center gap-2 text-sm text-slate-600 transition-colors duration-200 hover:text-slate-900 dark:text-slate-300 dark:hover:text-slate-100"
             onClick={() => {
-              // Allow expansion when there's thinking content, even during thinking process
               if (finalThinkingContent && finalThinkingContent.trim() !== '') {
                 setIsThinkingExpanded(!isThinkingExpanded)
               }
@@ -256,346 +95,144 @@ export const ChatMessage = ({
           >
             {isThinking ? (
               <>
-                {/* Only show spinner animation in active tab to save resources */}
-                {isTabActive && <LoaderIcon className="mr-2 size-4 animate-spin" />}
+                {isTabActive && <LoaderIcon className="size-4 animate-spin text-emerald-500" />}
                 <span>{t('retrievePanel.chatMessage.thinking')}</span>
               </>
             ) : (
-              typeof thinkingTime === 'number' && <span>{t('retrievePanel.chatMessage.thinkingTime', { time: thinkingTime })}</span>
+              typeof thinkingTime === 'number' && (
+                <span>{t('retrievePanel.chatMessage.thinkingTime', { time: thinkingTime })}</span>
+              )
             )}
-            {/* Show chevron when there's thinking content, even during thinking process */}
-            {finalThinkingContent && finalThinkingContent.trim() !== '' && <ChevronDownIcon className={`ml-2 size-4 shrink-0 transition-transform ${isThinkingExpanded ? 'rotate-180' : ''}`} />}
+            {finalThinkingContent && finalThinkingContent.trim() !== '' && (
+              <ChevronDownIcon
+                className={`ml-auto size-4 shrink-0 transition-transform ${isThinkingExpanded ? 'rotate-180' : ''}`}
+              />
+            )}
           </div>
-          {/* Show thinking content when expanded and content exists, even during thinking process */}
+
           {isThinkingExpanded && finalThinkingContent && finalThinkingContent.trim() !== '' && (
-            <div className="mt-2 pl-4 border-l-2 border-primary/20 dark:border-primary/40 text-sm prose dark:prose-invert max-w-none break-words prose-p:my-1 prose-headings:my-2 [&_sup]:text-[0.75em] [&_sup]:align-[0.1em] [&_sup]:leading-[0] [&_sub]:text-[0.75em] [&_sub]:align-[-0.2em] [&_sub]:leading-[0] [&_mark]:bg-yellow-200 [&_mark]:dark:bg-yellow-800 [&_u]:underline [&_del]:line-through [&_ins]:underline [&_ins]:decoration-green-500 [&_.footnotes]:mt-6 [&_.footnotes]:pt-3 [&_.footnotes]:border-t [&_.footnotes]:border-border [&_.footnotes_ol]:text-xs [&_.footnotes_li]:my-0.5 [&_a[href^='#fn']]:text-primary [&_a[href^='#fn']]:no-underline [&_a[href^='#fn']]:hover:underline [&_a[href^='#fnref']]:text-primary [&_a[href^='#fnref']]:no-underline [&_a[href^='#fnref']]:hover:underline text-foreground">
+            <div className="prose mt-3 max-w-none break-words border-l-2 border-emerald-500/20 pl-4 text-sm text-foreground prose-p:my-1 prose-headings:my-2 dark:prose-invert [&_.footnotes]:mt-6 [&_.footnotes]:border-border [&_.footnotes]:pt-3 [&_.footnotes_ol]:text-xs [&_.footnotes_li]:my-0.5 [&_a[href^='#fn']]:text-primary [&_a[href^='#fn']]:no-underline [&_a[href^='#fn']]:hover:underline [&_a[href^='#fnref']]:text-primary [&_a[href^='#fnref']]:no-underline [&_a[href^='#fnref']]:hover:underline [&_del]:line-through [&_ins]:decoration-green-500 [&_ins]:underline [&_mark]:bg-yellow-200 [&_mark]:dark:bg-yellow-800 [&_sub]:text-[0.75em] [&_sub]:leading-[0] [&_sub]:align-[-0.2em] [&_sup]:text-[0.75em] [&_sup]:leading-[0] [&_sup]:align-[0.1em] [&_u]:underline">
               {isThinking && (
-                <div className="mb-2 text-xs text-gray-400 dark:text-gray-300 italic">
-                  {t('retrievePanel.chatMessage.thinkingInProgress', 'Thinking in progress...')}
+                <div className="mb-2 text-xs italic text-slate-400 dark:text-slate-300">
+                  {t('retrievePanel.chatMessage.thinkingInProgress')}
                 </div>
               )}
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm, remarkFootnotes, remarkMath]}
-                rehypePlugins={[
-                  rehypeRaw,
-                  ...((katexPlugin && (message.latexRendered ?? true)) ? [[katexPlugin, {
-                    errorColor: theme === 'dark' ? '#ef4444' : '#dc2626',
-                    throwOnError: false,
-                    displayMode: false,
-                    strict: false,
-                    trust: true,
-                    // Add silent error handling to avoid console noise
-                    errorCallback: (error: string, latex: string) => {
-                      // Only show detailed errors in development environment
-                      if (process.env.NODE_ENV === 'development') {
-                        console.warn('KaTeX rendering error in thinking content:', error, 'for LaTeX:', latex);
-                      }
-                    }
-                  }] as any] : []),
-                  rehypeReact
-                ]}
-                skipHtml={false}
-                components={thinkingMarkdownComponents}
-              >
-                {finalThinkingContent}
-              </ReactMarkdown>
+
+              <Suspense fallback={<div className="whitespace-pre-wrap">{finalThinkingContent}</div>}>
+                <MarkdownMessageContent
+                  content={finalThinkingContent}
+                  messageRole={message.role}
+                  renderAsDiagram={message.mermaidRendered ?? false}
+                  latexRendered={message.latexRendered ?? true}
+                  mode="thinking"
+                />
+              </Suspense>
             </div>
           )}
         </div>
       )}
-      {/* Main content display */}
+
       {finalDisplayContent && (
         <div className="relative">
-          <div className={`prose dark:prose-invert max-w-none text-sm break-words prose-headings:mt-4 prose-headings:mb-2 prose-p:my-2 prose-ul:my-2 prose-ol:my-2 prose-li:my-1 [&_.katex]:text-current [&_.katex-display]:my-4 [&_.katex-display]:max-w-full [&_.katex-display_>.base]:overflow-x-auto [&_sup]:text-[0.75em] [&_sup]:align-[0.1em] [&_sup]:leading-[0] [&_sub]:text-[0.75em] [&_sub]:align-[-0.2em] [&_sub]:leading-[0] [&_mark]:bg-yellow-200 [&_mark]:dark:bg-yellow-800 [&_u]:underline [&_del]:line-through [&_ins]:underline [&_ins]:decoration-green-500 [&_.footnotes]:mt-8 [&_.footnotes]:pt-4 [&_.footnotes]:border-t [&_.footnotes_ol]:text-sm [&_.footnotes_li]:my-1 ${
-            message.role === 'user' ? 'text-primary-foreground' : 'text-foreground'
-          } ${
-            message.role === 'user'
-              ? '[&_.footnotes]:border-primary-foreground/30 [&_a[href^="#fn"]]:text-primary-foreground [&_a[href^="#fn"]]:no-underline [&_a[href^="#fn"]]:hover:underline [&_a[href^="#fnref"]]:text-primary-foreground [&_a[href^="#fnref"]]:no-underline [&_a[href^="#fnref"]]:hover:underline'
-              : '[&_.footnotes]:border-border [&_a[href^="#fn"]]:text-primary [&_a[href^="#fn"]]:no-underline [&_a[href^="#fn"]]:hover:underline [&_a[href^="#fnref"]]:text-primary [&_a[href^="#fnref"]]:no-underline [&_a[href^="#fnref"]]:hover:underline'
-          }`}>
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm, remarkFootnotes, remarkMath]}
-              rehypePlugins={[
-                rehypeRaw,
-                ...((katexPlugin && (message.latexRendered ?? true)) ? [[
-                  katexPlugin,
-                  {
-                    errorColor: theme === 'dark' ? '#ef4444' : '#dc2626',
-                    throwOnError: false,
-                    displayMode: false,
-                    strict: false,
-                    trust: true,
-                    // Add silent error handling to avoid console noise
-                    errorCallback: (error: string, latex: string) => {
-                      // Only show detailed errors in development environment
-                      if (process.env.NODE_ENV === 'development') {
-                        console.warn('KaTeX rendering error in main content:', error, 'for LaTeX:', latex);
-                      }
-                    }
-                  }
-                ] as any] : []),
-                rehypeReact
-              ]}
-              skipHtml={false}
-              components={mainMarkdownComponents}
-            >
-              {finalDisplayContent}
-            </ReactMarkdown>
+          <div
+            className={cn(
+              'prose max-w-none break-words text-sm prose-headings:mb-2 prose-headings:mt-4 prose-p:my-2 prose-ul:my-2 prose-ol:my-2 prose-li:my-1 dark:prose-invert [&_.katex]:text-current [&_.katex-display]:my-4 [&_.katex-display]:max-w-full [&_.katex-display_>.base]:overflow-x-auto [&_.footnotes]:mt-8 [&_.footnotes]:pt-4 [&_.footnotes_ol]:text-sm [&_.footnotes_li]:my-1 [&_del]:line-through [&_ins]:decoration-green-500 [&_ins]:underline [&_mark]:bg-yellow-200 [&_mark]:dark:bg-yellow-800 [&_sub]:text-[0.75em] [&_sub]:leading-[0] [&_sub]:align-[-0.2em] [&_sup]:text-[0.75em] [&_sup]:leading-[0] [&_sup]:align-[0.1em]',
+              message.role === 'user' ? 'text-primary-foreground' : 'text-foreground'
+            )}
+          >
+            <Suspense fallback={<div className="whitespace-pre-wrap">{finalDisplayContent}</div>}>
+              <MarkdownMessageContent
+                content={finalDisplayContent}
+                messageRole={message.role}
+                renderAsDiagram={message.mermaidRendered ?? false}
+                latexRendered={message.latexRendered ?? true}
+                mode="main"
+              />
+            </Suspense>
           </div>
-          {/*
-            Multimodal image chunks retrieved alongside this message.
-            Rendered only when the assistant message has at least one
-            image chunk — text-only workloads see nothing here.
-          */}
+
           {message.role !== 'user' && message.imageChunks && message.imageChunks.length > 0 && (
-            <ChunkImageGrid chunks={message.imageChunks} />
+            <div className="mt-5 space-y-3">
+              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                <ScanSearchIcon className="size-3.5 text-emerald-500" />
+                <span>{t('retrievePanel.retrieval.retrievedImages')}</span>
+              </div>
+              <ChunkImageGrid chunks={message.imageChunks} />
+            </div>
+          )}
+
+          {message.role !== 'user' && (textSources.length > 0 || referenceItems.length > 0) && (
+            <div className="mt-5 rounded-2xl border border-border/70 bg-muted/25 p-3">
+              <button
+                type="button"
+                onClick={() => setAreSourcesExpanded((prev) => !prev)}
+                className="flex w-full items-center gap-3 text-left"
+              >
+                <div className="flex size-9 items-center justify-center rounded-2xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-300">
+                  <FileTextIcon className="size-4" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold text-foreground">
+                    {t('retrievePanel.chatMessage.sources')}
+                  </p>
+                  <p className="truncate text-xs text-muted-foreground">
+                    {t('retrievePanel.chatMessage.sourcesCount', { count: textSources.length || referenceItems.length })}
+                  </p>
+                </div>
+                <ChevronDownIcon
+                  className={`size-4 text-muted-foreground transition-transform ${areSourcesExpanded ? 'rotate-180' : ''}`}
+                />
+              </button>
+
+              {areSourcesExpanded && (
+                <div className="mt-4 grid gap-3">
+                  {textSources.slice(0, 6).map((chunk, index) => (
+                    <div
+                      key={`${chunk.chunk_id || chunk.reference_id || 'chunk'}-${index}`}
+                      className="rounded-2xl border border-border/70 bg-background/90 p-3"
+                    >
+                      <div className="mb-2 flex flex-wrap items-center gap-2">
+                        <span className="rounded-full bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-emerald-700 dark:text-emerald-300">
+                          {t('retrievePanel.chatMessage.sourceLabel', { index: index + 1 })}
+                        </span>
+                        {chunk.file_path && (
+                          <span className="truncate text-xs text-muted-foreground">
+                            {chunk.file_path}
+                          </span>
+                        )}
+                      </div>
+                      <p className="whitespace-pre-wrap text-sm leading-6 text-foreground/90">
+                        {chunk.content}
+                      </p>
+                    </div>
+                  ))}
+
+                  {referenceItems.length > 0 && (
+                    <div className="rounded-2xl border border-dashed border-border/70 bg-background/70 p-3">
+                      <div className="flex flex-wrap gap-2">
+                        {referenceItems.slice(0, 8).map((reference) => (
+                          <span
+                            key={reference.reference_id}
+                            className="rounded-full border border-border/70 bg-muted/20 px-3 py-1 text-xs text-muted-foreground"
+                          >
+                            {reference.file_path}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           )}
         </div>
       )}
-      {/* Loading indicator - only show in active tab */}
+
       {isTabActive && (() => {
-        // More comprehensive loading state check
-        const hasVisibleContent = finalDisplayContent && finalDisplayContent.trim() !== '';
-        const isLoadingState = !hasVisibleContent && !isThinking && !thinkingTime;
+        const hasVisibleContent = finalDisplayContent && finalDisplayContent.trim() !== ''
+        const isLoadingState = !hasVisibleContent && !isThinking && !thinkingTime
         return isLoadingState && <LoaderIcon className="animate-spin duration-2000" />
       })()}
     </div>
   )
 }
-
-// Remove the incorrect memo export line
-
-interface CodeHighlightProps {
-  inline?: boolean
-  className?: string
-  children?: ReactNode
-  renderAsDiagram?: boolean // Flag to indicate if rendering as diagram should be attempted
-  messageRole?: 'user' | 'assistant' // Message role for context-aware styling
-}
-
-
-
-// Check if it is a large JSON
-const isLargeJson = (language: string | undefined, content: string | undefined): boolean => {
-  if (!content || language !== 'json') return false;
-  return content.length > 5000; // JSON larger than 5KB is considered large JSON
-};
-
-// Memoize the CodeHighlight component
-const CodeHighlight = memo(({ inline, className, children, renderAsDiagram = false, messageRole, ...props }: CodeHighlightProps) => {
-  const { theme } = useTheme();
-  const [hasRendered, setHasRendered] = useState(false); // State to track successful render
-  const match = className?.match(/language-(\w+)/);
-  const language = match ? match[1] : undefined;
-  const mermaidRef = useRef<HTMLDivElement>(null);
-  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null); // Use ReturnType for better typing
-
-  // Get the content string, check if it is a large JSON
-  const contentStr = String(children || '').replace(/\n$/, '');
-  const isLargeJsonBlock = isLargeJson(language, contentStr);
-
-  // Handle Mermaid rendering with debounce
-  useEffect(() => {
-    // Effect should run when renderAsDiagram becomes true or hasRendered changes.
-    // The actual rendering logic inside checks language and hasRendered state.
-    if (renderAsDiagram && !hasRendered && language === 'mermaid' && mermaidRef.current) {
-      const container = mermaidRef.current; // Capture ref value
-
-      // Clear previous timer if dependencies change before timeout (e.g., renderAsDiagram flips quickly)
-      if (debounceTimerRef.current) {
-        clearTimeout(debounceTimerRef.current);
-      }
-
-      debounceTimerRef.current = setTimeout(() => {
-        if (!container) return; // Container might have unmounted
-
-        // Double check hasRendered state inside timeout, in case it changed rapidly
-        if (hasRendered) return;
-
-        try {
-          // Initialize mermaid config
-          mermaid.initialize({
-            startOnLoad: false,
-            theme: theme === 'dark' ? 'dark' : 'default',
-            securityLevel: 'loose',
-            suppressErrorRendering: true,
-          });
-
-          // Show loading indicator
-          container.innerHTML = '<div class="flex justify-center items-center p-4"><svg class="animate-spin h-5 w-5 text-primary" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg></div>';
-
-          // Preprocess mermaid content
-          const rawContent = String(children).replace(/\n$/, '').trim();
-
-          // Heuristic check for potentially complete graph definition
-          const looksPotentiallyComplete = rawContent.length > 10 && (
-            rawContent.startsWith('graph') ||
-            rawContent.startsWith('sequenceDiagram') ||
-            rawContent.startsWith('classDiagram') ||
-            rawContent.startsWith('stateDiagram') ||
-            rawContent.startsWith('gantt') ||
-            rawContent.startsWith('pie') ||
-            rawContent.startsWith('flowchart') ||
-            rawContent.startsWith('erDiagram')
-          );
-
-          if (!looksPotentiallyComplete) {
-            console.log('Mermaid content might be incomplete, skipping render attempt:', rawContent);
-            // Optionally keep loading indicator or show a message
-            // container.innerHTML = '<p class="text-sm text-muted-foreground">Waiting for complete diagram...</p>';
-            return;
-          }
-
-          const processedContent = rawContent
-            .split('\n')
-            .map(line => {
-              const trimmedLine = line.trim();
-              if (trimmedLine.startsWith('subgraph')) {
-                const parts = trimmedLine.split(' ');
-                if (parts.length > 1) {
-                  const title = parts.slice(1).join(' ').replace(/["']/g, '');
-                  return `subgraph "${title}"`;
-                }
-              }
-              return trimmedLine;
-            })
-            .filter(line => !line.trim().startsWith('linkStyle'))
-            .join('\n');
-
-          const mermaidId = `mermaid-${Date.now()}`;
-          mermaid.render(mermaidId, processedContent)
-            .then(({ svg, bindFunctions }) => {
-              // Check ref and hasRendered state again inside async callback
-              if (mermaidRef.current === container && !hasRendered) {
-                container.innerHTML = svg;
-                setHasRendered(true); // Mark as rendered successfully
-                if (bindFunctions) {
-                  try {
-                    bindFunctions(container);
-                  } catch (bindError) {
-                    console.error('Mermaid bindFunctions error:', bindError);
-                    container.innerHTML += '<p class="text-orange-500 text-xs">Diagram interactions might be limited.</p>';
-                  }
-                }
-              } else if (mermaidRef.current !== container) {
-                console.log('Mermaid container changed before rendering completed.');
-              }
-            })
-            .catch(error => {
-              console.error('Mermaid rendering promise error (debounced):', error);
-              console.error('Failed content (debounced):', processedContent);
-              if (mermaidRef.current === container) {
-                const errorMessage = error instanceof Error ? error.message : String(error);
-                const errorPre = document.createElement('pre');
-                errorPre.className = 'text-red-500 text-xs whitespace-pre-wrap break-words';
-                errorPre.textContent = `Mermaid diagram error: ${errorMessage}\n\nContent:\n${processedContent}`;
-                container.innerHTML = '';
-                container.appendChild(errorPre);
-              }
-            });
-
-        } catch (error) {
-          console.error('Mermaid synchronous error (debounced):', error);
-          console.error('Failed content (debounced):', String(children));
-          if (mermaidRef.current === container) {
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            const errorPre = document.createElement('pre');
-            errorPre.className = 'text-red-500 text-xs whitespace-pre-wrap break-words';
-            errorPre.textContent = `Mermaid diagram setup error: ${errorMessage}`;
-            container.innerHTML = '';
-            container.appendChild(errorPre);
-          }
-        }
-      }, 300); // Debounce delay
-    }
-
-    // Cleanup function to clear the timer on unmount or before re-running effect
-    return () => {
-      if (debounceTimerRef.current) {
-        clearTimeout(debounceTimerRef.current);
-      }
-    };
-  // Dependencies: renderAsDiagram ensures effect runs when diagram should be shown.
-  // Dependencies include all values used inside the effect to satisfy exhaustive-deps.
-  // The !hasRendered check prevents re-execution of render logic after success.
-  }, [renderAsDiagram, hasRendered, language, children, theme]); // Add children and theme back
-
-  // For large JSON, skip syntax highlighting completely and use a simple pre tag
-  if (isLargeJsonBlock) {
-    return (
-      <pre className="whitespace-pre-wrap break-words bg-muted p-4 rounded-md overflow-x-auto text-sm font-mono">
-        {contentStr}
-      </pre>
-    );
-  }
-
-  // Render based on language type
-  // If it's a mermaid language block and rendering as diagram is not requested (e.g., incomplete stream), display as plain text
-  if (language === 'mermaid' && !renderAsDiagram) {
-    return (
-      <SyntaxHighlighter
-        style={theme === 'dark' ? oneDark : oneLight}
-        PreTag="div"
-        language="text" // Use text as language to avoid syntax highlighting errors
-        {...props}
-      >
-        {contentStr}
-      </SyntaxHighlighter>
-    );
-  }
-
-  // If it's a mermaid language block and the message is complete, render as diagram
-  if (language === 'mermaid') {
-    // Container for Mermaid diagram
-    return <div className="mermaid-diagram-container my-4 overflow-x-auto" ref={mermaidRef}></div>;
-  }
-
-
-  // ReactMarkdown determines inline vs block based on markdown syntax
-  // Inline code: `code` (no className with language)
-  // Block code: ```language (has className like "language-js")
-  // If there's no language className and no explicit inline prop, it's likely inline code
-  const isInline = inline ?? !className?.startsWith('language-');
-
-  // Generate dynamic inline code styles based on message role and theme
-  const getInlineCodeStyles = () => {
-    if (messageRole === 'user') {
-      // User messages have dark background (bg-primary), need light inline code
-      return theme === 'dark'
-        ? 'bg-primary-foreground/20 text-primary-foreground border border-primary-foreground/30'
-        : 'bg-primary-foreground/20 text-primary-foreground border border-primary-foreground/30';
-    } else {
-      // Assistant messages have light background (bg-muted), need contrasting inline code
-      return theme === 'dark'
-        ? 'bg-muted-foreground/20 text-muted-foreground border border-muted-foreground/30'
-        : 'bg-slate-200 text-slate-800 border border-slate-300';
-    }
-  };
-
-  // Handle non-Mermaid code blocks
-  return !isInline ? (
-    <SyntaxHighlighter
-      style={theme === 'dark' ? oneDark : oneLight}
-      PreTag="div"
-      language={language}
-      {...props}
-    >
-      {contentStr}
-    </SyntaxHighlighter>
-  ) : (
-    // Handle inline code with context-aware styling
-    <code
-      className={cn(
-        className,
-        'mx-1 rounded-sm px-1 py-0.5 font-mono text-sm',
-        getInlineCodeStyles()
-      )}
-      {...props}
-    >
-      {children}
-    </code>
-  );
-});
-
-// Assign display name for React DevTools
-CodeHighlight.displayName = 'CodeHighlight';

@@ -1,5 +1,6 @@
 import { ChevronDown, ChevronUp } from 'lucide-react'
 import { forwardRef, useCallback, useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { NumericFormat, NumericFormatProps } from 'react-number-format'
 import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
@@ -40,6 +41,7 @@ const NumberInput = forwardRef<HTMLInputElement, NumberInputProps>(
     },
     ref
   ) => {
+    const { t } = useTranslation()
     const [value, setValue] = useState<number | undefined>(controlledValue ?? defaultValue)
 
     // Sync local state when the controlled value changes (e.g. parent resets the field).
@@ -105,7 +107,7 @@ const NumberInput = forwardRef<HTMLInputElement, NumberInputProps>(
         />
         <div className="absolute top-0 right-0 bottom-0 flex flex-col">
           <Button
-            aria-label="Increase value"
+            aria-label={t('numberInput.increase')}
             className="border-input h-1/2 rounded-l-none rounded-br-none border-b border-l px-2 focus-visible:relative"
             variant="outline"
             onClick={handleIncrement}
@@ -114,7 +116,7 @@ const NumberInput = forwardRef<HTMLInputElement, NumberInputProps>(
             <ChevronUp size={15} />
           </Button>
           <Button
-            aria-label="Decrease value"
+            aria-label={t('numberInput.decrease')}
             className="border-input h-1/2 rounded-l-none rounded-tr-none border-b border-l px-2 focus-visible:relative"
             variant="outline"
             onClick={handleDecrement}

@@ -9,11 +9,22 @@ import { useSettingsStore } from '@/stores/settings'
 import { useDebounce } from '@/hooks/useDebounce'
 import QuerySettings from '@/components/retrieval/QuerySettings'
 import { ChatMessage, MessageWithError } from '@/components/retrieval/ChatMessage'
-import { EraserIcon, SendIcon, CopyIcon } from 'lucide-react'
+import { EraserIcon, SendIcon, CopyIcon, Settings2Icon, SparklesIcon, ScanSearchIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { copyToClipboard } from '@/utils/clipboard'
-import type { QueryMode, RetrievedChunk } from '@/api/lightrag'
+import type { QueryMode, QueryReference, RetrievedChunk } from '@/api/lightrag'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
+import Badge from '@/components/ui/Badge'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/Card'
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/Select'
 
 // Helper function to generate unique IDs with browser compatibility
 const generateUniqueId = () => {
@@ -105,7 +116,9 @@ export default function RetrievalTesting() {
   const { t } = useTranslation()
   // Get current tab to determine if this tab is active (for performance optimization)
   const currentTab = useSettingsStore.use.currentTab()
+  const querySettings = useSettingsStore.use.querySettings()
   const isRetrievalTabActive = currentTab === 'retrieval'
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   const [messages, setMessages] = useState<MessageWithError[]>(() => {
     try {
@@ -125,7 +138,7 @@ export default function RetrievalTesting() {
           // Return a default message if there's an error
           return {
             role: 'system',
-            content: 'Error loading message',
+            content: t('platformShell.common.unavailable'),
             id: `error-${Date.now()}-${index}`,
             isError: true,
             mermaidRendered: true
@@ -439,21 +452,31 @@ export default function RetrievalTesting() {
           queryData(dataParams)
             .then((resp) => {
               const chunks = resp?.data?.chunks ?? []
+              const references: QueryReference[] = resp?.data?.references ?? []
               const imageChunks: RetrievedChunk[] = chunks.filter(
                 (c) =>
                   c.source_type === 'image_vector' &&
                   Boolean(c.image_blob_id)
               )
-              if (imageChunks.length === 0) {
+              const textChunks: RetrievedChunk[] = chunks.filter(
+                (c) =>
+                  c.source_type !== 'image_vector' &&
+                  Boolean(c.content?.trim())
+              )
+              if (imageChunks.length === 0 && textChunks.length === 0 && references.length === 0) {
                 return
               }
               // Attach to the assistant message and trigger a re-render.
               assistantMessage.imageChunks = imageChunks
+              assistantMessage.retrievedChunks = textChunks
+              assistantMessage.references = references
               setMessages((prev) => {
                 const next = [...prev]
                 const last = next[next.length - 1]
                 if (last && last.id === assistantMessage.id) {
                   ;(last as typeof assistantMessage).imageChunks = imageChunks
+                  ;(last as typeof assistantMessage).retrievedChunks = textChunks
+                  ;(last as typeof assistantMessage).references = references
                 }
                 return next
               })
@@ -693,7 +716,7 @@ export default function RetrievalTesting() {
       : (message.displayContent !== undefined ? message.displayContent : (message.content || ''));
 
     if (!contentToCopy.trim()) {
-      toast.error(t('retrievePanel.chatMessage.copyEmpty', 'No content to copy'));
+      toast.error(t('retrievePanel.chatMessage.copyEmpty'));
       return;
     }
 
@@ -703,25 +726,25 @@ export default function RetrievalTesting() {
       if (result.success) {
         // Show success message with method used
         const methodMessages: Record<string, string> = {
-          'clipboard-api': t('retrievePanel.chatMessage.copySuccess', 'Content copied to clipboard'),
-          'execCommand': t('retrievePanel.chatMessage.copySuccessLegacy', 'Content copied (legacy method)'),
-          'manual-select': t('retrievePanel.chatMessage.copySuccessManual', 'Content copied (manual method)'),
-          'fallback': t('retrievePanel.chatMessage.copySuccess', 'Content copied to clipboard')
+          'clipboard-api': t('retrievePanel.chatMessage.copySuccess'),
+          'execCommand': t('retrievePanel.chatMessage.copySuccessLegacy'),
+          'manual-select': t('retrievePanel.chatMessage.copySuccessManual'),
+          'fallback': t('retrievePanel.chatMessage.copySuccess')
         };
 
-        toast.success(methodMessages[result.method] || t('retrievePanel.chatMessage.copySuccess', 'Content copied to clipboard'));
+        toast.success(methodMessages[result.method] || t('retrievePanel.chatMessage.copySuccess'));
       } else {
         // Show error with fallback instructions
         if (result.method === 'fallback') {
           toast.error(
-            result.error || t('retrievePanel.chatMessage.copyFailed', 'Failed to copy content'),
+            result.error || t('retrievePanel.chatMessage.copyFailed'),
             {
-              description: t('retrievePanel.chatMessage.copyManualInstruction', 'Please select and copy the text manually')
+              description: t('retrievePanel.chatMessage.copyManualInstruction')
             }
           );
         } else {
           toast.error(
-            t('retrievePanel.chatMessage.copyFailed', 'Failed to copy content'),
+            t('retrievePanel.chatMessage.copyFailed'),
             {
               description: result.error
             }
@@ -731,44 +754,143 @@ export default function RetrievalTesting() {
     } catch (err) {
       console.error('Clipboard operation failed:', err);
       toast.error(
-        t('retrievePanel.chatMessage.copyError', 'Copy operation failed'),
+        t('retrievePanel.chatMessage.copyError'),
         {
-          description: err instanceof Error ? err.message : 'Unknown error occurred'
+          description: err instanceof Error ? err.message : t('retrievePanel.chatMessage.copyUnknownError')
         }
       );
     }
   }, [t])
 
+  const conversationTurns = Math.ceil(messages.filter((message) => message.role === 'user').length)
+  const consoleSummary = [
+    {
+      label: t('retrievePanel.querySettings.queryMode'),
+      value: t(`retrievePanel.querySettings.queryModeOptions.${querySettings.mode}`),
+    },
+    {
+      label: t('retrievePanel.querySettings.topK'),
+      value: String(querySettings.top_k),
+    },
+    {
+      label: t('retrievePanel.querySettings.chunkTopK'),
+      value: String(querySettings.chunk_top_k),
+    },
+    {
+      label: t('retrievePanel.querySettings.historyTurns'),
+      value: String(querySettings.history_turns || 0),
+    },
+  ]
+
   return (
-    <div className="flex size-full gap-2 px-2 pb-12 overflow-hidden">
-      <div className="flex grow flex-col gap-4">
-        <div className="relative grow">
-          <div
-            ref={messagesContainerRef}
-            className="bg-primary-foreground/60 absolute inset-0 flex flex-col overflow-auto rounded-lg border p-2"
-            onClick={() => {
-              if (shouldFollowScrollRef.current) {
-                shouldFollowScrollRef.current = false;
-              }
-            }}
-          >
-            <div className="flex min-h-0 flex-1 flex-col gap-2">
-              {messages.length === 0 ? (
-                <div className="text-muted-foreground flex h-full items-center justify-center text-lg">
-                  {t('retrievePanel.retrieval.startPrompt')}
+    <div className="flex size-full min-h-0 flex-col gap-4 overflow-hidden p-4">
+      <div className="flex min-h-0 flex-1 flex-col gap-4">
+          <Card className="rounded-[30px] border-border/70 bg-background/90 shadow-sm">
+            <CardHeader className="pb-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="outline" className="rounded-full bg-background/80 px-3 py-1">
+                      <SparklesIcon className="mr-1 size-3.5 text-emerald-500" />
+                      {t('platformShell.retrieval.queryReadyPromptLab')}
+                    </Badge>
+                    {querySettings.enable_rerank && (
+                      <Badge variant="outline" className="rounded-full bg-background/80 px-3 py-1">
+                        {t('retrievePanel.querySettings.enableRerank')}
+                      </Badge>
+                    )}
+                    {querySettings.stream && (
+                      <Badge variant="outline" className="rounded-full bg-background/80 px-3 py-1">
+                        {t('retrievePanel.querySettings.streamResponse')}
+                      </Badge>
+                    )}
+                  </div>
+                  <div>
+                    <CardTitle>{t('platformShell.retrieval.askKnowledgeBase')}</CardTitle>
+                    <CardDescription className="mt-1">
+                      {t('platformShell.retrieval.askKnowledgeBaseDescription')}
+                    </CardDescription>
+                  </div>
                 </div>
-              ) : (
-                messages.map((message) => { // Remove unused idx
-                  // isComplete logic is now handled internally based on message.mermaidRendered
-                  return (
+
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="rounded-full"
+                  onClick={() => setSettingsOpen(true)}
+                >
+                  <Settings2Icon className="size-4" />
+                  {t('retrievePanel.querySettings.parametersTitle')}
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-4">
+              {consoleSummary.map((item) => (
+                <div key={item.label} className="rounded-[22px] border border-border/70 bg-muted/20 p-4">
+                  <p className="text-xs uppercase tracking-[0.12em] text-muted-foreground">{item.label}</p>
+                  <p className="mt-2 text-sm font-medium text-foreground">{item.value}</p>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+
+          <div className="relative min-h-0 flex-1 overflow-hidden rounded-[30px] border border-border/70 bg-background/92 shadow-sm">
+            <div className="border-b border-border/60 px-5 py-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-foreground">{t('platformShell.retrieval.askKnowledgeBase')}</p>
+                  <p className="text-sm text-muted-foreground">
+                    {t('platformShell.retrieval.operatorNotesDescription')}
+                  </p>
+                </div>
+                <Badge variant="outline" className="rounded-full bg-muted/20 px-3 py-1">
+                  {t('platformShell.retrieval.badge')} {conversationTurns}
+                </Badge>
+              </div>
+            </div>
+
+            <div
+              ref={messagesContainerRef}
+              className="absolute inset-x-0 bottom-0 top-[74px] flex flex-col overflow-auto px-3 py-4 sm:px-4"
+              onClick={() => {
+                if (shouldFollowScrollRef.current) {
+                  shouldFollowScrollRef.current = false
+                }
+              }}
+            >
+              <div className="flex min-h-full flex-1 flex-col gap-3">
+                {messages.length === 0 ? (
+                  <div className="flex flex-1 items-center justify-center">
+                    <div className="max-w-xl rounded-[28px] border border-dashed border-border/80 bg-muted/20 px-8 py-10 text-center">
+                      <div className="mx-auto flex size-14 items-center justify-center rounded-3xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-300">
+                        <ScanSearchIcon className="size-6" />
+                      </div>
+                      <h3 className="mt-5 text-lg font-semibold text-foreground">
+                        {t('retrievePanel.retrieval.startPrompt')}
+                      </h3>
+                      <p className="mt-2 text-sm leading-7 text-muted-foreground">
+                        {t('platformShell.retrieval.askKnowledgeBaseDescription')}
+                      </p>
+                      <div className="mt-4 flex flex-wrap justify-center gap-2">
+                        {consoleSummary.slice(0, 3).map((item) => (
+                          <Badge key={item.label} variant="outline" className="rounded-full bg-background/80 px-3 py-1">
+                            {item.label}: {item.value}
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  messages.map((message) => (
                     <div
-                      key={message.id} // Use stable ID for key
+                      key={message.id}
                       className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'} items-end gap-2`}
                     >
                       {message.role === 'user' && (
                         <Button
                           onClick={() => handleCopyMessage(message)}
-                          className="mb-2 size-6 rounded-md opacity-60 transition-opacity hover:opacity-100 shrink-0"
+                          className="mb-2 size-7 shrink-0 rounded-full opacity-60 transition-opacity hover:opacity-100"
                           tooltip={t('retrievePanel.chatMessage.copyTooltip')}
                           variant="ghost"
                           size="icon"
@@ -780,7 +902,7 @@ export default function RetrievalTesting() {
                       {message.role === 'assistant' && (
                         <Button
                           onClick={() => handleCopyMessage(message)}
-                          className="mb-2 size-6 rounded-md opacity-60 transition-opacity hover:opacity-100 shrink-0"
+                          className="mb-2 size-7 shrink-0 rounded-full opacity-60 transition-opacity hover:opacity-100"
                           tooltip={t('retrievePanel.chatMessage.copyTooltip')}
                           variant="ghost"
                           size="icon"
@@ -789,91 +911,136 @@ export default function RetrievalTesting() {
                         </Button>
                       )}
                     </div>
-                  );
-                })
-              )}
-              <div ref={messagesEndRef} className="pb-1" />
+                  ))
+                )}
+                <div ref={messagesEndRef} className="pb-1" />
+              </div>
             </div>
           </div>
+
+          <form
+            onSubmit={handleSubmit}
+            className="shrink-0"
+            autoComplete="on"
+            method="post"
+            action="#"
+            role="search"
+          >
+            <input type="submit" style={{ display: 'none' }} tabIndex={-1} />
+            <div className="rounded-[30px] border border-border/70 bg-background/95 p-3 shadow-sm">
+              <div className="mb-3 flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={clearMessages}
+                  disabled={isLoading}
+                  size="sm"
+                  className="rounded-full"
+                >
+                  <EraserIcon className="size-4" />
+                  {t('retrievePanel.retrieval.clear')}
+                </Button>
+
+                <Select
+                  value={querySettings.mode}
+                  onValueChange={(value) =>
+                    useSettingsStore.getState().updateQuerySettings({ mode: value as QueryMode })
+                  }
+                >
+                  <SelectTrigger className="h-10 min-w-[168px] rounded-full border-border/70 bg-muted/20">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectItem value="naive">{t('retrievePanel.querySettings.queryModeOptions.naive')}</SelectItem>
+                      <SelectItem value="local">{t('retrievePanel.querySettings.queryModeOptions.local')}</SelectItem>
+                      <SelectItem value="global">{t('retrievePanel.querySettings.queryModeOptions.global')}</SelectItem>
+                      <SelectItem value="hybrid">{t('retrievePanel.querySettings.queryModeOptions.hybrid')}</SelectItem>
+                      <SelectItem value="mix">{t('retrievePanel.querySettings.queryModeOptions.mix')}</SelectItem>
+                      <SelectItem value="bypass">{t('retrievePanel.querySettings.queryModeOptions.bypass')}</SelectItem>
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+
+                <div className="ml-auto flex flex-wrap items-center gap-2">
+                  <Badge variant="outline" className="rounded-full bg-muted/20 px-3 py-1">
+                    {t('retrievePanel.querySettings.topK')} {querySettings.top_k}
+                  </Badge>
+                  <Badge variant="outline" className="rounded-full bg-muted/20 px-3 py-1">
+                    {t('retrievePanel.querySettings.chunkTopK')} {querySettings.chunk_top_k}
+                  </Badge>
+                </div>
+              </div>
+
+              <div className="relative flex items-end gap-3 rounded-[24px] border border-border/70 bg-muted/20 px-3 py-3">
+                <div className="min-w-0 flex-1">
+                  <label htmlFor="query-input" className="sr-only">
+                    {t('retrievePanel.retrieval.placeholder')}
+                  </label>
+                  {hasMultipleLines ? (
+                    <Textarea
+                      ref={inputRef as React.RefObject<HTMLTextAreaElement>}
+                      id="query-input"
+                      autoComplete="on"
+                      className="min-h-[64px] max-h-[160px] w-full overflow-y-auto border-0 bg-transparent px-1 py-1 shadow-none focus-visible:ring-0"
+                      value={inputValue}
+                      onChange={handleChange}
+                      onKeyDown={handleKeyDown}
+                      onPaste={handlePaste}
+                      placeholder={t('retrievePanel.retrieval.placeholder')}
+                      disabled={isLoading}
+                      rows={1}
+                      style={{
+                        resize: 'none',
+                        height: 'auto',
+                        minHeight: '64px',
+                        maxHeight: '160px',
+                      }}
+                      onInput={(e: React.FormEvent<HTMLTextAreaElement>) => {
+                        const target = e.target as HTMLTextAreaElement
+                        requestAnimationFrame(() => {
+                          target.style.height = 'auto'
+                          target.style.height = Math.min(target.scrollHeight, 160) + 'px'
+                        })
+                      }}
+                    />
+                  ) : (
+                    <Input
+                      ref={inputRef as React.RefObject<HTMLInputElement>}
+                      id="query-input"
+                      autoComplete="on"
+                      className="h-14 w-full border-0 bg-transparent px-1 text-sm shadow-none focus-visible:ring-0"
+                      value={inputValue}
+                      onChange={handleChange}
+                      onKeyDown={handleKeyDown}
+                      onPaste={handlePaste}
+                      placeholder={t('retrievePanel.retrieval.placeholder')}
+                      disabled={isLoading}
+                    />
+                  )}
+                  {inputError && <div className="px-1 pt-1 text-xs text-red-500">{inputError}</div>}
+                </div>
+
+                <Button type="submit" variant="default" disabled={isLoading} className="rounded-full px-5">
+                  <SendIcon className="size-4" />
+                  {t('retrievePanel.retrieval.send')}
+                </Button>
+              </div>
+            </div>
+          </form>
         </div>
 
-        <form
-          onSubmit={handleSubmit}
-          className="flex shrink-0 items-center gap-2"
-          autoComplete="on"
-          method="post"
-          action="#"
-          role="search"
-        >
-          {/* Hidden submit button to ensure form meets HTML standards */}
-          <input type="submit" style={{ display: 'none' }} tabIndex={-1} />
-          <Button
-            type="button"
-            variant="outline"
-            onClick={clearMessages}
-            disabled={isLoading}
-            size="sm"
-          >
-            <EraserIcon />
-            {t('retrievePanel.retrieval.clear')}
-          </Button>
-          <div className="flex-1 relative">
-            <label htmlFor="query-input" className="sr-only">
-              {t('retrievePanel.retrieval.placeholder')}
-            </label>
-            {hasMultipleLines ? (
-              <Textarea
-                ref={inputRef as React.RefObject<HTMLTextAreaElement>}
-                id="query-input"
-                autoComplete="on"
-                className="w-full min-h-[40px] max-h-[120px] overflow-y-auto"
-                value={inputValue}
-                onChange={handleChange}
-                onKeyDown={handleKeyDown}
-                onPaste={handlePaste}
-                placeholder={t('retrievePanel.retrieval.placeholder')}
-                disabled={isLoading}
-                rows={1}
-                style={{
-                  resize: 'none',
-                  height: 'auto',
-                  minHeight: '40px',
-                  maxHeight: '120px'
-                }}
-                onInput={(e: React.FormEvent<HTMLTextAreaElement>) => {
-                  const target = e.target as HTMLTextAreaElement
-                  requestAnimationFrame(() => {
-                    target.style.height = 'auto'
-                    target.style.height = Math.min(target.scrollHeight, 120) + 'px'
-                  })
-                }}
-              />
-            ) : (
-              <Input
-                ref={inputRef as React.RefObject<HTMLInputElement>}
-                id="query-input"
-                autoComplete="on"
-                className="w-full"
-                value={inputValue}
-                onChange={handleChange}
-                onKeyDown={handleKeyDown}
-                onPaste={handlePaste}
-                placeholder={t('retrievePanel.retrieval.placeholder')}
-                disabled={isLoading}
-              />
-            )}
-            {/* Error message below input */}
-            {inputError && (
-              <div className="absolute left-0 top-full mt-1 text-xs text-red-500">{inputError}</div>
-            )}
+      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+        <DialogContent className="fixed left-auto right-0 top-0 h-screen max-w-[420px] translate-x-0 translate-y-0 rounded-none border-l border-border/70 p-0 sm:left-auto sm:max-w-[420px]">
+          <DialogHeader className="border-b border-border/60 px-5 py-4 text-left">
+            <DialogTitle>{t('retrievePanel.querySettings.parametersTitle')}</DialogTitle>
+            <DialogDescription>{t('retrievePanel.querySettings.parametersDescription')}</DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-hidden">
+            <QuerySettings className="h-full rounded-none border-0 shadow-none" showHeader={false} />
           </div>
-          <Button type="submit" variant="default" disabled={isLoading} size="sm">
-            <SendIcon />
-            {t('retrievePanel.retrieval.send')}
-          </Button>
-        </form>
-      </div>
-      <QuerySettings />
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

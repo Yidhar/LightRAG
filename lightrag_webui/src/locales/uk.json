@@ -4,7 +4,20 @@
     "theme": "Тема",
     "light": "Світла",
     "dark": "Темна",
-    "system": "Системна"
+    "system": "Системна",
+    "languages": {
+      "en": "English",
+      "zh": "中文",
+      "fr": "Français",
+      "ar": "العربية",
+      "zh_TW": "繁體中文",
+      "ru": "Русский",
+      "ja": "日本語",
+      "de": "Deutsch",
+      "uk": "Українська",
+      "ko": "한국어",
+      "vi": "Tiếng Việt"
+    }
   },
   "header": {
     "documents": "Документи",
@@ -17,7 +30,14 @@
     "themeToggle": {
       "switchToLight": "Перемкнути на світлу тему",
       "switchToDark": "Перемкнути на темну тему"
-    }
+    },
+    "overview": "Overview",
+    "kbSettings": "KB Settings",
+    "members": "Members",
+    "workspaceSettings": "Workspace Settings",
+    "workspace": "Workspace",
+    "knowledgeBase": "Knowledge Base",
+    "workspaces": "Workspaces"
   },
   "login": {
     "description": "Будь ласка, введіть ваш обліковий запис та пароль для входу в систему",
@@ -31,13 +51,27 @@
     "errorEmptyFields": "Будь ласка, введіть ім'я користувача та пароль",
     "errorInvalidCredentials": "Вхід не вдався, будь ласка, перевірте ім'я користувача та пароль",
     "authDisabled": "Аутентифікацію вимкнено. Використовується режим без входу.",
-    "guestMode": "Без входу"
+    "materialConsoleLabel": "Material workspace console",
+    "secureWorkspaceLabel": "Secure workspace access",
+    "continueDescription": "Sign in to continue into your scoped knowledge workspace and retrieval console.",
+    "continueToWorkspace": "Continue to workspace",
+    "rememberUsername": "Remember username",
+    "localAuthOnly": "Local auth",
+    "brandCardTitle": "Brand system",
+    "brandCardDescription": "Ragenging ui uses a calm Material-style shell to keep dense knowledge operations readable, layered, and trustworthy.",
+    "workflowCardTitle": "Operator flow",
+    "workflowCardDescription": "Move from overview to documents, retrieval, graph, and settings without losing the current workspace / knowledge-base scope.",
+    "usernameRequired": "Username is required.",
+    "passwordRequired": "Password is required.",
+    "showPassword": "Show password",
+    "hidePassword": "Hide password"
   },
   "common": {
     "cancel": "Скасувати",
     "save": "Зберегти",
     "saving": "Збереження...",
-    "saveFailed": "Збереження не вдалося"
+    "saveFailed": "Збереження не вдалося",
+    "close": "Close"
   },
   "documentPanel": {
     "clearDocuments": {
@@ -111,7 +145,9 @@
         "removeFile": "Видалити файл",
         "uploadDescription": "Ви можете завантажити {{isMultiple ? 'кілька' : count}} файлів (до {{maxSize}} кожен)",
         "duplicateFile": "Ім'я файлу вже існує в кеші сервера"
-      }
+      },
+      "takeoverSuccess": "Accepted '{{name}}', will not create a duplicate, started multimodal rebuild, and will switch to the Processing list.",
+      "takeoverSuccessWithDocId": "Accepted '{{name}}', will reuse existing document {{docId}}, will not create a duplicate, started multimodal rebuild, and will switch to the Processing list."
     },
     "documentManager": {
       "title": "Управління документами",
@@ -142,18 +178,35 @@
         "preprocessed": "Попередньо оброблено",
         "processing": "Обробка",
         "pending": "Очікування",
-        "failed": "Невдало"
+        "failed": "Невдало",
+        "rebuildingMultimodal": "Rebuilding Multimodal"
       },
       "errors": {
         "loadFailed": "Не вдалося завантажити документи\n{{error}}",
         "scanFailed": "Не вдалося відсканувати документи\n{{error}}",
-        "scanProgressFailed": "Не вдалося отримати прогрес сканування\n{{error}}"
+        "scanProgressFailed": "Не вдалося отримати прогрес сканування\n{{error}}",
+        "rebuildMultimodalFailed": "Failed to rebuild multimodal data\n{{error}}",
+        "scanDisabled": "Uploading and scan-trigger actions are disabled for this KB scope."
       },
       "fileNameLabel": "Ім'я файлу",
       "showButton": "Показати",
       "hideButton": "Приховати",
       "showFileNameTooltip": "Показати ім'я файлу",
-      "hideFileNameTooltip": "Приховати ім'я файлу"
+      "hideFileNameTooltip": "Приховати ім'я файлу",
+      "rebuildMultimodalButton": "Rebuild Multimodal",
+      "rebuildMultimodalTooltip": "Re-extract images from the original PDF and rebuild image vectors, source locations, and context injection while reusing cache when possible",
+      "rebuildMultimodalSingleOnly": "Select exactly one PDF document to rebuild multimodal data",
+      "rebuildMultimodalPdfOnly": "Only PDF documents that are not pending/processing support multimodal rebuild",
+      "rebuildMultimodalBusy": "The pipeline is busy. Wait for the current task to finish before rebuilding multimodal data",
+      "rebuildMultimodalStarted": "Multimodal rebuild has started",
+      "rebuildMultimodalStartedWithName": "Started rebuilding multimodal data for '{{name}}'. The document has moved to the Processing list.",
+      "queuedRebuildSummary": "'{{name}}' is rebuilding multimodal data. The latest status will appear shortly.",
+      "scopedPermissions": "Scoped document permissions",
+      "accessMessages": {
+        "readOnly": "This session can review documents in the current KB, but upload, rebuild, delete, and clear actions are locked by scope permissions.",
+        "uploadDisabled": "Upload and multimodal rebuild actions are disabled for the current KB role.",
+        "deleteDisabled": "Delete, bulk clear, and cache-clearing actions are disabled for the current KB role."
+      }
     },
     "pipelineStatus": {
       "title": "Статус пайплайну",
@@ -177,13 +230,21 @@
       "cancelNotBusy": "Пайплайн не працює, немає потреби скасовувати",
       "errors": {
         "fetchFailed": "Не вдалося отримати статус пайплайну\n{{error}}"
-      }
+      },
+      "noActiveJob": "No active job",
+      "currentStep": "Current Step",
+      "currentStepStarting": "Starting...",
+      "remaining": "Remaining",
+      "elapsed": "Elapsed",
+      "eta": "ETA",
+      "etaUnavailable": "Estimating...",
+      "totalDocuments": "Total Documents"
     }
   },
   "graphPanel": {
     "dataIsTruncated": "Дані графа обрізано до максимальної кількості вузлів",
     "statusDialog": {
-      "title": "Налаштування сервера LightRAG",
+      "title": "Налаштування сервера Ragenging ui",
       "description": "Переглянути поточний статус системи та інформацію про підключення"
     },
     "legend": "Легенда",
@@ -385,7 +446,12 @@
       "copyManualInstruction": "Будь ласка, виберіть та скопіюйте текст вручну",
       "thinking": "Мислення...",
       "thinkingTime": "Час мислення {{time}}с",
-      "thinkingInProgress": "Мислення в процесі..."
+      "thinkingInProgress": "Мислення в процесі...",
+      "copyUnknownError": "Unknown error occurred",
+      "answerLabel": "Grounded answer",
+      "sources": "Sources",
+      "sourcesCount": "{{count}} supporting chunks",
+      "sourceLabel": "Source {{index}}"
     },
     "retrieval": {
       "startPrompt": "Почніть пошук, ввівши ваш запит нижче",
@@ -394,7 +460,30 @@
       "placeholder": "Введіть ваш запит (Підтримка префіксу: /<Режим запиту>)",
       "error": "Помилка: Не вдалося отримати відповідь",
       "queryModeError": "Підтримуються лише наступні режими запиту: {{modes}}",
-      "queryModePrefixInvalid": "Недійсний префікс режиму запиту. Використовуйте: /<mode> [пробіл] ваш запит"
+      "queryModePrefixInvalid": "Недійсний префікс режиму запиту. Використовуйте: /<mode> [пробіл] ваш запит",
+      "retrievedImages": "Retrieved images",
+      "imageLoadError": "Failed to load image",
+      "imageDescription": "Description",
+      "imageEntities": "Detected entities",
+      "imageContext": "Nearby text context",
+      "imageContextChunks": "Nearby text chunks",
+      "imageContextChunk": "Chunk {{index}}",
+      "imageLocation": {
+        "pdfPage": "PDF Page {{page}}",
+        "documentPage": "Document Page {{page}}",
+        "pageLabel": "Page Label {{label}}",
+        "bounds": "x={{x}}, y={{y}}, w={{w}}, h={{h}}"
+      },
+      "imageMetadata": {
+        "blobId": "blob_id:",
+        "source": "source:",
+        "docId": "doc_id:",
+        "pictureIndex": "picture_index:",
+        "pagePictureIndex": "page_picture_index:",
+        "extraction": "extraction:",
+        "nativeXref": "native_xref:",
+        "mergedExtractionModes": "merged_extraction_modes:"
+      }
     },
     "querySettings": {
       "parametersTitle": "Параметри",
@@ -441,11 +530,14 @@
       "userPromptTooltip": "Надайте додаткові вимоги до відповіді для LLM (не пов'язані з вмістом запиту, лише для обробки виводу).",
       "userPromptPlaceholder": "Введіть користувацький промпт (необов'язково)",
       "enableRerank": "Увімкнути реранк",
-      "enableRerankTooltip": "Увімкнути реранкінг для отриманих текстових чанків. Якщо True, але модель реранкера не налаштована, буде видано попередження. За замовчуванням True."
+      "enableRerankTooltip": "Увімкнути реранкінг для отриманих текстових чанків. Якщо True, але модель реранкера не налаштована, буде видано попередження. За замовчуванням True.",
+      "resetToDefault": "Reset to default",
+      "resetModeToDefault": "Reset to default ({{value}})"
     }
   },
   "apiSite": {
-    "loading": "Завантаження документації API..."
+    "loading": "Завантаження документації API...",
+    "iframeTitle": "Ragenging ui API documentation"
   },
   "apiKeyAlert": {
     "title": "Потрібен API ключ",
@@ -461,5 +553,448 @@
     "prevPage": "Попередня сторінка",
     "nextPage": "Наступна сторінка",
     "lastPage": "Остання сторінка"
+  },
+  "brand": {
+    "name": "Ragenging ui",
+    "logoAlt": "{{name}} logo"
+  },
+  "permissions": {
+    "roles": {
+      "owner": "Owner",
+      "admin": "Admin",
+      "editor": "Editor",
+      "viewer": "Viewer"
+    },
+    "roleDescriptions": {
+      "owner": "Full workspace and knowledge-base control",
+      "admin": "Can manage workspace members and KB settings",
+      "editor": "Can curate content, documents, and graph data",
+      "viewer": "Read-only workspace and retrieval access"
+    },
+    "capabilities": {
+      "manageMembers": "Manage members",
+      "adjustWorkspaceSettings": "Adjust workspace settings",
+      "editKbSettings": "Edit KB settings",
+      "curateContent": "Curate content",
+      "uploadDocuments": "Upload documents",
+      "runRetrieval": "Run retrieval",
+      "editGraphContent": "Edit graph content",
+      "browseDocuments": "Browse documents",
+      "viewGraphAndApiDocs": "View graph and API docs"
+    },
+    "accessBadge": "{{role}} access"
+  },
+  "navigation": {
+    "sidebar": {
+      "scopedWorkspaceShell": "Scoped workspace shell",
+      "workspaceAdminUnavailable": "{{role}} access does not include workspace administration actions."
+    },
+    "workspaceSwitcher": {
+      "summary_single": "{{count}} workspace · {{role}}",
+      "summary_plural": "{{count}} workspaces · {{role}}"
+    },
+    "knowledgeBaseSwitcher": {
+      "workspaceDetail": "Workspace {{workspaceId}}"
+    }
+  },
+  "graphViewer": {
+    "editingDisabled": "Graph editing is disabled for this KB role.",
+    "switchingTheme": "Switching theme...",
+    "loadingData": "Loading graph data..."
+  },
+  "retrievalRichContent": {
+    "imageFailed": "[image {{blobId}} failed to load]",
+    "loading": "loading...",
+    "diagramInteractionsLimited": "Diagram interactions might be limited.",
+    "mermaidError": "Mermaid diagram error: {{error}}"
+  },
+  "platformShell": {
+    "common": {
+      "backToOverview": "Back to overview",
+      "openRetrieval": "Open retrieval",
+      "openDocuments": "Open documents",
+      "openGraph": "Open graph",
+      "openApiDocs": "Open API docs",
+      "returnToOverview": "Return to overview",
+      "workspace": "Workspace",
+      "knowledgeBase": "Knowledge base",
+      "surfaceState": "Surface state",
+      "currentPath": "Current path",
+      "operatorNotes": "Operator notes",
+      "unavailable": "Unavailable",
+      "enabled": "Enabled",
+      "locked": "Locked",
+      "readOnly": "Read-only",
+      "status": "Status",
+      "loadingCount": "—",
+      "backToDocuments": "Back to documents",
+      "open": "Open",
+      "documents": "Documents",
+      "members": "Members",
+      "workspaceSettings": "Workspace settings",
+      "edit": "Edit",
+      "remove": "Remove",
+      "removing": "Removing...",
+      "deleting": "Deleting...",
+      "delete": "Delete",
+      "kbSettings": "KB settings"
+    },
+    "api": {
+      "loadingLabel": "Loading API reference",
+      "loadingTitle": "Preparing the live docs surface",
+      "loadingDescription": "We are connecting the scoped API reference so engineers can browse live backend docs without leaving the current KB flow.",
+      "badge": "API",
+      "title": "Scoped API reference",
+      "description": "Ragenging ui keeps the live API reference inside the KB shell so developers can move from documents and retrieval checks into integration work without losing route context.",
+      "openDocsInNewTab": "Open docs in new tab",
+      "docsSource": "Docs source",
+      "developerAccess": "Developer access",
+      "referenceReady": "Reference ready",
+      "awaitingQueryAccess": "Awaiting KB query access",
+      "unavailableTitle": "API docs are unavailable for this session",
+      "unavailableDescription": "The page remains in the KB shell for orientation, but opening the embedded reference requires KB query permission for the active route scope.",
+      "referenceNotes": "Reference notes",
+      "referenceNotesDescription": "This embedded reference reflects the live backend docs so engineers can review endpoints, payloads, and auth expectations without leaving the current KB workflow.",
+      "liveDocs": "Live API docs",
+      "liveDocsDescription": "Review the interactive backend reference below while staying anchored to the current workspace and KB.",
+      "queryAccessRequired": "KB query access is required",
+      "iframeHidden": "The API iframe is hidden until this session can query the current KB scope.",
+      "accessAvailableHint": "Once access is available, this card will render the live API reference from the backend docs endpoint.",
+      "interactiveBackendReference": "Interactive backend reference",
+      "embeddedFrom": "Embedded from {{apiDocsUrl}}",
+      "liveDocsBadge": "Live docs"
+    },
+    "documents": {
+      "loadingLabel": "Loading document operations",
+      "loadingTitle": "Preparing the KB document manager",
+      "loadingDescription": "We are loading the scoped ingestion queue, file operations, and document health surfaces for this knowledge base.",
+      "badge": "Documents",
+      "title": "KB document operations",
+      "description": "Keep ingestion, review, and cleanup visibly scoped to one knowledge base so document lifecycle work feels like a product surface instead of a hidden backend pipeline.",
+      "managedOperations": "Managed document operations",
+      "readOnlyReview": "Read-only review",
+      "accessAndOperations": "Access and operations",
+      "operationMode": "Operation mode",
+      "noDocumentAccess": "No document access",
+      "upload": "Upload",
+      "deleteOrClear": "Delete / clear",
+      "pipelineControls": "Pipeline controls",
+      "extended": "Extended",
+      "standard": "Standard",
+      "unavailableTitle": "Document access is unavailable for this session",
+      "unavailableDescription": "The KB route remains visible for orientation, but listing and managing documents requires KB view access for this scope.",
+      "readOnlyTitle": "Document operations are read-only",
+      "readOnlyDescription": "You can review ingestion progress and processed documents here, while upload, rebuild, delete, and clear actions stay locked behind scoped permissions.",
+      "operatorNotesDescription": "Use this surface for day-to-day ingestion and cleanup, then jump to retrieval to validate answer quality or to graph view to inspect extracted structure.",
+      "documentManager": "KB document manager",
+      "documentManagerDescription": "Review document status, ingestion progress, and scoped actions for the current knowledge base.",
+      "viewAccessRequired": "KB view access is required",
+      "documentManagerHidden": "The document manager is hidden until this session can access the current KB scope.",
+      "accessAvailableHint": "Once KB view access is available, this area will render the full document manager in place."
+    },
+    "graph": {
+      "loadingLabel": "Loading graph workspace",
+      "loadingTitle": "Preparing the knowledge graph canvas",
+      "loadingDescription": "We are loading the scoped graph controls, relationship canvas, and property surfaces for this knowledge base.",
+      "badge": "Graph",
+      "title": "Knowledge graph workspace",
+      "description": "Keep entity structure, relationship review, and graph editing anchored to the current knowledge base so graph work feels explainable instead of hidden behind a technical visualization.",
+      "editableWorkspace": "Editable graph workspace",
+      "readOnlyInspection": "Read-only graph inspection",
+      "accessAndRole": "Access and graph role",
+      "editingMode": "Editing mode",
+      "editableProperties": "Editable properties",
+      "readOnlyProperties": "Read-only properties",
+      "noGraphAccess": "No graph access",
+      "visibility": "Graph visibility",
+      "graphEditing": "Graph editing",
+      "unavailableTitle": "Graph access is unavailable for this session",
+      "unavailableDescription": "The route stays visible so the KB shell remains understandable, but opening the graph requires KB view permission for this scope.",
+      "readOnlyTitle": "Graph inspection stays available while editing is read-only",
+      "readOnlyDescription": "You can browse entities and relationships here, but property edits remain locked unless the current KB role includes graph editing permission.",
+      "operatorNotesDescription": "Use this graph surface to inspect extracted structure, confirm relationship quality, and refine properties without losing the current KB context.",
+      "viewer": "Knowledge graph viewer",
+      "viewerDescription": "Explore entity and relationship structure for the current knowledge base inside a scoped graph canvas.",
+      "viewAccessRequired": "KB view access is required",
+      "canvasHidden": "The graph canvas is hidden until this session can access the current KB scope.",
+      "accessAvailableHint": "Once KB view access is available, this area will render the full graph viewer in place."
+    },
+    "retrieval": {
+      "loadingLabel": "Loading retrieval console",
+      "loadingTitle": "Preparing the KB prompt lab",
+      "loadingDescription": "We are loading the scoped retrieval workspace, query controls, and answer review surface for this knowledge base.",
+      "badge": "Retrieval",
+      "title": "KB retrieval console",
+      "description": "Ragenging ui keeps prompt testing, answer quality checks, and query-mode experiments scoped to this knowledge base so teams can evaluate one source of truth at a time.",
+      "queryAccess": "Query access",
+      "interactive": "Interactive",
+      "accessAndScope": "Access and scope",
+      "queryReadyPromptLab": "Query-ready prompt lab",
+      "awaitingQueryAccess": "Awaiting KB query access",
+      "unavailableTitle": "Retrieval is unavailable for this session",
+      "unavailableDescription": "The current route stays visible so the KB shell remains understandable, but interactive retrieval requires KB query permission for this scope.",
+      "readOnlyAdminTitle": "Retrieval stays interactive while admin surfaces stay read-only",
+      "readOnlyAdminDescription": "Use this console to validate grounded answers and compare retrieval modes, even if KB settings and member management are locked for your current role.",
+      "operatorNotesDescription": "This surface is designed for fast prompt checks, answer inspection, and retrieval tuning without leaving the current KB context. Use the surrounding shell when you need documents, graph, or policy changes.",
+      "askKnowledgeBase": "Ask this knowledge base",
+      "askKnowledgeBaseDescription": "Run KB-scoped prompts below to review retrieval quality, grounding behavior, and multimodal context.",
+      "queryAccessRequired": "KB query access is required",
+      "testingDisabled": "Retrieval testing is disabled for the current session. Return to the KB overview or ask a KB owner to grant query access for this route scope.",
+      "accessAvailableHint": "Once KB query access is available, this surface will render the full retrieval console in place."
+    },
+    "kbOverview": {
+      "loadFailed": "Failed to load knowledge base.",
+      "badge": "Knowledge Base",
+      "fallbackDescription": "This overview keeps scope, permissions, and next actions visible so KB isolation feels like a product surface instead of a backend detail.",
+      "runRetrieval": "Run retrieval",
+      "manageDirectory": "Manage KB directory",
+      "configOverrides": "Config overrides",
+      "scopeAndAccess": "Scope and access",
+      "loadingMetadata": "Loading KB metadata...",
+      "compatibilityMode": "Compatibility mode",
+      "nextActions": "Next actions",
+      "nextActionsDescription": "Route-aware shortcuts keep the KB shell focused on documents, retrieval quality, and scoped settings.",
+      "compatibilityDescription": "KB metadata is not available from the registry in this environment yet. Core routes still work, and this overview falls back to the route scope from the current URL.",
+      "quickActions": {
+        "documents": {
+          "label": "Documents",
+          "description": "Upload, inspect, and process content inside this KB."
+        },
+        "retrieval": {
+          "label": "Retrieval",
+          "description": "Test prompts and validate KB-scoped answer quality."
+        },
+        "graph": {
+          "label": "Knowledge graph",
+          "description": "Inspect entity and relationship structure for this KB."
+        },
+        "api": {
+          "label": "API",
+          "description": "Use the scoped API view for embeddings, queries, and automation."
+        },
+        "settings": {
+          "label": "KB settings",
+          "description": "Review metadata, status, and policy controls for this KB."
+        }
+      }
+    },
+    "workspaceSettings": {
+      "badge": "Workspace Settings",
+      "title": "Workspace settings",
+      "description": "This page now acts as a stable landing zone for workspace-scoped administration. It keeps access context, policy intent, and next-step navigation visible while richer forms are wired in.",
+      "openMembers": "Open workspace members",
+      "openDefaultKbOverview": "Open default KB overview",
+      "workspaceScope": "Workspace scope",
+      "currentAccess": "Current access",
+      "accessPosture": "Access posture",
+      "accessPostureDescription": "Workspace settings stay aligned with the same role model that drives visible navigation.",
+      "whatLandsHereNext": "What lands here next",
+      "whatLandsHereNextDescription": "The page is no longer a dead end: it explains the upcoming control surface and keeps the IA stable.",
+      "workspacePolicy": "Workspace policy",
+      "workspacePolicyDescription": "Naming, safety defaults, and future workspace metadata controls will appear here.",
+      "securityPosture": "Security posture",
+      "securityPostureDescription": "Membership visibility, role escalation flows, and audit context plug into this surface next."
+    },
+    "workspaceMembers": {
+      "enterUsername": "Enter a username to add a workspace member.",
+      "username": "Username",
+      "usernamePlaceholder": "alice",
+      "workspaceRole": "Workspace role",
+      "selectRole": "Select a role",
+      "addMember": "Add member",
+      "saveRole": "Save role",
+      "usernameRequired": "Username is required.",
+      "badge": "Members",
+      "title": "Workspace member management",
+      "description": "Surface the current access model clearly: who belongs to this workspace, which roles are present, and how membership changes impact the authenticated shell.",
+      "openWorkspaceSettings": "Open workspace settings",
+      "workspaceScope": "Workspace scope",
+      "loadedMembers": "Loaded members",
+      "roleSummary": "Role summary",
+      "roleCardDescription": "Members currently assigned to this role.",
+      "readOnlyTitle": "Read-only membership view",
+      "readOnlyDescription": "You can inspect the workspace roster, but changing membership requires admin or owner access.",
+      "workspaceRoster": "Workspace roster",
+      "workspaceRosterDescription": "This table is the front door for DB-backed workspace membership management.",
+      "unavailableTitle": "Membership management unavailable",
+      "unavailableDescription": "This environment has not enabled DB-backed membership management yet. The workspace shell still keeps the route stable so access-aware navigation has a home.",
+      "loadingMembers": "Loading workspace members...",
+      "empty": "No workspace members were returned yet.",
+      "removeMember": "Remove member",
+      "dialog": {
+        "createTitle": "Add workspace member",
+        "editTitle": "Update workspace role",
+        "createDescription": "Enter an existing username and assign a workspace role.",
+        "editDescription": "Adjust the workspace role for this member. KB-specific roles can still be layered separately later.",
+        "usernameHint": "Membership invites currently accept an existing username because the user directory picker is not exposed yet."
+      },
+      "table": {
+        "user": "User",
+        "role": "Role",
+        "source": "Source",
+        "updated": "Updated",
+        "actions": "Actions"
+      },
+      "removeDialog": {
+        "title": "Remove workspace member?",
+        "descriptionWithUser": "This removes {{username}} from workspace '{{workspaceId}}'. Their KB-scoped access depending on this workspace may also stop working.",
+        "description": "Remove this workspace member."
+      }
+    },
+    "workspaceDirectory": {
+      "configOverrideObject": "Config override must be a JSON object.",
+      "invalidJsonConfigOverride": "Invalid JSON config override: {{error}}",
+      "kbId": "KB id",
+      "kbIdPlaceholder": "finance.primary",
+      "displayName": "Display name",
+      "displayNamePlaceholder": "Finance KB",
+      "descriptionLabel": "Description",
+      "descriptionPlaceholder": "Summarize what this KB is for.",
+      "statusPlaceholder": "active",
+      "statusHint": "Suggested values: active, archived, maintenance.",
+      "configOverride": "Config override (JSON object)",
+      "createKb": "Create KB",
+      "saveChanges": "Save changes",
+      "badge": "Workspaces",
+      "title": "Workspace directory",
+      "description": "Keep the authenticated shell simple: one visible workspace scope, one clear access level, and quick paths into documents, knowledge bases, and administration surfaces.",
+      "openActiveWorkspace": "Open active workspace",
+      "reviewDefaultKnowledgeBase": "Review default knowledge base",
+      "activeWorkspace": "Active workspace",
+      "accessibleWorkspaces": "Accessible workspaces",
+      "knowledgeBasesSurfaced": "Knowledge bases surfaced",
+      "accessSummary": "Access summary",
+      "accessSummaryDescription": "Your current role determines which admin surfaces stay visible inside this workspace.",
+      "visible": "Visible",
+      "hidden": "Hidden",
+      "knowledgeBaseDirectory": "Knowledge base directory",
+      "knowledgeBaseDirectoryDescription": "Create, review, and manage KB scopes from a single workspace-level surface.",
+      "compatibilityMode": "Compatibility mode",
+      "compatibilityDescription": "KB registry endpoints are not available yet for this environment. You can continue with the default knowledge base while KB isolation rolls out.",
+      "readOnlyTitle": "Read-only KB directory",
+      "readOnlyDescription": "You can browse knowledge bases in this workspace, but creating or changing them requires workspace admin access.",
+      "loadingKnowledgeBases": "Loading knowledge bases...",
+      "defaultBadge": "Default",
+      "noDescription": "No description yet. Open this KB to manage documents, retrieval, and graph views.",
+      "empty": "No KB registry entries were returned. Continue with the default knowledge base until registry management is enabled.",
+      "deleteKb": "Delete KB",
+      "dialog": {
+        "createTitle": "Create knowledge base",
+        "editTitle": "Edit knowledge base",
+        "createDescription": "Create a scoped knowledge base inside this workspace. Invalid characters in the KB id will be sanitized to underscores by the backend registry.",
+        "editDescription": "Update KB metadata and overrides without leaving the workspace directory."
+      },
+      "deleteDialog": {
+        "title": "Delete knowledge base?",
+        "descriptionWithName": "Delete '{{knowledgeBaseName}}' from workspace '{{workspaceId}}'. Existing storage data is left in place by the backend, but the registry entry will be removed.",
+        "description": "Delete this knowledge base."
+      }
+    },
+    "kbSettings": {
+      "loadFailed": "Failed to load KB settings.",
+      "title": "Knowledge base settings",
+      "description": "Keep KB-scoped metadata, local overrides, and permission layering visible on one calm surface so teams can understand and manage the current scope without digging through backend details.",
+      "manageDirectory": "Manage KB directory",
+      "overrides": "Overrides",
+      "directMembers": "Direct KB members",
+      "ownerOnly": "Owner-only",
+      "effectiveAccessTitle": "Effective access",
+      "effectiveAccessDescription": "Keep the active route scope readable so operators can understand which settings stay editable and which remain informational.",
+      "kbRole": "KB role",
+      "workspaceFallback": "Workspace fallback",
+      "currentStatus": "Current status",
+      "loadingMetadata": "Loading KB metadata...",
+      "compatibilityMode": "Compatibility mode",
+      "metadataAndOverridesTitle": "KB metadata and overrides",
+      "metadataAndOverridesDescription": "Keep the registry surface readable while letting KB admins and owners make day-to-day metadata updates in context.",
+      "registryUnavailableTitle": "KB registry unavailable",
+      "registryUnavailableDescription": "Registry-backed KB settings are not available in this environment yet. Core KB routes still work, but metadata editing remains behind the staged rollout.",
+      "noDescription": "No KB description has been set yet.",
+      "createdAt": "Created at",
+      "notExposedYet": "Not exposed yet",
+      "lifecycleStatus": "Lifecycle status",
+      "configOverrideKeys": "Config override keys",
+      "noOverrides": "No KB-specific override values are currently exposed.",
+      "metadataReadOnlyTitle": "Metadata editing is read-only",
+      "metadataReadOnlyDescription": "You can inspect KB metadata and override values here, but saving changes requires KB settings permission for this scope.",
+      "metadataPlaceholder": "KB metadata will become editable here once the registry record is available.",
+      "permissionScopeTitle": "KB permission scope",
+      "directAssignmentsUsingRole": "Direct KB assignments currently using this role.",
+      "permissionsOwnerManagedTitle": "KB permissions are owner-managed",
+      "permissionsOwnerManagedDescription": "You can review KB metadata on this page, but changing KB-specific roles requires owner access for this knowledge base.",
+      "permissionLayeringTitle": "Permission layering",
+      "permissionLayeringDescription": "KB-specific roles override the workspace fallback for this KB only. Invite the user to the workspace first, then apply a KB role if they need narrower or elevated access here.",
+      "openWorkspaceMembers": "Open workspace members",
+      "memberAssignmentsTitle": "KB member assignments",
+      "memberAssignmentsDescription": "Keep KB-scoped access explicit. Owners can layer direct roles without changing the wider workspace roster.",
+      "directAssignmentManagementTitle": "Direct assignment management",
+      "directAssignmentManagementDescription": "Add existing workspace members, then tailor their role for this KB only.",
+      "memberEditingHidden": "KB membership editing is hidden unless the current session has owner-level permission for this KB.",
+      "memberManagementUnavailableTitle": "KB permission management unavailable",
+      "memberManagementUnavailableDescription": "This environment has not enabled DB-backed KB membership management yet, or the registry is not ready to return membership data.",
+      "loadingMembers": "Loading KB members...",
+      "noMembers": "No KB-specific members have been assigned yet. Access currently inherits from workspace roles.",
+      "currentSession": "Current session",
+      "currentSessionLocked": "The current session's KB assignment is locked on this screen to reduce accidental loss of access while permission management is still rolling out.",
+      "table": {
+        "user": "User",
+        "role": "KB role",
+        "source": "Source",
+        "updated": "Updated",
+        "actions": "Actions"
+      },
+      "removeDialog": {
+        "title": "Remove KB member?",
+        "descriptionWithUser": "This removes {{username}} from direct KB access for '{{knowledgeBaseName}}'. They will fall back to workspace-level access, if one exists.",
+        "description": "Remove this KB member."
+      },
+      "members": {
+        "usernameRequired": "Username is required.",
+        "removeMember": "Remove member",
+        "dialog": {
+          "enterUsername": "Enter a username to add a KB member.",
+          "createTitle": "Add KB member",
+          "editTitle": "Update KB role",
+          "createDescription": "KB-specific permissions layer on top of workspace membership. Add an existing workspace member and assign a KB role.",
+          "editDescription": "Adjust the KB-scoped role for this member without changing their workspace-level access.",
+          "username": "Username",
+          "usernamePlaceholder": "alice",
+          "usernameHint": "The selected user must already be a workspace member before a KB-specific role can be assigned.",
+          "kbRole": "KB role",
+          "selectRole": "Select a role",
+          "addMember": "Add member",
+          "saveRole": "Save role"
+        }
+      },
+      "metadataEditor": {
+        "title": "Edit KB metadata",
+        "description": "Update the display name, description, lifecycle status, and JSON override block without leaving this settings page.",
+        "idBadge": "KB id: {{kbId}}",
+        "idFixedHint": "KB ids are fixed after creation. Rename the display name here without changing the underlying route id.",
+        "reset": "Reset",
+        "saveChanges": "Save KB changes",
+        "noChanges": "No KB metadata changes to save.",
+        "errors": {
+          "displayNameEmpty": "Display name cannot be empty.",
+          "statusEmpty": "Status cannot be empty."
+        }
+      }
+    }
+  },
+  "appRouter": {
+    "fullScreenTitle": "Loading {{name}}...",
+    "fullScreenDescription": "Preparing the next workspace surface.",
+    "routeTitle": "Loading workspace view...",
+    "routeDescription": "Fetching the next KB surface and its scoped tools."
+  },
+  "app": {
+    "initializing": "Initializing..."
+  },
+  "promptInput": {
+    "deleteHistoryItem": "Delete this history item"
+  },
+  "numberInput": {
+    "increase": "Збільшити значення",
+    "decrease": "Зменшити значення"
   }
 }

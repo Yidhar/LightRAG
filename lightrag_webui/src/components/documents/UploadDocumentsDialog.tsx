@@ -22,6 +22,8 @@ import { UploadIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 interface UploadDocumentsDialogProps {
+  disabled?: boolean
+  disabledReason?: string
   onDocumentsUploaded?: (payload: {
     successfulUploads: Array<{
       fileName: string
@@ -34,7 +36,11 @@ interface UploadDocumentsDialogProps {
   }) => Promise<void> | void
 }
 
-export default function UploadDocumentsDialog({ onDocumentsUploaded }: UploadDocumentsDialogProps) {
+export default function UploadDocumentsDialog({
+  disabled = false,
+  disabledReason,
+  onDocumentsUploaded,
+}: UploadDocumentsDialogProps) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
@@ -84,6 +90,9 @@ export default function UploadDocumentsDialog({ onDocumentsUploaded }: UploadDoc
 
   const handleDocumentsUpload = useCallback(
     async (filesToUpload: File[]) => {
+      if (disabled) {
+        return
+      }
       setIsUploading(true)
       let hasSuccessfulUpload = false
 
@@ -221,13 +230,30 @@ export default function UploadDocumentsDialog({ onDocumentsUploaded }: UploadDoc
         setIsUploading(false)
       }
     },
-    [buildTakeoverSuccessMessage, setIsUploading, setProgresses, setFileErrors, t, onDocumentsUploaded]
+    [buildTakeoverSuccessMessage, disabled, setIsUploading, setProgresses, setFileErrors, t, onDocumentsUploaded]
+  )
+
+  const trigger = (
+    <span className="inline-flex" title={disabled ? disabledReason : undefined}>
+      <Button
+        variant="default"
+        side="bottom"
+        tooltip={disabled ? undefined : t('documentPanel.uploadDocuments.tooltip')}
+        size="sm"
+        disabled={disabled}
+      >
+        <UploadIcon /> {t('documentPanel.uploadDocuments.button')}
+      </Button>
+    </span>
   )
 
   return (
     <Dialog
       open={open}
       onOpenChange={(open) => {
+        if (disabled) {
+          return
+        }
         if (isUploading) {
           return
         }
@@ -238,11 +264,7 @@ export default function UploadDocumentsDialog({ onDocumentsUploaded }: UploadDoc
         setOpen(open)
       }}
     >
-      <DialogTrigger asChild>
-        <Button variant="default" side="bottom" tooltip={t('documentPanel.uploadDocuments.tooltip')} size="sm">
-          <UploadIcon /> {t('documentPanel.uploadDocuments.button')}
-        </Button>
-      </DialogTrigger>
+      <DialogTrigger asChild>{trigger}</DialogTrigger>
       <DialogContent className="sm:max-w-xl" onCloseAutoFocus={(e) => e.preventDefault()}>
         <DialogHeader>
           <DialogTitle>{t('documentPanel.uploadDocuments.title')}</DialogTitle>

@@ -84,10 +84,6 @@ for path in whitelist_paths:
         else:
             whitelist_patterns.append((path, False))  # (exact_path, is_prefix_match)
 
-# Global authentication configuration
-auth_configured = bool(auth_handler.accounts)
-
-
 def get_combined_auth_dependency(api_key: Optional[str] = None):
     """
     Create a combined authentication dependency that implements authentication logic
@@ -99,9 +95,6 @@ def get_combined_auth_dependency(api_key: Optional[str] = None):
     Returns:
         Callable: A dependency function that implements the authentication logic
     """
-    # Use global whitelist_patterns and auth_configured variables
-    # whitelist_patterns and auth_configured are already initialized at module level
-
     # Only calculate api_key_configured as it depends on the function parameter
     api_key_configured = bool(api_key)
 
@@ -137,6 +130,8 @@ def get_combined_auth_dependency(api_key: Optional[str] = None):
         if token:
             try:
                 token_info = auth_handler.validate_token(token)
+                request.state.db_user_id = token_info.get("user_id")
+                request.state.token_info = token_info
 
                 # ========== Token Auto-Renewal Logic ==========
                 from lightrag.api.config import global_args
@@ -161,11 +156,7 @@ def get_combined_auth_dependency(api_key: Optional[str] = None):
 
                                 # Get original token expiration duration
                                 role = token_info.get("role", "user")
-                                total_hours = (
-                                    auth_handler.guest_expire_hours
-                                    if role == "guest"
-                                    else auth_handler.expire_hours
-                                )
+                                total_hours = auth_handler.expire_hours
                                 total_seconds = total_hours * 3600
 
                                 # Issue new token if remaining time < threshold
@@ -187,6 +178,11 @@ def get_combined_auth_dependency(api_key: Optional[str] = None):
                                             username=username,
                                             role=role,
                                             metadata=token_info.get("metadata", {}),
+                                            memberships=token_info.get(
+                                                "memberships", []
+                                            ),
+                                            jti=token_info.get("jti", ""),
+                                            user_id=token_info.get("user_id"),
                                         )
                                         # Return new token via response header
                                         response.headers["X-New-Token"] = new_token
@@ -211,29 +207,14 @@ def get_combined_auth_dependency(api_key: Optional[str] = None):
                             logger.warning(f"Token auto-renew failed: {e}")
                 # ========== End of Token Auto-Renewal Logic ==========
 
-                # Accept guest token if no auth is configured
-                if not auth_configured and token_info.get("role") == "guest":
-                    return
-                # Accept non-guest token if auth is configured
-                if auth_configured and token_info.get("role") != "guest":
-                    return
-
-                # Token validation failed, immediately return 401 error
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Invalid token. Please login again.",
-                )
+                return
             except HTTPException as e:
                 # If already a 401 error, re-raise it
                 if e.status_code == status.HTTP_401_UNAUTHORIZED:
                     raise
                 # For other exceptions, continue processing
 
-        # 3. Acept all request if no API protection needed
-        if not auth_configured and not api_key_configured:
-            return
-
-        # 4. Validate API key if provided and API-Key authentication is configured
+        # 3. Validate API key if provided and API-Key authentication is configured
         if (
             api_key_configured
             and api_key_header_value
@@ -243,8 +224,8 @@ def get_combined_auth_dependency(api_key: Optional[str] = None):
 
         ### Authentication failed ####
 
-        # if password authentication is configured but not provided, ensure 401 error if auth_configured
-        if auth_configured and not token:
+        # if password authentication is not provided, ensure 401 error
+        if not token:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="No credentials provided. Please login.",

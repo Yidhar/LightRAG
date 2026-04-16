@@ -1294,6 +1294,16 @@ async def initialize_pipeline_status(workspace: str | None = None):
                 "docs": 0,  # Total number of documents to be indexed
                 "batchs": 0,  # Number of batches for processing documents
                 "cur_batch": 0,  # Current processing batch
+                "total_chunks": 0,  # Total chunks known for current job
+                "processed_chunks": 0,  # Extracted chunks completed so far
+                "current_stage": "",  # Machine-readable active stage name
+                "current_stage_label": "",  # Human-readable active stage
+                "stage_unit": "",  # Unit for stage counters (documents/chunks/etc.)
+                "stage_total": 0,  # Total items in current stage
+                "stage_processed": 0,  # Processed items in current stage
+                "stage_remaining": 0,  # Remaining items in current stage
+                "stage_elapsed_seconds": 0,  # Elapsed stage time
+                "stage_eta_seconds": None,  # ETA for current stage
                 "request_pending": False,  # Flag for pending request for processing
                 "latest_message": "",  # Latest message from pipeline processing
                 "history_messages": history_messages,  # 使用共享列表对象

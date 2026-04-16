@@ -13,14 +13,12 @@ export default function LanguageToggle() {
   const setLanguage = useSettingsStore.use.setLanguage()
 
   const setEnglish = useCallback(() => {
-    i18n.changeLanguage('en')
     setLanguage('en')
-  }, [i18n, setLanguage])
+  }, [setLanguage])
 
   const setChinese = useCallback(() => {
-    i18n.changeLanguage('zh')
     setLanguage('zh')
-  }, [i18n, setLanguage])
+  }, [setLanguage])
 
   if (currentLanguage === 'zh') {
     return (

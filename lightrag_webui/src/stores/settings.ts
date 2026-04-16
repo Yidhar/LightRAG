@@ -6,7 +6,15 @@ import { Message, QueryRequest } from '@/api/lightrag'
 
 type Theme = 'dark' | 'light' | 'system'
 type Language = 'en' | 'zh' | 'fr' | 'ar' | 'zh_TW' | 'ru' | 'ja' | 'de' | 'uk' | 'ko' | 'vi'
-type Tab = 'documents' | 'knowledge-graph' | 'retrieval' | 'api'
+export type Tab =
+  | 'overview'
+  | 'documents'
+  | 'knowledge-graph'
+  | 'retrieval'
+  | 'api'
+  | 'kb-settings'
+  | 'members'
+  | 'workspace-settings'
 
 interface SettingsState {
   // Document manager settings

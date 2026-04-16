@@ -12,6 +12,8 @@ import logging
 import logging.handlers
 import os
 import re
+import shutil
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -1181,8 +1183,202 @@ def wrap_embedding_func_with_attrs(**kwargs):
 def load_json(file_name):
     if not os.path.exists(file_name):
         return None
-    with open(file_name, encoding="utf-8-sig") as f:
-        return json.load(f)
+    try:
+        with open(file_name, encoding="utf-8-sig") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        logger.warning(
+            "Detected corrupted JSON file '%s'. Starting automatic recovery. Internal detail: %s",
+            file_name,
+            exc,
+        )
+
+    try:
+        with open(file_name, encoding="utf-8-sig", errors="replace") as f:
+            raw_text = f.read()
+    except OSError as exc:
+        logger.error(
+            "Failed to read corrupted JSON file '%s' during recovery: %s",
+            file_name,
+            exc,
+        )
+        return None
+
+    recovered_data = _recover_json_data(raw_text)
+    if recovered_data is None:
+        recovered_data = _infer_empty_json_container(raw_text)
+
+    backup_path = _backup_corrupted_json_file(file_name)
+    try:
+        write_json(recovered_data, file_name)
+    except Exception as write_exc:
+        logger.error(
+            "Failed to persist recovered JSON file '%s': %s",
+            file_name,
+            write_exc,
+        )
+        return recovered_data
+
+    preserved_count = (
+        len(recovered_data)
+        if isinstance(recovered_data, (dict, list, tuple, set))
+        else "unknown"
+    )
+    logger.warning(
+        "Recovered JSON file '%s' and restored service startup continuity. "
+        "Backup: %s. Preserved top-level items: %s.",
+        file_name,
+        backup_path or "<backup failed>",
+        preserved_count,
+    )
+    return recovered_data
+
+
+def _backup_corrupted_json_file(file_name: str) -> str | None:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    backup_path = f"{file_name}.corrupt.{timestamp}.bak"
+    try:
+        shutil.copy2(file_name, backup_path)
+        return backup_path
+    except OSError as exc:
+        logger.warning(
+            "Failed to create backup for corrupted JSON file '%s': %s",
+            file_name,
+            exc,
+        )
+        return None
+
+
+def _infer_empty_json_container(raw_text: str):
+    stripped = raw_text.lstrip()
+    if stripped.startswith("["):
+        return []
+    return {}
+
+
+def _recover_json_data(raw_text: str):
+    stripped = raw_text.lstrip()
+    if not stripped:
+        return {}
+
+    root_char = stripped[0]
+    if root_char == "{":
+        repaired = _recover_truncated_json_object(stripped)
+    elif root_char == "[":
+        repaired = _recover_truncated_json_array(stripped)
+    else:
+        return None
+
+    if repaired is None:
+        return None
+
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError:
+        return None
+
+
+def _recover_truncated_json_object(raw_text: str) -> str | None:
+    decoder = json.JSONDecoder()
+    idx = _skip_json_whitespace(raw_text, 0)
+    if idx >= len(raw_text) or raw_text[idx] != "{":
+        return None
+
+    idx += 1
+    last_complete_value_end = None
+    parsed_entries = 0
+
+    while True:
+        idx = _skip_json_whitespace(raw_text, idx)
+        if idx >= len(raw_text):
+            break
+
+        if raw_text[idx] == "}":
+            return raw_text[: idx + 1]
+
+        try:
+            key, key_end = decoder.raw_decode(raw_text, idx)
+        except json.JSONDecodeError:
+            break
+
+        if not isinstance(key, str):
+            break
+
+        idx = _skip_json_whitespace(raw_text, key_end)
+        if idx >= len(raw_text) or raw_text[idx] != ":":
+            break
+
+        idx += 1
+        idx = _skip_json_whitespace(raw_text, idx)
+
+        try:
+            _, value_end = decoder.raw_decode(raw_text, idx)
+        except json.JSONDecodeError:
+            break
+
+        last_complete_value_end = value_end
+        parsed_entries += 1
+        idx = _skip_json_whitespace(raw_text, value_end)
+
+        if idx >= len(raw_text):
+            break
+        if raw_text[idx] == ",":
+            idx += 1
+            continue
+        if raw_text[idx] == "}":
+            return raw_text[: idx + 1]
+        break
+
+    if parsed_entries == 0 or last_complete_value_end is None:
+        return "{}"
+    return raw_text[:last_complete_value_end] + "}"
+
+
+def _recover_truncated_json_array(raw_text: str) -> str | None:
+    decoder = json.JSONDecoder()
+    idx = _skip_json_whitespace(raw_text, 0)
+    if idx >= len(raw_text) or raw_text[idx] != "[":
+        return None
+
+    idx += 1
+    last_complete_value_end = None
+    parsed_items = 0
+
+    while True:
+        idx = _skip_json_whitespace(raw_text, idx)
+        if idx >= len(raw_text):
+            break
+
+        if raw_text[idx] == "]":
+            return raw_text[: idx + 1]
+
+        try:
+            _, value_end = decoder.raw_decode(raw_text, idx)
+        except json.JSONDecodeError:
+            break
+
+        last_complete_value_end = value_end
+        parsed_items += 1
+        idx = _skip_json_whitespace(raw_text, value_end)
+
+        if idx >= len(raw_text):
+            break
+        if raw_text[idx] == ",":
+            idx += 1
+            continue
+        if raw_text[idx] == "]":
+            return raw_text[: idx + 1]
+        break
+
+    if parsed_items == 0 or last_complete_value_end is None:
+        return "[]"
+    return raw_text[:last_complete_value_end] + "]"
+
+
+def _skip_json_whitespace(raw_text: str, idx: int) -> int:
+    while idx < len(raw_text) and raw_text[idx] in " \t\r\n":
+        idx += 1
+    return idx
 
 
 def _sanitize_string_for_json(text: str) -> str:
@@ -1287,18 +1483,35 @@ def write_json(json_obj, file_name):
         bool: True if sanitization was applied (caller should reload data),
               False if direct write succeeded (no reload needed)
     """
+    def _atomic_dump(**dump_kwargs) -> None:
+        directory = os.path.dirname(os.path.abspath(file_name)) or "."
+        prefix = f".{os.path.basename(file_name)}."
+        fd, temp_path = tempfile.mkstemp(
+            dir=directory, prefix=prefix, suffix=".tmp", text=True
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(json_obj, f, indent=2, ensure_ascii=False, **dump_kwargs)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, file_name)
+        except Exception:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+            raise
+
     try:
         # Strategy 1: Fast path - try direct serialization
-        with open(file_name, "w", encoding="utf-8") as f:
-            json.dump(json_obj, f, indent=2, ensure_ascii=False)
+        _atomic_dump()
         return False  # No sanitization needed, no reload required
 
     except (UnicodeEncodeError, UnicodeDecodeError) as e:
         logger.debug(f"Direct JSON write failed, using sanitizing encoder: {e}")
 
     # Strategy 2: Use custom encoder (sanitizes during serialization, zero memory copy)
-    with open(file_name, "w", encoding="utf-8") as f:
-        json.dump(json_obj, f, indent=2, ensure_ascii=False, cls=SanitizingJSONEncoder)
+    _atomic_dump(cls=SanitizingJSONEncoder)
 
     logger.info(f"JSON sanitization applied during write: {file_name}")
     return True  # Sanitization applied, reload recommended

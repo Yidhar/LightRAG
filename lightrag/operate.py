@@ -22,6 +22,7 @@ from lightrag.utils import (
     split_string_by_multi_markers,
     truncate_list_by_token_size,
     compute_args_hash,
+    generate_cache_key,
     handle_cache,
     save_to_cache,
     CacheData,
@@ -68,6 +69,7 @@ from lightrag.constants import (
     DEFAULT_ENTITY_NAME_MAX_LENGTH,
 )
 from lightrag.kg.shared_storage import get_storage_keyed_lock
+from lightrag.llm.openai_batch import OpenAIBatchRequest, run_openai_chat_batch
 import time
 from dotenv import load_dotenv
 
@@ -3108,6 +3110,519 @@ async def merge_nodes_and_edges(
         pipeline_status["history_messages"].append(log_message)
 
 
+def _build_entity_extraction_context_base(
+    global_config: dict[str, Any]
+) -> dict[str, str]:
+    language = global_config["addon_params"].get("language", DEFAULT_SUMMARY_LANGUAGE)
+    entity_types = global_config["addon_params"].get(
+        "entity_types", DEFAULT_ENTITY_TYPES
+    )
+
+    examples = "\n".join(PROMPTS["entity_extraction_examples"])
+    example_context_base = dict(
+        tuple_delimiter=PROMPTS["DEFAULT_TUPLE_DELIMITER"],
+        completion_delimiter=PROMPTS["DEFAULT_COMPLETION_DELIMITER"],
+        entity_types=", ".join(entity_types),
+        language=language,
+    )
+    examples = examples.format(**example_context_base)
+
+    return dict(
+        tuple_delimiter=PROMPTS["DEFAULT_TUPLE_DELIMITER"],
+        completion_delimiter=PROMPTS["DEFAULT_COMPLETION_DELIMITER"],
+        entity_types=",".join(entity_types),
+        examples=examples,
+        language=language,
+    )
+
+
+def _build_entity_extraction_prompts(
+    content: str, context_base: dict[str, str]
+) -> tuple[str, str, str]:
+    entity_extraction_system_prompt = PROMPTS["entity_extraction_system_prompt"].format(
+        **context_base
+    )
+    entity_extraction_user_prompt = PROMPTS["entity_extraction_user_prompt"].format(
+        **{**context_base, "input_text": content}
+    )
+    entity_continue_extraction_user_prompt = PROMPTS[
+        "entity_continue_extraction_user_prompt"
+    ].format(**{**context_base, "input_text": content})
+    return (
+        entity_extraction_system_prompt,
+        entity_extraction_user_prompt,
+        entity_continue_extraction_user_prompt,
+    )
+
+
+def _build_extract_cache_descriptor(
+    user_prompt: str,
+    system_prompt: str | None = None,
+    history_messages: list[dict[str, Any]] | None = None,
+) -> dict[str, str]:
+    prompt_parts = []
+    if user_prompt:
+        prompt_parts.append(user_prompt)
+    if system_prompt:
+        prompt_parts.append(system_prompt)
+    if history_messages:
+        prompt_parts.append(json.dumps(history_messages, ensure_ascii=False))
+    prompt = "\n".join(prompt_parts)
+    args_hash = compute_args_hash(prompt)
+    return {
+        "prompt": prompt,
+        "args_hash": args_hash,
+        "cache_key": generate_cache_key("default", "extract", args_hash),
+    }
+
+
+def _normalize_entity_extraction_mode(global_config: dict[str, Any]) -> str:
+    raw_mode = str(global_config.get("entity_extraction_mode", "auto") or "auto")
+    normalized = raw_mode.strip().lower()
+    if normalized not in {"auto", "realtime", "batch"}:
+        return "auto"
+    return normalized
+
+
+def _can_use_openai_batch_entity_extraction(
+    global_config: dict[str, Any], total_chunks: int
+) -> tuple[bool, str]:
+    mode = _normalize_entity_extraction_mode(global_config)
+    if mode == "realtime":
+        return False, "entity_extraction_mode=realtime"
+
+    llm_binding = str(global_config.get("llm_binding", "") or "").strip().lower()
+    if llm_binding != "openai":
+        return False, f"unsupported binding={llm_binding or 'unknown'}"
+
+    if not global_config.get("llm_binding_api_key"):
+        return False, "missing llm_binding_api_key"
+
+    if not global_config.get("llm_model_name"):
+        return False, "missing llm_model_name"
+
+    if mode == "batch":
+        return True, "entity_extraction_mode=batch"
+
+    min_chunks = max(
+        int(global_config.get("entity_extraction_batch_min_chunks", 120) or 120),
+        1,
+    )
+    if total_chunks < min_chunks:
+        return False, f"chunk count {total_chunks} below threshold {min_chunks}"
+    return True, f"auto batch enabled for {total_chunks} chunks"
+
+
+def _extract_text_from_batch_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text_value = item.get("text")
+                if isinstance(text_value, str):
+                    parts.append(text_value)
+        return "\n".join(part for part in parts if part)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _extract_result_text_from_batch_output(
+    output_line: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    error = output_line.get("error")
+    if error:
+        return None, str(error)
+
+    response = output_line.get("response") or {}
+    status_code = response.get("status_code")
+    body = response.get("body") or {}
+    if status_code and int(status_code) >= 400:
+        if isinstance(body, dict):
+            body_error = body.get("error") or {}
+            return None, body_error.get("message") or f"status_code={status_code}"
+        return None, f"status_code={status_code}"
+
+    choices = body.get("choices") if isinstance(body, dict) else None
+    if not choices:
+        return None, "batch response missing choices"
+
+    message = choices[0].get("message") if isinstance(choices[0], dict) else None
+    if not isinstance(message, dict):
+        return None, "batch response missing message"
+
+    content = _extract_text_from_batch_content(message.get("content"))
+    if not content:
+        return None, "batch response returned empty content"
+
+    return remove_think_tags(content), None
+
+
+async def _update_doc_processing_progress(
+    doc_status_storage: BaseKVStorage | None,
+    doc_id: str | None,
+    *,
+    stage: str,
+    stage_label: str,
+    processed: int,
+    total: int,
+    extra_metadata: dict[str, Any] | None = None,
+) -> None:
+    if doc_status_storage is None or not doc_id:
+        return
+
+    existing_record = await doc_status_storage.get_by_id(doc_id)
+    if not existing_record:
+        return
+
+    record = dict(existing_record)
+    metadata = dict(record.get("metadata", {}) or {})
+    now_ts = int(time.time())
+    processing_start_time = metadata.get("processing_start_time")
+    if not isinstance(processing_start_time, int):
+        processing_start_time = now_ts
+
+    total_items = max(int(total or 0), 0)
+    processed_items = max(int(processed or 0), 0)
+    if total_items > 0:
+        processed_items = min(processed_items, total_items)
+    remaining_items = max(total_items - processed_items, 0)
+    elapsed_seconds = max(now_ts - processing_start_time, 0)
+    progress_percent: float | None = None
+    eta_seconds: int | None = None
+    if total_items > 0:
+        progress_percent = round((processed_items / total_items) * 100, 2)
+        if 0 < processed_items < total_items:
+            eta_seconds = int(
+                elapsed_seconds * (total_items - processed_items) / processed_items
+            )
+        elif processed_items >= total_items:
+            eta_seconds = 0
+
+    metadata.update(
+        {
+            "processing_stage": stage,
+            "processing_stage_label": stage_label,
+            "processing_progress_percent": progress_percent,
+            "processing_items_processed": processed_items,
+            "processing_items_total": total_items,
+            "processing_items_remaining": remaining_items,
+            "processing_elapsed_seconds": elapsed_seconds,
+            "processing_eta_seconds": eta_seconds,
+            "processing_last_updated_at": now_ts,
+        }
+    )
+    if extra_metadata:
+        metadata.update(extra_metadata)
+
+    record["metadata"] = metadata
+    await doc_status_storage.upsert({doc_id: record})
+
+
+async def _update_entity_extraction_pipeline_progress(
+    pipeline_status: dict | None,
+    pipeline_status_lock: asyncio.Lock | None,
+    *,
+    total_chunks: int,
+    processed_chunks: int,
+    stage: str,
+    stage_label: str,
+    latest_message: str | None = None,
+    append_history: bool = False,
+    extra_fields: dict[str, Any] | None = None,
+) -> None:
+    if pipeline_status is None or pipeline_status_lock is None:
+        return
+
+    now_ts = int(time.time())
+    async with pipeline_status_lock:
+        stage_started_at = pipeline_status.get("stage_started_at")
+        if pipeline_status.get("current_stage") != stage or not isinstance(
+            stage_started_at, int
+        ):
+            stage_started_at = now_ts
+            pipeline_status["stage_started_at"] = stage_started_at
+
+        total_items = max(int(total_chunks or 0), 0)
+        processed_items = max(int(processed_chunks or 0), 0)
+        if total_items > 0:
+            processed_items = min(processed_items, total_items)
+        remaining_items = max(total_items - processed_items, 0)
+        elapsed_seconds = max(now_ts - stage_started_at, 0)
+        eta_seconds: int | None = None
+        if 0 < processed_items < total_items:
+            eta_seconds = int(elapsed_seconds * remaining_items / processed_items)
+        elif total_items > 0 and processed_items >= total_items:
+            eta_seconds = 0
+
+        pipeline_status["total_chunks"] = max(
+            int(pipeline_status.get("total_chunks", 0) or 0), total_items
+        )
+        pipeline_status["processed_chunks"] = max(
+            int(pipeline_status.get("processed_chunks", 0) or 0), processed_items
+        )
+        pipeline_status["current_stage"] = stage
+        pipeline_status["current_stage_label"] = stage_label
+        pipeline_status["stage_unit"] = "chunks"
+        pipeline_status["stage_total"] = total_items
+        pipeline_status["stage_processed"] = processed_items
+        pipeline_status["stage_remaining"] = remaining_items
+        pipeline_status["stage_elapsed_seconds"] = elapsed_seconds
+        pipeline_status["stage_eta_seconds"] = eta_seconds
+        if extra_fields:
+            for key, value in extra_fields.items():
+                pipeline_status[key] = value
+        if latest_message:
+            pipeline_status["latest_message"] = latest_message
+            if append_history:
+                pipeline_status["history_messages"].append(latest_message)
+
+
+async def _extract_entities_via_openai_batch(
+    ordered_chunks: list[tuple[str, TextChunkSchema]],
+    context_base: dict[str, str],
+    global_config: dict[str, Any],
+    pipeline_status: dict | None = None,
+    pipeline_status_lock: asyncio.Lock | None = None,
+    llm_response_cache: BaseKVStorage | None = None,
+    text_chunks_storage: BaseKVStorage | None = None,
+    doc_status_storage: BaseKVStorage | None = None,
+) -> list[tuple[dict, dict]]:
+    total_chunks = len(ordered_chunks)
+    doc_id = next(
+        (
+            chunk_dp.get("full_doc_id")
+            for _, chunk_dp in ordered_chunks
+            if chunk_dp.get("full_doc_id")
+        ),
+        None,
+    )
+
+    batch_requests: list[OpenAIBatchRequest] = []
+    batch_contexts: dict[str, dict[str, Any]] = {}
+    cached_results: dict[str, tuple[dict, dict]] = {}
+
+    for chunk_key, chunk_dp in ordered_chunks:
+        content = chunk_dp["content"]
+        file_path = chunk_dp.get("file_path", "unknown_source")
+        (
+            entity_extraction_system_prompt,
+            entity_extraction_user_prompt,
+            _entity_continue_extraction_user_prompt,
+        ) = _build_entity_extraction_prompts(content, context_base)
+        cache_descriptor = _build_extract_cache_descriptor(
+            entity_extraction_user_prompt,
+            entity_extraction_system_prompt,
+        )
+
+        cached_result = None
+        if llm_response_cache is not None:
+            cached_result = await handle_cache(
+                llm_response_cache,
+                cache_descriptor["args_hash"],
+                cache_descriptor["prompt"],
+                "default",
+                cache_type="extract",
+            )
+
+        if cached_result:
+            result_text, timestamp = cached_result
+            maybe_nodes, maybe_edges = await _process_extraction_result(
+                result_text,
+                chunk_key,
+                timestamp,
+                file_path,
+                tuple_delimiter=context_base["tuple_delimiter"],
+                completion_delimiter=context_base["completion_delimiter"],
+            )
+            cached_results[chunk_key] = (maybe_nodes, maybe_edges)
+            if text_chunks_storage:
+                await update_chunk_cache_list(
+                    chunk_key,
+                    text_chunks_storage,
+                    [cache_descriptor["cache_key"]],
+                    "entity_extraction",
+                )
+            continue
+
+        batch_requests.append(
+            OpenAIBatchRequest(
+                custom_id=chunk_key,
+                body={
+                    "model": global_config.get("llm_model_name"),
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": entity_extraction_system_prompt,
+                        },
+                        {"role": "user", "content": entity_extraction_user_prompt},
+                    ],
+                    "stream": False,
+                    **dict(global_config.get("llm_openai_options") or {}),
+                },
+            )
+        )
+        batch_contexts[chunk_key] = {
+            "file_path": file_path,
+            "cache_descriptor": cache_descriptor,
+        }
+
+    processed_chunks = len(cached_results)
+    await _update_entity_extraction_pipeline_progress(
+        pipeline_status,
+        pipeline_status_lock,
+        total_chunks=total_chunks,
+        processed_chunks=processed_chunks,
+        stage="entity_extraction_batch",
+        stage_label="Batch extracting entities",
+        latest_message=(
+            f"Submitting entity extraction batch for {len(batch_requests)} chunk(s)"
+        ),
+        append_history=True,
+    )
+    await _update_doc_processing_progress(
+        doc_status_storage,
+        doc_id,
+        stage="entity_extraction_batch",
+        stage_label="Batch extracting entities",
+        processed=processed_chunks,
+        total=total_chunks,
+    )
+
+    async def _check_batch_cancellation() -> bool:
+        if pipeline_status is None or pipeline_status_lock is None:
+            return False
+        async with pipeline_status_lock:
+            return bool(pipeline_status.get("cancellation_requested", False))
+
+    async def _on_batch_status(status_payload: dict[str, Any]) -> None:
+        request_counts = dict(status_payload.get("request_counts") or {})
+        batch_completed = int(request_counts.get("completed", 0) or 0)
+        batch_message = (
+            f"Entity extraction batch {status_payload.get('batch_id')} "
+            f"status={status_payload.get('status')} "
+            f"completed={batch_completed}/{len(batch_requests)}"
+        )
+        extra_fields = {
+            "batch_job_id": status_payload.get("batch_id"),
+            "batch_job_status": status_payload.get("status"),
+        }
+        await _update_entity_extraction_pipeline_progress(
+            pipeline_status,
+            pipeline_status_lock,
+            total_chunks=total_chunks,
+            processed_chunks=processed_chunks + batch_completed,
+            stage="entity_extraction_batch",
+            stage_label="Batch extracting entities",
+            latest_message=batch_message,
+            append_history=True,
+            extra_fields=extra_fields,
+        )
+        await _update_doc_processing_progress(
+            doc_status_storage,
+            doc_id,
+            stage="entity_extraction_batch",
+            stage_label="Batch extracting entities",
+            processed=processed_chunks + batch_completed,
+            total=total_chunks,
+            extra_metadata=extra_fields,
+        )
+
+    batch_result = await run_openai_chat_batch(
+        batch_requests,
+        api_key=global_config.get("llm_binding_api_key"),
+        base_url=global_config.get("llm_binding_host"),
+        timeout=global_config.get("default_llm_timeout"),
+        poll_interval_seconds=max(
+            int(
+                global_config.get("entity_extraction_batch_poll_interval_seconds", 5)
+                or 5
+            ),
+            1,
+        ),
+        timeout_seconds=max(
+            int(
+                global_config.get("entity_extraction_batch_timeout_seconds", 3600)
+                or 3600
+            ),
+            1,
+        ),
+        metadata={
+            "workflow": "entity_extraction",
+            "doc_id": doc_id or "",
+            "chunks": len(batch_requests),
+        },
+        on_status=_on_batch_status,
+        should_cancel=_check_batch_cancellation,
+    )
+
+    output_by_chunk = {
+        line.get("custom_id"): line
+        for line in batch_result.output_lines
+        if isinstance(line, dict) and line.get("custom_id")
+    }
+    if len(output_by_chunk) != len(batch_requests):
+        raise RuntimeError(
+            f"Entity extraction batch returned {len(output_by_chunk)}/"
+            f"{len(batch_requests)} output rows"
+        )
+
+    results_by_chunk = dict(cached_results)
+    for chunk_key, chunk_dp in ordered_chunks:
+        if chunk_key in results_by_chunk:
+            continue
+
+        output_line = output_by_chunk.get(chunk_key)
+        if output_line is None:
+            raise RuntimeError(f"Missing batch output for chunk {chunk_key}")
+
+        result_text, failure_reason = _extract_result_text_from_batch_output(output_line)
+        if not result_text:
+            raise RuntimeError(
+                f"Batch output for chunk {chunk_key} was unusable: {failure_reason}"
+            )
+
+        timestamp = int(time.time())
+        context = batch_contexts[chunk_key]
+        cache_descriptor = context["cache_descriptor"]
+        if llm_response_cache and llm_response_cache.global_config.get(
+            "enable_llm_cache_for_entity_extract"
+        ):
+            await save_to_cache(
+                llm_response_cache,
+                CacheData(
+                    args_hash=cache_descriptor["args_hash"],
+                    content=result_text,
+                    prompt=cache_descriptor["prompt"],
+                    cache_type="extract",
+                    chunk_id=chunk_key,
+                ),
+            )
+        if text_chunks_storage:
+            await update_chunk_cache_list(
+                chunk_key,
+                text_chunks_storage,
+                [cache_descriptor["cache_key"]],
+                "entity_extraction",
+            )
+
+        maybe_nodes, maybe_edges = await _process_extraction_result(
+            result_text,
+            chunk_key,
+            timestamp,
+            chunk_dp.get("file_path", "unknown_source"),
+            tuple_delimiter=context_base["tuple_delimiter"],
+            completion_delimiter=context_base["completion_delimiter"],
+        )
+        results_by_chunk[chunk_key] = (maybe_nodes, maybe_edges)
+
+    return [results_by_chunk[chunk_key] for chunk_key, _ in ordered_chunks]
+
+
 async def extract_entities(
     chunks: dict[str, TextChunkSchema],
     global_config: dict[str, str],
@@ -3115,6 +3630,7 @@ async def extract_entities(
     pipeline_status_lock=None,
     llm_response_cache: BaseKVStorage | None = None,
     text_chunks_storage: BaseKVStorage | None = None,
+    doc_status_storage: BaseKVStorage | None = None,
 ) -> list:
     # Check for cancellation at the start of entity extraction
     if pipeline_status is not None and pipeline_status_lock is not None:
@@ -3128,33 +3644,107 @@ async def extract_entities(
     entity_extract_max_gleaning = global_config["entity_extract_max_gleaning"]
 
     ordered_chunks = list(chunks.items())
-    # add language and example number params to prompt
-    language = global_config["addon_params"].get("language", DEFAULT_SUMMARY_LANGUAGE)
-    entity_types = global_config["addon_params"].get(
-        "entity_types", DEFAULT_ENTITY_TYPES
+    total_chunks = len(ordered_chunks)
+    doc_id = next(
+        (
+            chunk_dp.get("full_doc_id")
+            for _, chunk_dp in ordered_chunks
+            if chunk_dp.get("full_doc_id")
+        ),
+        None,
     )
+    context_base = _build_entity_extraction_context_base(global_config)
 
-    examples = "\n".join(PROMPTS["entity_extraction_examples"])
-
-    example_context_base = dict(
-        tuple_delimiter=PROMPTS["DEFAULT_TUPLE_DELIMITER"],
-        completion_delimiter=PROMPTS["DEFAULT_COMPLETION_DELIMITER"],
-        entity_types=", ".join(entity_types),
-        language=language,
+    should_use_batch, batch_reason = _can_use_openai_batch_entity_extraction(
+        global_config, total_chunks
     )
-    # add example's format
-    examples = examples.format(**example_context_base)
-
-    context_base = dict(
-        tuple_delimiter=PROMPTS["DEFAULT_TUPLE_DELIMITER"],
-        completion_delimiter=PROMPTS["DEFAULT_COMPLETION_DELIMITER"],
-        entity_types=",".join(entity_types),
-        examples=examples,
-        language=language,
-    )
+    if should_use_batch:
+        logger.info("Entity extraction batch path enabled: %s", batch_reason)
+        try:
+            return await _extract_entities_via_openai_batch(
+                ordered_chunks,
+                context_base,
+                global_config,
+                pipeline_status=pipeline_status,
+                pipeline_status_lock=pipeline_status_lock,
+                llm_response_cache=llm_response_cache,
+                text_chunks_storage=text_chunks_storage,
+                doc_status_storage=doc_status_storage,
+            )
+        except asyncio.CancelledError as exc:
+            raise PipelineCancelledException(
+                "User cancelled during batch entity extraction"
+            ) from exc
+        except Exception as exc:
+            fallback_enabled = bool(
+                global_config.get("entity_extraction_batch_fallback_to_realtime", True)
+            )
+            if not fallback_enabled:
+                raise
+            logger.warning(
+                "Entity extraction batch path failed (%s). Falling back to realtime: %s",
+                batch_reason,
+                exc,
+            )
+            await _update_entity_extraction_pipeline_progress(
+                pipeline_status,
+                pipeline_status_lock,
+                total_chunks=total_chunks,
+                processed_chunks=int(
+                    (pipeline_status or {}).get("processed_chunks", 0) or 0
+                ),
+                stage="entity_extraction_fallback",
+                stage_label="Fallback realtime entity extraction",
+                latest_message=(
+                    "Batch entity extraction failed, falling back to realtime: "
+                    f"{exc}"
+                ),
+                append_history=True,
+            )
+            await _update_doc_processing_progress(
+                doc_status_storage,
+                doc_id,
+                stage="entity_extraction_fallback",
+                stage_label="Fallback realtime entity extraction",
+                processed=int((pipeline_status or {}).get("processed_chunks", 0) or 0),
+                total=total_chunks,
+            )
 
     processed_chunks = 0
-    total_chunks = len(ordered_chunks)
+    await _update_entity_extraction_pipeline_progress(
+        pipeline_status,
+        pipeline_status_lock,
+        total_chunks=total_chunks,
+        processed_chunks=0,
+        stage=(
+            "entity_extraction_fallback"
+            if should_use_batch
+            else "entity_extraction_realtime"
+        ),
+        stage_label=(
+            "Fallback realtime entity extraction"
+            if should_use_batch
+            else "Extracting entities"
+        ),
+        latest_message=f"Starting entity extraction for {total_chunks} chunk(s)",
+        append_history=True,
+    )
+    await _update_doc_processing_progress(
+        doc_status_storage,
+        doc_id,
+        stage=(
+            "entity_extraction_fallback"
+            if should_use_batch
+            else "entity_extraction_realtime"
+        ),
+        stage_label=(
+            "Fallback realtime entity extraction"
+            if should_use_batch
+            else "Extracting entities"
+        ),
+        processed=0,
+        total=total_chunks,
+    )
 
     async def _process_single_content(chunk_key_dp: tuple[str, TextChunkSchema]):
         """Process a single chunk
@@ -3174,18 +3764,11 @@ async def extract_entities(
         # Create cache keys collector for batch processing
         cache_keys_collector = []
 
-        # Get initial extraction
-        # Format system prompt without input_text for each chunk (enables OpenAI prompt caching across chunks)
-        entity_extraction_system_prompt = PROMPTS[
-            "entity_extraction_system_prompt"
-        ].format(**context_base)
-        # Format user prompts with input_text for each chunk
-        entity_extraction_user_prompt = PROMPTS["entity_extraction_user_prompt"].format(
-            **{**context_base, "input_text": content}
-        )
-        entity_continue_extraction_user_prompt = PROMPTS[
-            "entity_continue_extraction_user_prompt"
-        ].format(**{**context_base, "input_text": content})
+        (
+            entity_extraction_system_prompt,
+            entity_extraction_user_prompt,
+            entity_continue_extraction_user_prompt,
+        ) = _build_entity_extraction_prompts(content, context_base)
 
         final_result, timestamp = await use_llm_func_with_cache(
             entity_extraction_user_prompt,
@@ -3307,12 +3890,39 @@ async def extract_entities(
         processed_chunks += 1
         entities_count = len(maybe_nodes)
         relations_count = len(maybe_edges)
-        log_message = f"Chunk {processed_chunks} of {total_chunks} extracted {entities_count} Ent + {relations_count} Rel {chunk_key}"
+        log_message = (
+            f"Chunk {processed_chunks} of {total_chunks} extracted "
+            f"{entities_count} Ent + {relations_count} Rel {chunk_key}"
+        )
         logger.info(log_message)
-        if pipeline_status is not None:
-            async with pipeline_status_lock:
-                pipeline_status["latest_message"] = log_message
-                pipeline_status["history_messages"].append(log_message)
+        stage_name = (
+            "entity_extraction_fallback"
+            if should_use_batch
+            else "entity_extraction_realtime"
+        )
+        stage_label = (
+            "Fallback realtime entity extraction"
+            if should_use_batch
+            else "Extracting entities"
+        )
+        await _update_entity_extraction_pipeline_progress(
+            pipeline_status,
+            pipeline_status_lock,
+            total_chunks=total_chunks,
+            processed_chunks=processed_chunks,
+            stage=stage_name,
+            stage_label=stage_label,
+            latest_message=log_message,
+            append_history=True,
+        )
+        await _update_doc_processing_progress(
+            doc_status_storage,
+            doc_id,
+            stage=stage_name,
+            stage_label=stage_label,
+            processed=processed_chunks,
+            total=total_chunks,
+        )
 
         # Return the extracted nodes and edges for centralized processing
         return maybe_nodes, maybe_edges

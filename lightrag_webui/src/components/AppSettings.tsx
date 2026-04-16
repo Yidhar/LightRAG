@@ -14,6 +14,19 @@ interface AppSettingsProps {
 export default function AppSettings({ className }: AppSettingsProps) {
   const [opened, setOpened] = useState<boolean>(false)
   const { t } = useTranslation()
+  const languageOptions = [
+    { value: 'en', labelKey: 'settings.languages.en' },
+    { value: 'zh', labelKey: 'settings.languages.zh' },
+    { value: 'fr', labelKey: 'settings.languages.fr' },
+    { value: 'ar', labelKey: 'settings.languages.ar' },
+    { value: 'zh_TW', labelKey: 'settings.languages.zh_TW' },
+    { value: 'ru', labelKey: 'settings.languages.ru' },
+    { value: 'ja', labelKey: 'settings.languages.ja' },
+    { value: 'de', labelKey: 'settings.languages.de' },
+    { value: 'uk', labelKey: 'settings.languages.uk' },
+    { value: 'ko', labelKey: 'settings.languages.ko' },
+    { value: 'vi', labelKey: 'settings.languages.vi' },
+  ] as const
 
   const language = useSettingsStore.use.language()
   const setLanguage = useSettingsStore.use.setLanguage()
@@ -45,17 +58,11 @@ export default function AppSettings({ className }: AppSettingsProps) {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="en">English</SelectItem>
-                <SelectItem value="zh">中文</SelectItem>
-                <SelectItem value="fr">Français</SelectItem>
-                <SelectItem value="ar">العربية</SelectItem>
-                <SelectItem value="zh_TW">繁體中文</SelectItem>
-                <SelectItem value="ru">Русский</SelectItem>
-                <SelectItem value="ja">日本語</SelectItem>
-                <SelectItem value="de">Deutsch</SelectItem>
-                <SelectItem value="uk">Українська</SelectItem>
-                <SelectItem value="ko">한국어</SelectItem>
-                <SelectItem value="vi">Tiếng Việt</SelectItem>
+                {languageOptions.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {t(option.labelKey)}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
           </div>

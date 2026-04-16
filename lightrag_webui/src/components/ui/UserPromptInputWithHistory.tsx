@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { ChevronDown, X } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import Input from './Input'
 
@@ -24,6 +25,7 @@ export default function UserPromptInputWithHistory({
   onSelectFromHistory,
   onDeleteFromHistory
 }: UserPromptInputWithHistoryProps) {
+  const { t } = useTranslation()
   const [isOpen, setIsOpen] = useState(false)
   const [selectedIndex, setSelectedIndex] = useState(-1)
   const [isHovered, setIsHovered] = useState(false)
@@ -189,7 +191,7 @@ export default function UserPromptInputWithHistory({
                   type="button"
                   onClick={(e) => handleDeleteHistoryItem(index, e)}
                   className="flex-shrink-0 p-0 rounded hover:bg-red-100 dark:hover:bg-red-900 transition-colors focus:outline-none ml-auto"
-                  title="Delete this history item"
+                  title={t('promptInput.deleteHistoryItem')}
                 >
                   <X className="h-3 w-3 text-gray-400 hover:text-red-500" />
                 </button>

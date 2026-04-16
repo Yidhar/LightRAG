@@ -106,7 +106,6 @@ export const supportedFileTypesDescription = `Supported types: ${supportedFileEx
   .join(', ')}`
 
 export const SiteInfo = {
-  name: 'LightRAG',
   home: '/',
   github: 'https://github.com/HKUDS/LightRAG'
 }

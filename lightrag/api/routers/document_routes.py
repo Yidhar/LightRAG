@@ -21,11 +21,18 @@ from fastapi import (
     Depends,
     File,
     HTTPException,
+    Request,
     UploadFile,
 )
+from fastapi.params import Depends as DependsParameter
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from lightrag import LightRAG
+from lightrag.api.dependencies import (
+    compose_runtime_workspace,
+    get_current_rag,
+    get_request_context,
+)
 from lightrag.base import DeletionResult, DocProcessingStatus, DocStatus
 from lightrag.lightrag import _build_multimodal_rebuild_status_record
 from lightrag.utils import (
@@ -33,7 +40,7 @@ from lightrag.utils import (
     compute_mdhash_id,
     sanitize_text_for_encoding,
 )
-from lightrag.api.utils_api import get_combined_auth_dependency
+from lightrag.api.permissions import Action, require_permission
 from ..config import global_args
 
 
@@ -1035,6 +1042,16 @@ class PipelineStatusResponse(BaseModel):
     docs: int = 0
     batchs: int = 0
     cur_batch: int = 0
+    total_chunks: int = 0
+    processed_chunks: int = 0
+    current_stage: str = ""
+    current_stage_label: str = ""
+    stage_unit: str = ""
+    stage_total: int = 0
+    stage_processed: int = 0
+    stage_remaining: int = 0
+    stage_elapsed_seconds: int = 0
+    stage_eta_seconds: int | None = None
     request_pending: bool = False
     latest_message: str = ""
     history_messages: Optional[List[str]] = None
@@ -1919,6 +1936,34 @@ def _format_mode_counts(counts: dict[str, int]) -> str:
         return "none"
     return ", ".join(f"{mode}={count}" for mode, count in sorted(counts.items()))
 
+
+def _resolve_multimodal_max_images(
+    scanned_page_count: int,
+    requested_max_images: int | None,
+) -> int:
+    """Resolve the effective multimodal image cap for one conversion run.
+
+    Small/medium documents should keep a conservative cap so captioning and
+    embedding cost remain bounded. Large engineering PDFs, however, routinely
+    contain hundreds of genuine embedded images. For those, a fixed 256-image
+    cap truncates too aggressively and causes recall failures on later pages.
+    """
+    if requested_max_images is not None:
+        try:
+            normalized = int(requested_max_images)
+        except (TypeError, ValueError):
+            normalized = 0
+        if normalized > 0:
+            return normalized
+
+    if scanned_page_count >= 400:
+        return 1024
+    if scanned_page_count >= 240:
+        return 768
+    if scanned_page_count >= 120:
+        return 512
+    return 256
+
 def _build_page_context_excerpt(
     pages_text: list[str],
     page_index: int,
@@ -2315,7 +2360,7 @@ def _extract_docling_picture_candidates(
 def _convert_with_docling_multimodal(
     file_path: Path,
     page_range: tuple[int, int] | None = None,
-    max_images: int = 256,
+    max_images: int | None = None,
     raster_dpi: int = 144,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Extract PDF text plus multimodal figures with source-page/bbox fidelity.
@@ -2384,6 +2429,17 @@ def _convert_with_docling_multimodal(
 
     if not pages_text and page_sizes:
         pages_text = [""] * len(page_sizes)
+
+    scanned_page_count = max(len(pages_text), len(page_sizes))
+    effective_max_images = _resolve_multimodal_max_images(
+        scanned_page_count,
+        max_images,
+    )
+    if effective_max_images != (max_images or 256):
+        logger.info(
+            f"[multimodal] {file_path.name}: auto-expanded image cap "
+            f"to {effective_max_images} for {scanned_page_count} scanned pages"
+        )
 
     full_text = "\n".join(pages_text)
 
@@ -2499,7 +2555,9 @@ def _convert_with_docling_multimodal(
     )
 
     page_raster_candidates: list[dict[str, Any]] = []
-    max_page_raster_fallbacks = max(8, min(48, max_images // 3 if max_images > 0 else 16))
+    max_page_raster_fallbacks = max(
+        8, min(48, effective_max_images // 3 if effective_max_images > 0 else 16)
+    )
     try:
         if fitz_doc is None:
             import fitz  # type: ignore
@@ -2593,7 +2651,7 @@ def _convert_with_docling_multimodal(
 
     raw_mode_counts.update(_count_candidates_by_mode(page_raster_candidates))
     extracted = [*precise_candidates, *page_raster_candidates]
-    if len(extracted) > max_images:
+    if len(extracted) > effective_max_images:
         extraction_truncated = True
         extracted.sort(
             key=lambda item: (
@@ -2603,12 +2661,12 @@ def _convert_with_docling_multimodal(
                 item.get("page_no") if item.get("page_no") is not None else 10**9,
             )
         )
-        extracted = extracted[:max_images]
+        extracted = extracted[:effective_max_images]
 
     if extraction_truncated:
         logger.warning(
             f"[multimodal] {file_path.name}: image extraction hit max_images="
-            f"{max_images}. Some PDF figures may not have been extracted."
+            f"{effective_max_images}. Some PDF figures may not have been extracted."
         )
 
     extracted.sort(
@@ -3815,6 +3873,16 @@ async def background_delete_documents(
                 "docs": total_docs,
                 "batchs": total_docs,
                 "cur_batch": 0,
+                "total_chunks": 0,
+                "processed_chunks": 0,
+                "current_stage": "document_deletion",
+                "current_stage_label": "Deleting documents",
+                "stage_unit": "documents",
+                "stage_total": total_docs,
+                "stage_processed": 0,
+                "stage_remaining": total_docs,
+                "stage_elapsed_seconds": 0,
+                "stage_eta_seconds": None,
                 "latest_message": "Starting document deletion process",
             }
         )
@@ -4042,15 +4110,86 @@ async def background_delete_documents(
 
 
 def create_document_routes(
-    rag: LightRAG, doc_manager: DocumentManager, api_key: Optional[str] = None
+    rag: LightRAG | None = None,
+    doc_manager: DocumentManager | None = None,
+    api_key: Optional[str] = None,
 ):
-    # Create combined auth dependency for document routes
-    combined_auth = get_combined_auth_dependency(api_key)
+    document_view_permission = require_permission(Action.KB_VIEW, api_key)
+    document_upload_permission = require_permission(Action.KB_UPLOAD_DOCUMENT, api_key)
+    document_delete_permission = require_permission(Action.KB_DELETE_DOCUMENT, api_key)
+    graph_edit_permission = require_permission(Action.KB_EDIT_GRAPH, api_key)
+    settings_permission = require_permission(Action.KB_MANAGE_SETTINGS, api_key)
+
+    async def resolve_route_rag(request: Request) -> LightRAG:
+        if rag is not None:
+            return rag
+        return await get_current_rag(request)
+
+    async def resolve_route_doc_manager(
+        request: Request,
+        active_rag: LightRAG = Depends(resolve_route_rag),
+    ) -> DocumentManager:
+        if doc_manager is not None:
+            return doc_manager
+
+        state = request.app.state
+        default_doc_manager = getattr(state, "default_doc_manager", None)
+        if not getattr(state, "enable_kb_isolation", False):
+            if default_doc_manager is not None:
+                return default_doc_manager
+
+            base_input_dir = getattr(state, "doc_manager_base_input_dir", "./inputs")
+            workspace = getattr(
+                state,
+                "default_runtime_workspace",
+                getattr(active_rag, "workspace", None),
+            )
+            return DocumentManager(base_input_dir, workspace=workspace)
+
+        request_context = get_request_context(request)
+        workspace_id = request_context.workspace_id or getattr(
+            state, "default_workspace_id", "default"
+        )
+        kb_id = request_context.kb_id or getattr(state, "default_kb_id", "default")
+        runtime_workspace = compose_runtime_workspace(state, workspace_id, kb_id)
+        cache = getattr(state, "doc_manager_cache", None)
+        if cache is None:
+            cache = {}
+            state.doc_manager_cache = cache
+
+        manager = cache.get(runtime_workspace)
+        if manager is None:
+            base_input_dir = getattr(state, "doc_manager_base_input_dir", "./inputs")
+            manager = DocumentManager(base_input_dir, workspace=runtime_workspace)
+            cache[runtime_workspace] = manager
+        return manager
+
+    def _resolve_active_rag(active_rag: Any) -> LightRAG:
+        if isinstance(active_rag, DependsParameter):
+            if rag is None:
+                raise RuntimeError("Direct route call requires an explicit LightRAG.")
+            return rag
+        return active_rag
+
+    def _resolve_active_doc_manager(active_doc_manager: Any) -> DocumentManager:
+        if isinstance(active_doc_manager, DependsParameter):
+            if doc_manager is None:
+                raise RuntimeError(
+                    "Direct route call requires an explicit DocumentManager."
+                )
+            return doc_manager
+        return active_doc_manager
 
     @router.post(
-        "/scan", response_model=ScanResponse, dependencies=[Depends(combined_auth)]
+        "/scan",
+        response_model=ScanResponse,
+        dependencies=[Depends(document_upload_permission)],
     )
-    async def scan_for_new_documents(background_tasks: BackgroundTasks):
+    async def scan_for_new_documents(
+        background_tasks: BackgroundTasks,
+        active_rag: LightRAG = Depends(resolve_route_rag),
+        active_doc_manager: DocumentManager = Depends(resolve_route_doc_manager),
+    ):
         """
         Trigger the scanning process for new documents.
 
@@ -4061,6 +4200,8 @@ def create_document_routes(
         Returns:
             ScanResponse: A response object containing the scanning status and track_id
         """
+        rag = _resolve_active_rag(active_rag)
+        doc_manager = _resolve_active_doc_manager(active_doc_manager)
         # Generate track_id with "scan" prefix for scanning operation
         track_id = generate_track_id("scan")
 
@@ -4073,10 +4214,15 @@ def create_document_routes(
         )
 
     @router.post(
-        "/upload", response_model=InsertResponse, dependencies=[Depends(combined_auth)]
+        "/upload",
+        response_model=InsertResponse,
+        dependencies=[Depends(document_upload_permission)],
     )
     async def upload_to_input_dir(
-        background_tasks: BackgroundTasks, file: UploadFile = File(...)
+        background_tasks: BackgroundTasks,
+        file: UploadFile = File(...),
+        active_rag: LightRAG = Depends(resolve_route_rag),
+        active_doc_manager: DocumentManager = Depends(resolve_route_doc_manager),
     ):
         """
         Upload a file to the input directory and index it.
@@ -4132,6 +4278,8 @@ def create_document_routes(
         Raises:
             HTTPException: If the file type is not supported (400), file too large (413), or other errors occur (500).
         """
+        rag = _resolve_active_rag(active_rag)
+        doc_manager = _resolve_active_doc_manager(active_doc_manager)
         try:
             # Sanitize filename to prevent Path Traversal attacks
             safe_filename = sanitize_filename(file.filename, doc_manager.input_dir)
@@ -4353,10 +4501,14 @@ def create_document_routes(
             raise HTTPException(status_code=500, detail=str(e))
 
     @router.post(
-        "/text", response_model=InsertResponse, dependencies=[Depends(combined_auth)]
+        "/text",
+        response_model=InsertResponse,
+        dependencies=[Depends(document_upload_permission)],
     )
     async def insert_text(
-        request: InsertTextRequest, background_tasks: BackgroundTasks
+        request: InsertTextRequest,
+        background_tasks: BackgroundTasks,
+        active_rag: LightRAG = Depends(resolve_route_rag),
     ):
         """
         Insert text into the RAG system.
@@ -4374,6 +4526,7 @@ def create_document_routes(
         Raises:
             HTTPException: If an error occurs during text processing (500).
         """
+        rag = _resolve_active_rag(active_rag)
         try:
             # Check if file_source already exists in doc_status storage
             if (
@@ -4433,10 +4586,12 @@ def create_document_routes(
     @router.post(
         "/texts",
         response_model=InsertResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(document_upload_permission)],
     )
     async def insert_texts(
-        request: InsertTextsRequest, background_tasks: BackgroundTasks
+        request: InsertTextsRequest,
+        background_tasks: BackgroundTasks,
+        active_rag: LightRAG = Depends(resolve_route_rag),
     ):
         """
         Insert multiple texts into the RAG system.
@@ -4454,6 +4609,7 @@ def create_document_routes(
         Raises:
             HTTPException: If an error occurs during text processing (500).
         """
+        rag = _resolve_active_rag(active_rag)
         try:
             # Check if any file_sources already exist in doc_status storage
             if request.file_sources:
@@ -4514,9 +4670,14 @@ def create_document_routes(
             raise HTTPException(status_code=500, detail=str(e))
 
     @router.delete(
-        "", response_model=ClearDocumentsResponse, dependencies=[Depends(combined_auth)]
+        "",
+        response_model=ClearDocumentsResponse,
+        dependencies=[Depends(document_delete_permission)],
     )
-    async def clear_documents():
+    async def clear_documents(
+        active_rag: LightRAG = Depends(resolve_route_rag),
+        active_doc_manager: DocumentManager = Depends(resolve_route_doc_manager),
+    ):
         """
         Clear all documents from the RAG system.
 
@@ -4537,6 +4698,8 @@ def create_document_routes(
             HTTPException: Raised when a serious error occurs during the clearing process,
                           with status code 500 and error details in the detail field.
         """
+        rag = _resolve_active_rag(active_rag)
+        doc_manager = _resolve_active_doc_manager(active_doc_manager)
         from lightrag.kg.shared_storage import (
             get_namespace_data,
             get_namespace_lock,
@@ -4566,6 +4729,16 @@ def create_document_routes(
                     "docs": 0,
                     "batchs": 0,
                     "cur_batch": 0,
+                    "total_chunks": 0,
+                    "processed_chunks": 0,
+                    "current_stage": "clear_documents",
+                    "current_stage_label": "Clearing documents and storage",
+                    "stage_unit": "",
+                    "stage_total": 0,
+                    "stage_processed": 0,
+                    "stage_remaining": 0,
+                    "stage_elapsed_seconds": 0,
+                    "stage_eta_seconds": None,
                     "request_pending": False,  # Clear any previous request
                     "latest_message": "Starting document clearing process",
                 }
@@ -4709,10 +4882,12 @@ def create_document_routes(
 
     @router.get(
         "/pipeline_status",
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(document_view_permission)],
         response_model=PipelineStatusResponse,
     )
-    async def get_pipeline_status() -> PipelineStatusResponse:
+    async def get_pipeline_status(
+        active_rag: LightRAG = Depends(resolve_route_rag),
+    ) -> PipelineStatusResponse:
         """
         Get the current status of the document indexing pipeline.
 
@@ -4736,6 +4911,7 @@ def create_document_routes(
         Raises:
             HTTPException: If an error occurs while retrieving pipeline status (500)
         """
+        rag = _resolve_active_rag(active_rag)
         try:
             from lightrag.kg.shared_storage import (
                 get_namespace_data,
@@ -4809,9 +4985,13 @@ def create_document_routes(
 
     # TODO: Deprecated, use /documents/paginated instead
     @router.get(
-        "", response_model=DocsStatusesResponse, dependencies=[Depends(combined_auth)]
+        "",
+        response_model=DocsStatusesResponse,
+        dependencies=[Depends(document_view_permission)],
     )
-    async def documents() -> DocsStatusesResponse:
+    async def documents(
+        active_rag: LightRAG = Depends(resolve_route_rag),
+    ) -> DocsStatusesResponse:
         """
         Get the status of all documents in the system. This endpoint is deprecated; use /documents/paginated instead.
         To prevent excessive resource consumption, a maximum of 1,000 records is returned.
@@ -4829,6 +5009,7 @@ def create_document_routes(
         Raises:
             HTTPException: If an error occurs while retrieving document statuses (500).
         """
+        rag = _resolve_active_rag(active_rag)
         try:
             statuses = (
                 DocStatus.PENDING,
@@ -4921,12 +5102,14 @@ def create_document_routes(
     @router.delete(
         "/delete_document",
         response_model=DeleteDocByIdResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(document_delete_permission)],
         summary="Delete a document and all its associated data by its ID.",
     )
     async def delete_document(
         delete_request: DeleteDocRequest,
         background_tasks: BackgroundTasks,
+        active_rag: LightRAG = Depends(resolve_route_rag),
+        active_doc_manager: DocumentManager = Depends(resolve_route_doc_manager),
     ) -> DeleteDocByIdResponse:
         """
         Delete documents and all their associated data by their IDs using background processing.
@@ -4951,6 +5134,8 @@ def create_document_routes(
             HTTPException:
               - 500: If an unexpected internal error occurs during initialization.
         """
+        rag = _resolve_active_rag(active_rag)
+        doc_manager = _resolve_active_doc_manager(active_doc_manager)
         doc_ids = delete_request.doc_ids
 
         try:
@@ -5000,9 +5185,12 @@ def create_document_routes(
     @router.post(
         "/clear_cache",
         response_model=ClearCacheResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(settings_permission)],
     )
-    async def clear_cache(request: ClearCacheRequest):
+    async def clear_cache(
+        request: ClearCacheRequest,
+        active_rag: LightRAG = Depends(resolve_route_rag),
+    ):
         """
         Clear all cache data from the LLM response cache storage.
 
@@ -5018,6 +5206,7 @@ def create_document_routes(
         Raises:
             HTTPException: If an error occurs during cache clearing (500).
         """
+        rag = _resolve_active_rag(active_rag)
         try:
             # Call the aclear_cache method (no modes parameter)
             await rag.aclear_cache()
@@ -5034,9 +5223,12 @@ def create_document_routes(
     @router.delete(
         "/delete_entity",
         response_model=DeletionResult,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(graph_edit_permission)],
     )
-    async def delete_entity(request: DeleteEntityRequest):
+    async def delete_entity(
+        request: DeleteEntityRequest,
+        active_rag: LightRAG = Depends(resolve_route_rag),
+    ):
         """
         Delete an entity and all its relationships from the knowledge graph.
 
@@ -5049,6 +5241,7 @@ def create_document_routes(
         Raises:
             HTTPException: If the entity is not found (404) or an error occurs (500).
         """
+        rag = _resolve_active_rag(active_rag)
         try:
             result = await rag.adelete_by_entity(entity_name=request.entity_name)
             if result.status == "not_found":
@@ -5069,9 +5262,12 @@ def create_document_routes(
     @router.delete(
         "/delete_relation",
         response_model=DeletionResult,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(graph_edit_permission)],
     )
-    async def delete_relation(request: DeleteRelationRequest):
+    async def delete_relation(
+        request: DeleteRelationRequest,
+        active_rag: LightRAG = Depends(resolve_route_rag),
+    ):
         """
         Delete a relationship between two entities from the knowledge graph.
 
@@ -5084,6 +5280,7 @@ def create_document_routes(
         Raises:
             HTTPException: If the relation is not found (404) or an error occurs (500).
         """
+        rag = _resolve_active_rag(active_rag)
         try:
             result = await rag.adelete_by_relation(
                 source_entity=request.source_entity,
@@ -5107,9 +5304,12 @@ def create_document_routes(
     @router.get(
         "/track_status/{track_id}",
         response_model=TrackStatusResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(document_view_permission)],
     )
-    async def get_track_status(track_id: str) -> TrackStatusResponse:
+    async def get_track_status(
+        track_id: str,
+        active_rag: LightRAG = Depends(resolve_route_rag),
+    ) -> TrackStatusResponse:
         """
         Get the processing status of documents by tracking ID.
 
@@ -5128,6 +5328,7 @@ def create_document_routes(
         Raises:
             HTTPException: If track_id is invalid (400) or an error occurs (500).
         """
+        rag = _resolve_active_rag(active_rag)
         try:
             # Validate track_id
             if not track_id or not track_id.strip():
@@ -5180,9 +5381,12 @@ def create_document_routes(
 
     @router.get(
         "/{doc_id}/images",
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(document_view_permission)],
     )
-    async def get_document_images(doc_id: str) -> dict[str, Any]:
+    async def get_document_images(
+        doc_id: str,
+        active_rag: LightRAG = Depends(resolve_route_rag),
+    ) -> dict[str, Any]:
         """List the image blob_ids associated with a document.
 
         Reads the reverse index that ``ainsert_image`` writes to
@@ -5204,6 +5408,7 @@ def create_document_routes(
                 - modality: "image" / "mixed" / "text" from doc_status metadata
                 - source_kind: origin hint (direct_image_upload, pdf_extracted, ...)
         """
+        rag = _resolve_active_rag(active_rag)
         if rag.image_metadata is None:
             raise HTTPException(
                 status_code=404,
@@ -5240,14 +5445,18 @@ def create_document_routes(
     @router.post(
         "/{doc_id}/rebuild_multimodal",
         response_model=RebuildMultimodalResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(document_upload_permission)],
     )
     async def rebuild_document_multimodal(
         doc_id: str,
         request: RebuildMultimodalRequest,
         background_tasks: BackgroundTasks,
+        active_rag: LightRAG = Depends(resolve_route_rag),
+        active_doc_manager: DocumentManager = Depends(resolve_route_doc_manager),
     ) -> RebuildMultimodalResponse:
         """Rebuild multimodal assets for one previously uploaded PDF document."""
+        rag = _resolve_active_rag(active_rag)
+        doc_manager = _resolve_active_doc_manager(active_doc_manager)
         if (
             rag.image_embedding_func is None
             or rag.images_vdb is None
@@ -5320,10 +5529,11 @@ def create_document_routes(
     @router.post(
         "/paginated",
         response_model=PaginatedDocsResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(document_view_permission)],
     )
     async def get_documents_paginated(
         request: DocumentsRequest,
+        active_rag: LightRAG = Depends(resolve_route_rag),
     ) -> PaginatedDocsResponse:
         """
         Get documents with pagination support.
@@ -5344,6 +5554,7 @@ def create_document_routes(
         Raises:
             HTTPException: If an error occurs while retrieving documents (500).
         """
+        rag = _resolve_active_rag(active_rag)
         trace_id = uuid4().hex[:8]
         request_start = time.perf_counter()
         status_filter_value = (
@@ -5499,9 +5710,11 @@ def create_document_routes(
     @router.get(
         "/status_counts",
         response_model=StatusCountsResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(document_view_permission)],
     )
-    async def get_document_status_counts() -> StatusCountsResponse:
+    async def get_document_status_counts(
+        active_rag: LightRAG = Depends(resolve_route_rag),
+    ) -> StatusCountsResponse:
         """
         Get counts of documents by status.
 
@@ -5514,6 +5727,7 @@ def create_document_routes(
         Raises:
             HTTPException: If an error occurs while retrieving status counts (500).
         """
+        rag = _resolve_active_rag(active_rag)
         try:
             status_counts = await rag.doc_status.get_all_status_counts()
             return StatusCountsResponse(status_counts=status_counts)
@@ -5526,9 +5740,12 @@ def create_document_routes(
     @router.post(
         "/reprocess_failed",
         response_model=ReprocessResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(document_upload_permission)],
     )
-    async def reprocess_failed_documents(background_tasks: BackgroundTasks):
+    async def reprocess_failed_documents(
+        background_tasks: BackgroundTasks,
+        active_rag: LightRAG = Depends(resolve_route_rag),
+    ):
         """
         Reprocess failed and pending documents.
 
@@ -5553,6 +5770,7 @@ def create_document_routes(
         Raises:
             HTTPException: If an error occurs while initiating reprocessing (500).
         """
+        rag = _resolve_active_rag(active_rag)
         try:
             # Start the reprocessing in the background
             # Note: Reprocessed documents retain their original track_id from initial upload
@@ -5572,9 +5790,11 @@ def create_document_routes(
     @router.post(
         "/cancel_pipeline",
         response_model=CancelPipelineResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(settings_permission)],
     )
-    async def cancel_pipeline():
+    async def cancel_pipeline(
+        active_rag: LightRAG = Depends(resolve_route_rag),
+    ):
         """
         Request cancellation of the currently running pipeline.
 
@@ -5595,6 +5815,7 @@ def create_document_routes(
         Raises:
             HTTPException: If an error occurs while setting cancellation flag (500).
         """
+        rag = _resolve_active_rag(active_rag)
         try:
             from lightrag.kg.shared_storage import (
                 get_namespace_data,

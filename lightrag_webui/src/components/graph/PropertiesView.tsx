@@ -1,9 +1,13 @@
 import { useMemo } from 'react'
 import { useGraphStore, RawNodeType, RawEdgeType } from '@/stores/graph'
+import { useAuthStore } from '@/stores/state'
+import { hasPermission, resolveEffectiveRole } from '@/lib/permissions'
+import { resolveKnowledgeBaseId, resolveWorkspaceId } from '@/app/routeHelpers'
 import Text from '@/components/ui/Text'
 import Button from '@/components/ui/Button'
 import useLightragGraph from '@/hooks/useLightragGraph'
 import { useTranslation } from 'react-i18next'
+import { useParams } from 'react-router-dom'
 import { GitBranchPlus, Scissors } from 'lucide-react'
 import EditablePropertyRow from './EditablePropertyRow'
 
@@ -12,11 +16,20 @@ import EditablePropertyRow from './EditablePropertyRow'
  */
 const PropertiesView = () => {
   const { getNode, getEdge } = useLightragGraph()
+  const { role, memberships } = useAuthStore()
+  const { workspaceId, kbId } = useParams()
   const selectedNode = useGraphStore.use.selectedNode()
   const focusedNode = useGraphStore.use.focusedNode()
   const selectedEdge = useGraphStore.use.selectedEdge()
   const focusedEdge = useGraphStore.use.focusedEdge()
   const graphDataVersion = useGraphStore.use.graphDataVersion()
+  const currentWorkspaceId = resolveWorkspaceId(workspaceId)
+  const currentKnowledgeBaseId = resolveKnowledgeBaseId(kbId)
+  const effectiveRole = resolveEffectiveRole(
+    { role, memberships },
+    { workspaceId: currentWorkspaceId, kbId: currentKnowledgeBaseId }
+  )
+  const canEditGraph = hasPermission(effectiveRole, 'kb:edit_graph')
 
   const { currentElement, currentType } = useMemo(() => {
     let type: 'node' | 'edge' | null = null
@@ -52,10 +65,15 @@ const PropertiesView = () => {
   }
   return (
     <div className="bg-background/80 max-w-xs rounded-lg border-2 p-2 text-xs backdrop-blur-lg">
+      {!canEditGraph && (
+        <div className="mb-2 rounded-md border border-dashed border-border/70 bg-muted/20 px-2 py-1.5 text-[11px] text-muted-foreground">
+          Graph property editing is read-only for the current KB role.
+        </div>
+      )}
       {currentType == 'node' ? (
-        <NodePropertiesView node={currentElement as any} />
+        <NodePropertiesView node={currentElement as any} canEditGraph={canEditGraph} />
       ) : (
-        <EdgePropertiesView edge={currentElement as any} />
+        <EdgePropertiesView edge={currentElement as any} canEditGraph={canEditGraph} />
       )}
     </div>
   )
@@ -169,6 +187,7 @@ const PropertyRow = ({
   sourceId,
   targetId,
   isEditable = false,
+  editingEnabled = true,
   truncate
 }: {
   name: string
@@ -183,6 +202,7 @@ const PropertyRow = ({
   sourceId?: string
   targetId?: string
   isEditable?: boolean
+  editingEnabled?: boolean
   truncate?: string
 }) => {
   const { t } = useTranslation()
@@ -211,7 +231,11 @@ const PropertyRow = ({
   }
 
   // Use EditablePropertyRow for editable fields (description, entity_id and entity_type)
-  if (isEditable && (name === 'description' || name === 'entity_id' || name === 'entity_type'  || name === 'keywords')) {
+  if (
+    isEditable &&
+    editingEnabled &&
+    (name === 'description' || name === 'entity_id' || name === 'entity_type'  || name === 'keywords')
+  ) {
     return (
       <EditablePropertyRow
         name={name}
@@ -249,7 +273,7 @@ const PropertyRow = ({
   )
 }
 
-const NodePropertiesView = ({ node }: { node: NodeType }) => {
+const NodePropertiesView = ({ node, canEditGraph }: { node: NodeType; canEditGraph: boolean }) => {
   const { t } = useTranslation()
 
   const handleExpandNode = () => {
@@ -311,6 +335,7 @@ const NodePropertiesView = ({ node }: { node: NodeType }) => {
                 entityId={node.properties['entity_id']}
                 entityType="node"
                 isEditable={name === 'description' || name === 'entity_id' || name === 'entity_type'}
+                editingEnabled={canEditGraph}
                 truncate={node.properties['truncate']}
               />
             )
@@ -341,7 +366,7 @@ const NodePropertiesView = ({ node }: { node: NodeType }) => {
   )
 }
 
-const EdgePropertiesView = ({ edge }: { edge: EdgeType }) => {
+const EdgePropertiesView = ({ edge, canEditGraph }: { edge: EdgeType; canEditGraph: boolean }) => {
   const { t } = useTranslation()
   return (
     <div className="flex flex-col gap-2">
@@ -381,6 +406,7 @@ const EdgePropertiesView = ({ edge }: { edge: EdgeType }) => {
                 sourceId={edge.sourceNode?.properties['entity_id'] || edge.source}
                 targetId={edge.targetNode?.properties['entity_id'] || edge.target}
                 isEditable={name === 'description' || name === 'keywords'}
+                editingEnabled={canEditGraph}
                 truncate={edge.properties['truncate']}
               />
             )

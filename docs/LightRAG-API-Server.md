@@ -117,6 +117,10 @@ EMBEDDING_DIM=1024
 
 Instead of editing `env.example` by hand, you can use the interactive setup wizard to generate a configured `.env` and, when needed, `docker-compose.final.yml`:
 
+Most users only need `make env-base` for the first run. Add `make env-storage`
+mainly when moving from the default file-backed setup to PostgreSQL; other
+storage adapters are available for advanced compatibility cases.
+
 ```bash
 make env-base           # Required first step: LLM, embedding, reranker
 make env-storage        # Optional: storage backends and database services
@@ -127,6 +131,27 @@ make env-security-check # Optional: audit the current .env for security risks
 For a full description of every target and what each flow does, see [docs/InteractiveSetup.md](./InteractiveSetup.md).
 The setup wizards update configuration only; run `make env-security-check` separately to audit the
 current `.env` for security risks before deployment.
+
+### Platform V2 Migration Flags
+
+LightRAG now includes staged Platform V2 feature flags for:
+
+- DB-backed auth (`USE_DB_AUTH=true`)
+- request-scoped workspace + KB runtime isolation (`ENABLE_KB_ISOLATION=true`)
+
+These flags are safe to turn on for **new** deployments, but existing single-workspace deployments
+should migrate in stages instead of toggling them blindly. Before enabling KB isolation on an
+existing environment, review the operator runbook:
+
+- [`docs/platform-v2/ws5-migration-validation-rollout.md`](./platform-v2/ws5-migration-validation-rollout.md)
+
+For existing deployments, the first-class migration paths are the default
+file-backed layout and PostgreSQL. Other storage backends remain available as
+compatibility options and may require backend-specific planning.
+
+The runbook covers the primary file-backed / PostgreSQL upgrade flows,
+validation and rollback, plus a short appendix for advanced compatibility
+backends.
 
 ### Starting LightRAG Server
 
@@ -154,13 +179,22 @@ During startup, configurations in the `.env` file can be overridden by command-l
 - `--input-dir`: Directory for uploaded files (default: ./inputs)
 - `--workspace`: Workspace name, used to logically isolate data between multiple LightRAG instances (default: empty)
 
+Additional env-only staged flags include:
+
+- `USE_DB_AUTH`
+- `DB_URL`
+- `ENABLE_KB_ISOLATION`
+- `DEFAULT_WORKSPACE_ID`
+- `DEFAULT_KB_ID`
+- `KB_SEPARATOR`
+
 ### Launching LightRAG Server with Docker
 
 Using Docker Compose is the most convenient way to deploy and run the LightRAG Server.
 
 - Create a project directory.
 - Copy the `docker-compose.yml` file from the LightRAG repository into your project directory.
-- Prepare the `.env` file: Duplicate the sample file [`env.example`](https://ai.znipower.com:5013/c/env.example)to create a customized `.env` file, and configure the LLM and embedding parameters according to your specific requirements.
+- Prepare the `.env` file: Duplicate the sample file [`env.example`](../env.example) to create a customized `.env` file, and configure the LLM and embedding parameters according to your specific requirements.
 - Start the LightRAG Server with the following command:
 
 ```shell
@@ -272,6 +306,33 @@ The command-line `workspace` argument and the `WORKSPACE` environment variable i
 
 To maintain compatibility with legacy data, the default workspace for PostgreSQL is `default` and for Neo4j is `base` when no workspace is configured. For all external storages, the system provides dedicated workspace environment variables to override the common `WORKSPACE` environment variable configuration. These storage-specific workspace environment variables are: `REDIS_WORKSPACE`, `MILVUS_WORKSPACE`, `QDRANT_WORKSPACE`, `MONGODB_WORKSPACE`, `POSTGRES_WORKSPACE`, `NEO4J_WORKSPACE`, `MEMGRAPH_WORKSPACE`, `OPENSEARCH_WORKSPACE`.
 
+### KB Isolation Compatibility Mode
+
+When `ENABLE_KB_ISOLATION=true`, LightRAG resolves a runtime by `(workspace_id, kb_id)` and stores
+data using a combined logical workspace such as `workspace__default`.
+
+Recommended defaults:
+
+```dotenv
+ENABLE_KB_ISOLATION=true
+DEFAULT_WORKSPACE_ID=default
+DEFAULT_KB_ID=default
+KB_SEPARATOR=__
+```
+
+Important notes:
+
+- use the filesystem-safe `KB_SEPARATOR=__`
+- do not enable KB isolation on an existing deployment until legacy data has been migrated
+- for existing deployments, the primary WS5 migration paths are:
+  - JSON / Nano / NetworkX file-backed layouts plus blobs
+  - PostgreSQL KV / vector / doc-status tables
+- advanced compatibility backends such as Faiss, `PGGraphStorage`, Redis,
+  MongoDB, Qdrant, Milvus, Neo4j, Memgraph, and OpenSearch still need
+  operator-managed migration planning on existing deployments
+- use the WS5 runbook before enabling the flag on any existing deployment:
+  - [`docs/platform-v2/ws5-migration-validation-rollout.md`](./platform-v2/ws5-migration-validation-rollout.md)
+
 ### Multiple workers for Gunicorn + Uvicorn
 
 The LightRAG Server can operate in the `Gunicorn + Uvicorn` preload mode. Gunicorn's multiple worker (multiprocess) capability prevents document indexing tasks from blocking RAG queries. Using CPU-exhaustive document extraction tools, such as docling, can lead to the entire system being blocked in pure Uvicorn mode.
@@ -286,6 +347,11 @@ MAX_PARALLEL_INSERT=2
 ### Max concurrent requests to the LLM
 MAX_ASYNC=4
 ```
+
+> **KB isolation caution:** the current KB metadata registry is file-backed and easiest to operate with a
+> single writer. If you enable `ENABLE_KB_ISOLATION=true`, prefer one worker during migration and initial
+> rollout, or avoid concurrent KB create/delete operations across multiple workers until a stronger
+> shared registry backend is introduced.
 
 ### Install LightRAG as a Linux Service
 

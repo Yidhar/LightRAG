@@ -14,6 +14,39 @@ import { webuiPrefix } from './src/lib/constants'
 // available inside Bun's runtime; Node.js leaves it undefined, crashing the build.
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
+  const graphVendorPackages = [
+    '/node_modules/@react-sigma/',
+    '/node_modules/@sigma/',
+    '/node_modules/sigma/',
+    '/node_modules/graphology',
+  ]
+  const markdownVendorPackages = [
+    '/node_modules/react-markdown/',
+    '/node_modules/remark-',
+    '/node_modules/rehype-',
+    '/node_modules/unified/',
+    '/node_modules/bail/',
+    '/node_modules/trough/',
+    '/node_modules/vfile/',
+    '/node_modules/unist-',
+    '/node_modules/hast-',
+    '/node_modules/mdast-',
+    '/node_modules/micromark',
+    '/node_modules/property-information/',
+    '/node_modules/space-separated-tokens/',
+    '/node_modules/comma-separated-tokens/',
+    '/node_modules/character-entities',
+    '/node_modules/decode-named-character-reference/',
+    '/node_modules/parse-entities/',
+    '/node_modules/katex/',
+  ]
+  const syntaxVendorPackages = [
+    '/node_modules/react-syntax-highlighter/',
+    '/node_modules/refractor/',
+    '/node_modules/prismjs/',
+    '/node_modules/lowlight/',
+    '/node_modules/highlight.js/',
+  ]
   const essentialProxyEndpoints = [
     '/api',
     '/documents',
@@ -53,10 +86,30 @@ export default defineConfig(({ mode }) => {
     build: {
       outDir: path.resolve(__dirname, '../lightrag/api/webui'),
       emptyOutDir: true,
-      chunkSizeWarningLimit: 3800,
+      chunkSizeWarningLimit: 1500,
       rollupOptions: {
-        // Let Vite handle chunking automatically to avoid circular dependency issues
+        // Keep app modules on Vite's default chunking path, but isolate the
+        // heaviest third-party ecosystems into dedicated vendor chunks.
         output: {
+          manualChunks(id) {
+            const normalizedId = id.replace(/\\/g, '/')
+
+            if (!normalizedId.includes('/node_modules/')) {
+              return
+            }
+
+            if (graphVendorPackages.some((fragment) => normalizedId.includes(fragment))) {
+              return 'graph-vendor'
+            }
+
+            if (syntaxVendorPackages.some((fragment) => normalizedId.includes(fragment))) {
+              return 'syntax-vendor'
+            }
+
+            if (markdownVendorPackages.some((fragment) => normalizedId.includes(fragment))) {
+              return 'markdown-vendor'
+            }
+          },
           // Ensure consistent chunk naming format
           chunkFileNames: 'assets/[name]-[hash].js',
           // Entry file naming format

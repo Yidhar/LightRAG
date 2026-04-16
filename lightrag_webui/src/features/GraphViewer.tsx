@@ -23,7 +23,12 @@ import LegendButton from '@/components/graph/LegendButton'
 
 import { useSettingsStore } from '@/stores/settings'
 import { useGraphStore } from '@/stores/graph'
+import { useAuthStore } from '@/stores/state'
 import { labelColorDarkTheme, labelColorLightTheme } from '@/lib/constants'
+import { hasPermission, resolveEffectiveRole } from '@/lib/permissions'
+import { resolveKnowledgeBaseId, resolveWorkspaceId } from '@/app/routeHelpers'
+import { useParams } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
 
 import '@react-sigma/core/lib/style.css'
 import '@react-sigma/graph-search/lib/style.css'
@@ -108,6 +113,7 @@ const GraphEvents = () => {
 }
 
 const GraphViewer = () => {
+  const { t } = useTranslation()
   const sigmaRef = useRef<any>(null)
   const prevTheme = useRef<string>('')
 
@@ -121,6 +127,15 @@ const GraphViewer = () => {
   const enableNodeDrag = useSettingsStore.use.enableNodeDrag()
   const showLegend = useSettingsStore.use.showLegend()
   const theme = useSettingsStore.use.theme()
+  const { role, memberships } = useAuthStore()
+  const { workspaceId, kbId } = useParams()
+  const currentWorkspaceId = resolveWorkspaceId(workspaceId)
+  const currentKnowledgeBaseId = resolveKnowledgeBaseId(kbId)
+  const effectiveRole = resolveEffectiveRole(
+    { role, memberships },
+    { workspaceId: currentWorkspaceId, kbId: currentKnowledgeBaseId }
+  )
+  const canEditGraph = hasPermission(effectiveRole, 'kb:edit_graph')
 
   const [isThemeSwitching, setIsThemeSwitching] = useState(false)
 
@@ -212,6 +227,11 @@ const GraphViewer = () => {
 
         <div className="absolute top-2 left-2 flex items-start gap-2">
           <GraphLabels />
+          {!canEditGraph && (
+            <div className="rounded-xl border border-border/70 bg-background/80 px-3 py-2 text-xs text-muted-foreground shadow-sm backdrop-blur-lg">
+              {t('graphViewer.editingDisabled')}
+            </div>
+          )}
           {showNodeSearchBar && !isThemeSwitching && (
             <GraphSearch
               value={searchInitSelectedNode}
@@ -254,7 +274,7 @@ const GraphViewer = () => {
         <div className="absolute inset-0 flex items-center justify-center bg-background/80 z-10">
           <div className="text-center">
             <div className="mb-2 h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent mx-auto"></div>
-            <p>{isThemeSwitching ? 'Switching Theme...' : 'Loading Graph Data...'}</p>
+            <p>{isThemeSwitching ? t('graphViewer.switchingTheme') : t('graphViewer.loadingData')}</p>
           </div>
         </div>
       )}

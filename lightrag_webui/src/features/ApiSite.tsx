@@ -21,8 +21,10 @@ export default function ApiSite() {
       {iframeLoaded ? (
         <iframe
           src={backendBaseUrl + '/docs'}
+          title={t('apiSite.iframeTitle')}
           className="size-full w-full h-full"
           style={{ width: '100%', height: '100%', border: 'none' }}
+          loading="lazy"
           // Use key to ensure iframe doesn't reload
           key="api-docs-iframe"
         />

@@ -2,9 +2,16 @@ import { NavigateFunction } from 'react-router-dom';
 import { useAuthStore, useBackendState } from '@/stores/state';
 import { useGraphStore } from '@/stores/graph';
 import { useSettingsStore } from '@/stores/settings';
+import { appRoutes } from '@/app/routes';
 
 class NavigationService {
   private navigate: NavigateFunction | null = null;
+
+  private getCurrentRoute() {
+    const hash = window.location.hash || '';
+    const route = hash.startsWith('#') ? hash.slice(1) : hash;
+    return route || appRoutes.kbDocuments();
+  }
 
   setNavigate(navigate: NavigateFunction) {
     this.navigate = navigate;
@@ -52,7 +59,7 @@ class NavigationService {
   /**
    * Navigate to login page and reset application state
    */
-  navigateToLogin() {
+  navigateToLogin(returnTo?: string) {
     if (!this.navigate) {
       console.error('Navigation function not set');
       return;
@@ -69,7 +76,13 @@ class NavigationService {
     this.resetAllApplicationState(true);
     useAuthStore.getState().logout();
 
-    this.navigate('/login');
+    const nextRoute = returnTo || this.getCurrentRoute();
+    const loginTarget =
+      nextRoute && nextRoute !== appRoutes.login
+        ? `${appRoutes.login}?returnTo=${encodeURIComponent(nextRoute)}`
+        : appRoutes.login;
+
+    this.navigate(loginTarget);
   }
 
   navigateToHome() {
@@ -78,7 +91,7 @@ class NavigationService {
       return;
     }
 
-    this.navigate('/');
+    this.navigate(appRoutes.kbDocuments());
   }
 }
 
