@@ -16,7 +16,6 @@ import { copyToClipboard } from '@/utils/clipboard'
 import type { QueryMode, QueryReference, RetrievedChunk } from '@/api/lightrag'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
 import Badge from '@/components/ui/Badge'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/Card'
 import {
   Select,
   SelectContent,
@@ -785,74 +784,55 @@ export default function RetrievalTesting() {
   return (
     <div className="flex size-full min-h-0 flex-col gap-4 overflow-hidden p-4">
       <div className="flex min-h-0 flex-1 flex-col gap-4">
-          <Card className="rounded-[30px] border-border/70 bg-background/90 shadow-sm">
-            <CardHeader className="pb-4">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div className="space-y-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Badge variant="outline" className="rounded-full bg-background/80 px-3 py-1">
-                      <SparklesIcon className="mr-1 size-3.5 text-emerald-500" />
-                      {t('platformShell.retrieval.queryReadyPromptLab')}
-                    </Badge>
-                    {querySettings.enable_rerank && (
-                      <Badge variant="outline" className="rounded-full bg-background/80 px-3 py-1">
-                        {t('retrievePanel.querySettings.enableRerank')}
-                      </Badge>
-                    )}
-                    {querySettings.stream && (
-                      <Badge variant="outline" className="rounded-full bg-background/80 px-3 py-1">
-                        {t('retrievePanel.querySettings.streamResponse')}
-                      </Badge>
-                    )}
-                  </div>
-                  <div>
-                    <CardTitle>{t('platformShell.retrieval.askKnowledgeBase')}</CardTitle>
-                    <CardDescription className="mt-1">
-                      {t('platformShell.retrieval.askKnowledgeBaseDescription')}
-                    </CardDescription>
-                  </div>
-                </div>
-
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="rounded-full"
-                  onClick={() => setSettingsOpen(true)}
-                >
-                  <Settings2Icon className="size-4" />
-                  {t('retrievePanel.querySettings.parametersTitle')}
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-4">
-              {consoleSummary.map((item) => (
-                <div key={item.label} className="rounded-[22px] border border-border/70 bg-muted/20 p-4">
-                  <p className="text-xs uppercase tracking-[0.12em] text-muted-foreground">{item.label}</p>
-                  <p className="mt-2 text-sm font-medium text-foreground">{item.value}</p>
-                </div>
-              ))}
-            </CardContent>
-          </Card>
-
-          <div className="relative min-h-0 flex-1 overflow-hidden rounded-[30px] border border-border/70 bg-background/92 shadow-sm">
-            <div className="border-b border-border/60 px-5 py-4">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <p className="text-sm font-semibold text-foreground">{t('platformShell.retrieval.askKnowledgeBase')}</p>
-                  <p className="text-sm text-muted-foreground">
-                    {t('platformShell.retrieval.operatorNotesDescription')}
-                  </p>
-                </div>
-                <Badge variant="outline" className="rounded-full bg-muted/20 px-3 py-1">
-                  {t('platformShell.retrieval.badge')} {conversationTurns}
+          {/* Parameters summary strip. The page header owns the "ask this KB" title;
+              here we only surface the active-mode preview + parameters entry point. */}
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border/70 bg-background/90 px-4 py-3 shadow-sm">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="outline" className="rounded-full bg-background/80 px-3 py-1">
+                <SparklesIcon className="mr-1 size-3.5 text-emerald-500" />
+                {t('platformShell.retrieval.queryReadyPromptLab')}
+              </Badge>
+              {querySettings.enable_rerank && (
+                <Badge variant="outline" className="rounded-full bg-background/80 px-3 py-1">
+                  {t('retrievePanel.querySettings.enableRerank')}
                 </Badge>
-              </div>
+              )}
+              {querySettings.stream && (
+                <Badge variant="outline" className="rounded-full bg-background/80 px-3 py-1">
+                  {t('retrievePanel.querySettings.streamResponse')}
+                </Badge>
+              )}
+              <span className="ml-1 hidden items-center gap-1 text-xs text-muted-foreground sm:inline-flex">
+                {consoleSummary.map((item, index) => (
+                  <span key={item.label} className="inline-flex items-center gap-1">
+                    <span className="uppercase tracking-[0.08em] text-muted-foreground/70">
+                      {item.label}
+                    </span>
+                    <span className="font-medium text-foreground">{item.value}</span>
+                    {index < consoleSummary.length - 1 && (
+                      <span className="text-muted-foreground/40">·</span>
+                    )}
+                  </span>
+                ))}
+              </span>
             </div>
 
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="rounded-full"
+              onClick={() => setSettingsOpen(true)}
+            >
+              <Settings2Icon className="size-4" />
+              {t('retrievePanel.querySettings.parametersTitle')}
+            </Button>
+          </div>
+
+          <div className="relative min-h-0 flex-1 overflow-hidden rounded-2xl border border-border/70 bg-background/92 shadow-sm">
             <div
               ref={messagesContainerRef}
-              className="absolute inset-x-0 bottom-0 top-[74px] flex flex-col overflow-auto px-3 py-4 sm:px-4"
+              className="absolute inset-0 flex flex-col overflow-auto px-3 py-4 sm:px-4"
               onClick={() => {
                 if (shouldFollowScrollRef.current) {
                   shouldFollowScrollRef.current = false
