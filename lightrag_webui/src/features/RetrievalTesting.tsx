@@ -7,23 +7,12 @@ import { queryText, queryTextStream, queryData } from '@/api/lightrag'
 import { errorMessage } from '@/lib/utils'
 import { useSettingsStore } from '@/stores/settings'
 import { useDebounce } from '@/hooks/useDebounce'
-import QuerySettings from '@/components/retrieval/QuerySettings'
 import { ChatMessage, MessageWithError } from '@/components/retrieval/ChatMessage'
-import { EraserIcon, SendIcon, CopyIcon, Settings2Icon, SparklesIcon, ScanSearchIcon } from 'lucide-react'
+import { EraserIcon, SendIcon, CopyIcon, ScanSearchIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { copyToClipboard } from '@/utils/clipboard'
 import type { QueryMode, QueryReference, RetrievedChunk } from '@/api/lightrag'
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
-import Badge from '@/components/ui/Badge'
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/Select'
 
 // Helper function to generate unique IDs with browser compatibility
 const generateUniqueId = () => {
@@ -117,7 +106,6 @@ export default function RetrievalTesting() {
   const currentTab = useSettingsStore.use.currentTab()
   const querySettings = useSettingsStore.use.querySettings()
   const isRetrievalTabActive = currentTab === 'retrieval'
-  const [settingsOpen, setSettingsOpen] = useState(false)
 
   const [messages, setMessages] = useState<MessageWithError[]>(() => {
     try {
@@ -761,74 +749,9 @@ export default function RetrievalTesting() {
     }
   }, [t])
 
-  const conversationTurns = Math.ceil(messages.filter((message) => message.role === 'user').length)
-  const consoleSummary = [
-    {
-      label: t('retrievePanel.querySettings.queryMode'),
-      value: t(`retrievePanel.querySettings.queryModeOptions.${querySettings.mode}`),
-    },
-    {
-      label: t('retrievePanel.querySettings.topK'),
-      value: String(querySettings.top_k),
-    },
-    {
-      label: t('retrievePanel.querySettings.chunkTopK'),
-      value: String(querySettings.chunk_top_k),
-    },
-    {
-      label: t('retrievePanel.querySettings.historyTurns'),
-      value: String(querySettings.history_turns || 0),
-    },
-  ]
-
   return (
     <div className="flex size-full min-h-0 flex-col gap-4 overflow-hidden p-4">
       <div className="flex min-h-0 flex-1 flex-col gap-4">
-          {/* Parameters summary strip. The page header owns the "ask this KB" title;
-              here we only surface the active-mode preview + parameters entry point. */}
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border/70 bg-background/90 px-4 py-3 shadow-sm">
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge variant="outline" className="rounded-full bg-background/80 px-3 py-1">
-                <SparklesIcon className="mr-1 size-3.5 text-emerald-500" />
-                {t('platformShell.retrieval.queryReadyPromptLab')}
-              </Badge>
-              {querySettings.enable_rerank && (
-                <Badge variant="outline" className="rounded-full bg-background/80 px-3 py-1">
-                  {t('retrievePanel.querySettings.enableRerank')}
-                </Badge>
-              )}
-              {querySettings.stream && (
-                <Badge variant="outline" className="rounded-full bg-background/80 px-3 py-1">
-                  {t('retrievePanel.querySettings.streamResponse')}
-                </Badge>
-              )}
-              <span className="ml-1 hidden items-center gap-1 text-xs text-muted-foreground sm:inline-flex">
-                {consoleSummary.map((item, index) => (
-                  <span key={item.label} className="inline-flex items-center gap-1">
-                    <span className="uppercase tracking-[0.08em] text-muted-foreground/70">
-                      {item.label}
-                    </span>
-                    <span className="font-medium text-foreground">{item.value}</span>
-                    {index < consoleSummary.length - 1 && (
-                      <span className="text-muted-foreground/40">·</span>
-                    )}
-                  </span>
-                ))}
-              </span>
-            </div>
-
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="rounded-full"
-              onClick={() => setSettingsOpen(true)}
-            >
-              <Settings2Icon className="size-4" />
-              {t('retrievePanel.querySettings.parametersTitle')}
-            </Button>
-          </div>
-
           <div className="relative min-h-0 flex-1 overflow-hidden rounded-2xl border border-border/70 bg-background/92 shadow-sm">
             <div
               ref={messagesContainerRef}
@@ -852,13 +775,6 @@ export default function RetrievalTesting() {
                       <p className="mt-2 text-sm leading-7 text-muted-foreground">
                         {t('platformShell.retrieval.askKnowledgeBaseDescription')}
                       </p>
-                      <div className="mt-4 flex flex-wrap justify-center gap-2">
-                        {consoleSummary.slice(0, 3).map((item) => (
-                          <Badge key={item.label} variant="outline" className="rounded-full bg-background/80 px-3 py-1">
-                            {item.label}: {item.value}
-                          </Badge>
-                        ))}
-                      </div>
                     </div>
                   </div>
                 ) : (
@@ -920,36 +836,6 @@ export default function RetrievalTesting() {
                   <EraserIcon className="size-4" />
                   {t('retrievePanel.retrieval.clear')}
                 </Button>
-
-                <Select
-                  value={querySettings.mode}
-                  onValueChange={(value) =>
-                    useSettingsStore.getState().updateQuerySettings({ mode: value as QueryMode })
-                  }
-                >
-                  <SelectTrigger className="h-10 min-w-[168px] rounded-full border-border/70 bg-muted/20">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectGroup>
-                      <SelectItem value="naive">{t('retrievePanel.querySettings.queryModeOptions.naive')}</SelectItem>
-                      <SelectItem value="local">{t('retrievePanel.querySettings.queryModeOptions.local')}</SelectItem>
-                      <SelectItem value="global">{t('retrievePanel.querySettings.queryModeOptions.global')}</SelectItem>
-                      <SelectItem value="hybrid">{t('retrievePanel.querySettings.queryModeOptions.hybrid')}</SelectItem>
-                      <SelectItem value="mix">{t('retrievePanel.querySettings.queryModeOptions.mix')}</SelectItem>
-                      <SelectItem value="bypass">{t('retrievePanel.querySettings.queryModeOptions.bypass')}</SelectItem>
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
-
-                <div className="ml-auto flex flex-wrap items-center gap-2">
-                  <Badge variant="outline" className="rounded-full bg-muted/20 px-3 py-1">
-                    {t('retrievePanel.querySettings.topK')} {querySettings.top_k}
-                  </Badge>
-                  <Badge variant="outline" className="rounded-full bg-muted/20 px-3 py-1">
-                    {t('retrievePanel.querySettings.chunkTopK')} {querySettings.chunk_top_k}
-                  </Badge>
-                </div>
               </div>
 
               <div className="relative flex items-end gap-3 rounded-[24px] border border-border/70 bg-muted/20 px-3 py-3">
@@ -1010,17 +896,6 @@ export default function RetrievalTesting() {
           </form>
         </div>
 
-      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
-        <DialogContent className="fixed left-auto right-0 top-0 h-screen max-w-[420px] translate-x-0 translate-y-0 rounded-none border-l border-border/70 p-0 sm:left-auto sm:max-w-[420px]">
-          <DialogHeader className="border-b border-border/60 px-5 py-4 text-left">
-            <DialogTitle>{t('retrievePanel.querySettings.parametersTitle')}</DialogTitle>
-            <DialogDescription>{t('retrievePanel.querySettings.parametersDescription')}</DialogDescription>
-          </DialogHeader>
-          <div className="min-h-0 flex-1 overflow-hidden">
-            <QuerySettings className="h-full rounded-none border-0 shadow-none" showHeader={false} />
-          </div>
-        </DialogContent>
-      </Dialog>
     </div>
   )
 }

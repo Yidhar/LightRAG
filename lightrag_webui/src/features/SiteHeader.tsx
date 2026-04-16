@@ -1,28 +1,19 @@
 import Button from '@/components/ui/Button'
-import Badge from '@/components/ui/Badge'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/Popover'
-import { SiteInfo } from '@/lib/constants'
 import AppSettings from '@/components/AppSettings'
 import { useAuthStore } from '@/stores/state'
 import { useTranslation } from 'react-i18next'
 import { navigationService } from '@/services/navigation'
 import {
   ChevronDownIcon,
-  GithubIcon,
   LogOutIcon,
   UserCircle2Icon,
   ZapIcon,
 } from 'lucide-react'
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '@/components/ui/Tooltip'
+import { TooltipProvider } from '@/components/ui/Tooltip'
 import { Link, useParams } from 'react-router-dom'
 import AppPrimaryNav from '@/components/navigation/AppPrimaryNav'
 import WorkspaceSwitcher from '@/components/navigation/WorkspaceSwitcher'
-import KnowledgeBaseSwitcher from '@/components/navigation/KnowledgeBaseSwitcher'
 import ContextBreadcrumbs from '@/components/navigation/ContextBreadcrumbs'
 import { appRoutes } from '@/app/routes'
 import { resolveKnowledgeBaseId, resolveWorkspaceId } from '@/app/routeHelpers'
@@ -32,22 +23,15 @@ import AccessBadge from '@/components/navigation/AccessBadge'
 /**
  * Top-bar chrome.
  *
- * PR-UI-1 collapses three prior duplicate surfaces down to one:
- *
- *   - AccessBadge now appears once, inside the user popover.
- *   - workspace/KB identity is shown by exactly one location indicator
- *     per viewport band (switchers xl+, breadcrumbs lg-xl, primary nav md-lg).
- *   - mobile mt-3 duplicate strip is gone; the sidebar/drawer owns mobile nav.
- *
- * Header height is constrained to h-14 on every viewport. See
- * ``docs/platform-v2/ui-audit.md`` for the full rationale.
+ * IA pivot (2026-04-17): KB is no longer a top-bar tier. The primary
+ * switcher is the workspace; retrieval federates over every KB the
+ * workspace owns. Version chip and GitHub link have been removed per
+ * product direction — the menu that remains is identity + settings.
  */
 export default function SiteHeader() {
   const { t } = useTranslation()
   const {
     isAuthenticated,
-    coreVersion,
-    apiVersion,
     username,
     webuiTitle,
     webuiDescription,
@@ -63,14 +47,6 @@ export default function SiteHeader() {
     { workspaceId: currentWorkspaceId, kbId: currentKnowledgeBaseId }
   )
 
-  const versionDisplay = coreVersion && apiVersion ? `${coreVersion}/${apiVersion}` : null
-  const hasWarning = apiVersion?.endsWith('⚠️')
-  const versionTooltip = hasWarning
-    ? t('header.frontendNeedsRebuild')
-    : versionDisplay
-      ? `v${versionDisplay}`
-      : ''
-
   const handleLogout = () => {
     navigationService.navigateToLogin()
   }
@@ -80,7 +56,7 @@ export default function SiteHeader() {
       <header className="surface-glass sticky top-0 z-50 flex h-14 w-full items-center gap-3 border-b px-3 sm:px-4">
         {/* Brand */}
         <Link
-          to={appRoutes.kbOverview(currentWorkspaceId, currentKnowledgeBaseId)}
+          to={appRoutes.workspace(currentWorkspaceId)}
           className="flex min-w-0 shrink-0 items-center gap-2.5 rounded-full px-1.5 py-1 transition-colors hover:bg-muted/60"
           aria-label={t('brand.name')}
         >
@@ -100,55 +76,26 @@ export default function SiteHeader() {
         </Link>
 
         {/* Center location indicator.
-            Exactly one of the three children is visible at any viewport: */}
+            Exactly one of the children is visible per viewport band: */}
         <div className="flex min-w-0 flex-1 items-center">
-          {/* xl and wider — switchers (richest, includes names + metadata) */}
-          <div className="hidden min-w-0 items-center gap-2 xl:flex">
-            <WorkspaceSwitcher className="min-w-0 flex-1 max-w-[14rem]" />
-            <KnowledgeBaseSwitcher className="min-w-0 flex-1 max-w-[15rem]" />
+          {/* xl+ — workspace switcher */}
+          <div className="hidden min-w-0 items-center xl:flex">
+            <WorkspaceSwitcher className="min-w-0 flex-1 max-w-[16rem]" />
           </div>
 
-          {/* lg — breadcrumbs bridge the gap between tablet nav and switchers */}
+          {/* lg — breadcrumbs */}
           <div className="hidden min-w-0 flex-1 items-center justify-center lg:flex xl:hidden">
             <ContextBreadcrumbs />
           </div>
 
-          {/* md — the AppPrimaryNav is mobile/tablet's only navigation channel
-              while the left sidebar is collapsed. Kept intentionally. */}
+          {/* md — tablet primary nav */}
           <div className="hidden min-w-0 flex-1 items-center justify-center md:flex lg:hidden">
             <AppPrimaryNav />
           </div>
         </div>
 
-        {/* Right cluster: version • repo • settings • user */}
+        {/* Right cluster: settings • user */}
         <nav className="flex shrink-0 items-center gap-1.5">
-          {coreVersion && (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Badge
-                  variant="outline"
-                  className="hidden cursor-default rounded-full bg-muted/70 px-2 py-0.5 text-xs sm:inline-flex"
-                >
-                  v{coreVersion}
-                </Badge>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">{versionTooltip || `v${coreVersion}`}</TooltipContent>
-            </Tooltip>
-          )}
-
-          <Button
-            variant="ghost"
-            size="icon"
-            side="bottom"
-            tooltip={t('header.projectRepository')}
-            className="rounded-full"
-            asChild
-          >
-            <a href={SiteInfo.github} target="_blank" rel="noopener noreferrer">
-              <GithubIcon className="size-4" aria-hidden="true" />
-            </a>
-          </Button>
-
           <AppSettings className="rounded-full" />
 
           {isAuthenticated && (
@@ -180,7 +127,7 @@ export default function SiteHeader() {
                       <AccessBadge role={effectiveRole} compact />
                     </div>
                     <p className="mt-2 truncate text-[11px] text-muted-foreground">
-                      {currentWorkspaceId} / {currentKnowledgeBaseId}
+                      {currentWorkspaceId}
                     </p>
                   </div>
                 </div>
