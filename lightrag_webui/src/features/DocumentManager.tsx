@@ -13,8 +13,6 @@ import {
   TableHeader,
   TableRow
 } from '@/components/ui/Table'
-import { Card, CardHeader, CardTitle, CardContent, CardDescription } from '@/components/ui/Card'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/Alert'
 import EmptyCard from '@/components/ui/EmptyCard'
 import Checkbox from '@/components/ui/Checkbox'
 import UploadDocumentsDialog from '@/components/documents/UploadDocumentsDialog'
@@ -39,7 +37,7 @@ import { useAuthStore, useBackendState } from '@/stores/state'
 import { resolveKnowledgeBaseId, resolveWorkspaceId } from '@/app/routeHelpers'
 import { hasPermission, resolveEffectiveRole } from '@/lib/permissions'
 
-import { RefreshCwIcon, ActivityIcon, ArrowUpIcon, ArrowDownIcon, RotateCcwIcon, CheckSquareIcon, XIcon, AlertTriangle, Info, ImageIcon, FileStackIcon, ShieldCheckIcon, SparklesIcon } from 'lucide-react'
+import { RefreshCwIcon, ActivityIcon, ArrowUpIcon, ArrowDownIcon, RotateCcwIcon, CheckSquareIcon, XIcon, AlertTriangle, Info, ImageIcon, SparklesIcon } from 'lucide-react'
 import PipelineStatusDialog from '@/components/documents/PipelineStatusDialog'
 
 type StatusFilter = DocStatus | 'all';
@@ -681,19 +679,6 @@ export default function DocumentManager() {
       }
     }
   }, [hasCurrentPageSelection, isCurrentPageFullySelected, currentPageDocIds.length, handleSelectCurrentPage, handleDeselectAll, t])
-
-  const documentAccessMessage = useMemo(() => {
-    if (canUploadDocuments && canDeleteDocuments) {
-      return null
-    }
-    if (!canUploadDocuments && !canDeleteDocuments) {
-      return t('documentPanel.documentManager.accessMessages.readOnly')
-    }
-    if (!canUploadDocuments) {
-      return t('documentPanel.documentManager.accessMessages.uploadDisabled')
-    }
-    return t('documentPanel.documentManager.accessMessages.deleteDisabled')
-  }, [canDeleteDocuments, canUploadDocuments, t])
 
   // Calculate document counts for each status
   const documentCounts = useMemo(() => {
@@ -1577,324 +1562,245 @@ export default function DocumentManager() {
       : null
 
   return (
-    <Card className="h-full min-h-0 !overflow-hidden !rounded-none border-0 bg-transparent shadow-none">
-      <CardContent className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-4 sm:p-5">
-        {documentAccessMessage && (
-          <Alert className="border-border/70 bg-muted/20">
-            <AlertTitle>{t('documentPanel.documentManager.scopedPermissions')}</AlertTitle>
-            <AlertDescription>{documentAccessMessage}</AlertDescription>
-          </Alert>
-        )}
+    <div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden p-4 sm:p-5">
+      {/* Compact toolbar: stat pills + pipeline badge + action cluster */}
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={() => handleStatusFilterChange('all')}
+          className={cn(
+            'flex min-w-[5.25rem] flex-col items-start rounded-xl border border-border/70 px-3 py-1.5 text-left transition-colors hover:border-emerald-500/30 hover:bg-emerald-500/[0.04]',
+            statusFilter === 'all' && 'border-emerald-500/40 bg-emerald-500/[0.08]'
+          )}
+        >
+          <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+            {t('documentPanel.documentManager.status.all')}
+          </span>
+          <span className="text-lg font-semibold tabular-nums text-foreground">{totalDocumentsCount}</span>
+        </button>
 
-        <section className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_340px]">
-          <div className="rounded-[30px] border border-border/70 bg-background/85 p-5 shadow-sm">
-            <div className="flex flex-wrap items-start justify-between gap-4">
-              <div className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <div className="flex size-11 items-center justify-center rounded-2xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-300">
-                    <FileStackIcon className="size-5" />
-                  </div>
-                  <div>
-                    <p className="text-lg font-semibold text-foreground">{t('documentPanel.documentManager.title')}</p>
-                    <p className="text-sm leading-6 text-muted-foreground">
-                      {t('documentPanel.documentManager.uploadedDescription')}
-                    </p>
-                  </div>
-                </div>
-              </div>
+        <button
+          type="button"
+          onClick={() => handleStatusFilterChange('processed')}
+          className={cn(
+            'flex min-w-[5.25rem] flex-col items-start rounded-xl border border-border/70 px-3 py-1.5 text-left transition-colors hover:border-green-500/30 hover:bg-green-500/[0.04]',
+            statusFilter === 'processed' && 'border-green-500/40 bg-green-500/[0.08]'
+          )}
+        >
+          <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+            {t('documentPanel.documentManager.status.completed')}
+          </span>
+          <span className="text-lg font-semibold tabular-nums text-green-600 dark:text-green-400">
+            {processedCount}
+          </span>
+        </button>
 
-              <Badge
-                variant="outline"
-                className={cn(
-                  'rounded-full px-3 py-1',
-                  pipelineBusy && 'pipeline-busy border-red-500/30 text-red-600 dark:text-red-300'
-                )}
-              >
-                {pipelineBusy
-                  ? t('documentPanel.pipelineStatus.busy')
-                  : t('documentPanel.pipelineStatus.noActiveJob')}
-              </Badge>
-            </div>
+        <button
+          type="button"
+          onClick={() => handleStatusFilterChange('processing')}
+          className={cn(
+            'flex min-w-[5.25rem] flex-col items-start rounded-xl border border-border/70 px-3 py-1.5 text-left transition-colors hover:border-blue-500/30 hover:bg-blue-500/[0.04]',
+            statusFilter === 'processing' && 'border-blue-500/40 bg-blue-500/[0.08]',
+            inFlightCount > 0 && 'border-blue-500/30 bg-blue-500/[0.06]'
+          )}
+        >
+          <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+            {t('documentPanel.documentManager.status.processing')}
+          </span>
+          <span className="flex items-center gap-1.5 text-lg font-semibold tabular-nums text-blue-600 dark:text-blue-400">
+            {inFlightCount > 0 && (
+              <span className="inline-block size-1.5 animate-pulse rounded-full bg-blue-500" />
+            )}
+            {inFlightCount}
+          </span>
+        </button>
 
-            <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              <button
-                type="button"
-                onClick={() => handleStatusFilterChange('all')}
-                className={cn(
-                  'rounded-[24px] border border-border/70 bg-card/80 p-4 text-left transition-colors hover:border-emerald-500/20 hover:bg-emerald-500/[0.04]',
-                  statusFilter === 'all' && 'border-emerald-500/30 bg-emerald-500/[0.08]'
-                )}
-              >
-                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-                  {t('documentPanel.documentManager.status.all')}
-                </p>
-                <p className="mt-2 text-2xl font-semibold text-foreground">{totalDocumentsCount}</p>
-              </button>
+        <button
+          type="button"
+          onClick={() => handleStatusFilterChange('failed')}
+          className={cn(
+            'flex min-w-[5.25rem] flex-col items-start rounded-xl border border-border/70 px-3 py-1.5 text-left transition-colors hover:border-red-500/30 hover:bg-red-500/[0.04]',
+            statusFilter === 'failed' && 'border-red-500/40 bg-red-500/[0.08]'
+          )}
+        >
+          <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+            {t('documentPanel.documentManager.status.failed')}
+          </span>
+          <span className="text-lg font-semibold tabular-nums text-red-600 dark:text-red-400">
+            {failedCount}
+          </span>
+        </button>
 
-              <button
-                type="button"
-                onClick={() => handleStatusFilterChange('processed')}
-                className={cn(
-                  'rounded-[24px] border border-border/70 bg-card/80 p-4 text-left transition-colors hover:border-green-500/20 hover:bg-green-500/[0.04]',
-                  statusFilter === 'processed' && 'border-green-500/30 bg-green-500/[0.08]'
-                )}
-              >
-                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-                  {t('documentPanel.documentManager.status.completed')}
-                </p>
-                <p className="mt-2 text-2xl font-semibold text-green-600 dark:text-green-400">{processedCount}</p>
-              </button>
+        <Badge
+          variant="outline"
+          className={cn(
+            'rounded-full px-2.5 py-0.5 text-[11px]',
+            pipelineBusy && 'pipeline-busy border-red-500/30 text-red-600 dark:text-red-300'
+          )}
+        >
+          {pipelineBusy
+            ? t('documentPanel.pipelineStatus.busy')
+            : t('documentPanel.pipelineStatus.noActiveJob')}
+        </Badge>
 
-              <button
-                type="button"
-                onClick={() => handleStatusFilterChange('processing')}
-                className={cn(
-                  'rounded-[24px] border border-border/70 bg-card/80 p-4 text-left transition-colors hover:border-blue-500/20 hover:bg-blue-500/[0.04]',
-                  statusFilter === 'processing' && 'border-blue-500/30 bg-blue-500/[0.08]'
-                )}
-              >
-                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-                  {t('documentPanel.documentManager.status.processing')}
-                </p>
-                <p className="mt-2 text-2xl font-semibold text-blue-600 dark:text-blue-400">{inFlightCount}</p>
-              </button>
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          <Button
+            variant="outline"
+            onClick={scanDocuments}
+            disabled={!canUploadDocuments}
+            side="bottom"
+            tooltip={canUploadDocuments ? t('documentPanel.documentManager.scanTooltip') : undefined}
+            size="sm"
+            className="rounded-full"
+          >
+            <RefreshCwIcon className="h-4 w-4" />
+            {t('documentPanel.documentManager.scanButton')}
+          </Button>
 
-              <button
-                type="button"
-                onClick={() => handleStatusFilterChange('failed')}
-                className={cn(
-                  'rounded-[24px] border border-border/70 bg-card/80 p-4 text-left transition-colors hover:border-red-500/20 hover:bg-red-500/[0.04]',
-                  statusFilter === 'failed' && 'border-red-500/30 bg-red-500/[0.08]'
-                )}
-              >
-                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-                  {t('documentPanel.documentManager.status.failed')}
-                </p>
-                <p className="mt-2 text-2xl font-semibold text-red-600 dark:text-red-400">{failedCount}</p>
-              </button>
-            </div>
-          </div>
+          <Button
+            variant="outline"
+            onClick={() => setShowPipelineStatus(true)}
+            side="bottom"
+            tooltip={t('documentPanel.documentManager.pipelineStatusTooltip')}
+            size="sm"
+            className={cn('rounded-full', pipelineBusy && 'pipeline-busy')}
+          >
+            <ActivityIcon className="h-4 w-4" />
+            {t('documentPanel.documentManager.pipelineStatusButton')}
+          </Button>
 
-          <div className="rounded-[30px] border border-border/70 bg-muted/20 p-5 shadow-sm">
-            <div className="flex items-center gap-2">
-              <div className="flex size-11 items-center justify-center rounded-2xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-300">
-                <ShieldCheckIcon className="size-5" />
-              </div>
-              <div>
-                <p className="text-base font-semibold text-foreground">
-                  {t('documentPanel.documentManager.scopedPermissions')}
-                </p>
-                <p className="text-sm leading-6 text-muted-foreground">
-                  {t('platformShell.documents.documentManagerDescription')}
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-4 grid gap-3">
-              <div className="rounded-[22px] border border-border/70 bg-background/85 px-4 py-3">
-                <p className="text-xs uppercase tracking-[0.12em] text-muted-foreground">
-                  {t('platformShell.documents.upload')}
-                </p>
-                <p className="mt-1 text-sm font-medium text-foreground">
-                  {canUploadDocuments ? t('platformShell.common.enabled') : t('platformShell.common.locked')}
-                </p>
-              </div>
-              <div className="rounded-[22px] border border-border/70 bg-background/85 px-4 py-3">
-                <p className="text-xs uppercase tracking-[0.12em] text-muted-foreground">
-                  {t('platformShell.documents.deleteOrClear')}
-                </p>
-                <p className="mt-1 text-sm font-medium text-foreground">
-                  {canDeleteDocuments ? t('platformShell.common.enabled') : t('platformShell.common.locked')}
-                </p>
-              </div>
-              <div className="rounded-[22px] border border-border/70 bg-background/85 px-4 py-3">
-                <p className="text-xs uppercase tracking-[0.12em] text-muted-foreground">
-                  {t('platformShell.documents.pipelineControls')}
-                </p>
-                <p className="mt-1 text-sm font-medium text-foreground">
-                  {canManageSettings ? t('platformShell.documents.extended') : t('platformShell.documents.standard')}
-                </p>
-              </div>
-              <div className="rounded-[22px] border border-border/70 bg-background/85 px-4 py-3">
-                <p className="text-xs uppercase tracking-[0.12em] text-muted-foreground">
-                  {t('documentPanel.documentManager.columns.select')}
-                </p>
-                <p className="mt-1 text-sm font-medium text-foreground">
-                  {selectionButtonProps ? selectionButtonProps.text : t('documentPanel.documentManager.status.all')}
-                </p>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-[28px] border border-border/70 bg-background/85 px-4 py-3 shadow-sm">
-          <div className="flex flex-wrap items-center gap-2">
+          {isSelectionMode && (
             <Button
               variant="outline"
-              onClick={scanDocuments}
-              disabled={!canUploadDocuments}
-              side="bottom"
-              tooltip={canUploadDocuments ? t('documentPanel.documentManager.scanTooltip') : undefined}
               size="sm"
+              onClick={handleRebuildMultimodal}
+              disabled={!canRebuildSelectedDoc}
+              side="bottom"
+              tooltip={rebuildMultimodalTooltip}
               className="rounded-full"
             >
-              <RefreshCwIcon className="h-4 w-4" />
-              {t('documentPanel.documentManager.scanButton')}
+              <ImageIcon className="h-4 w-4" />
+              {t('documentPanel.documentManager.rebuildMultimodalButton')}
             </Button>
+          )}
 
+          {selectionButtonProps && (
             <Button
               variant="outline"
-              onClick={() => setShowPipelineStatus(true)}
-              side="bottom"
-              tooltip={t('documentPanel.documentManager.pipelineStatusTooltip')}
               size="sm"
-              className={cn('rounded-full', pipelineBusy && 'pipeline-busy')}
+              onClick={selectionButtonProps.action}
+              side="bottom"
+              tooltip={selectionButtonProps.text}
+              className="rounded-full"
             >
-              <ActivityIcon className="h-4 w-4" />
-              {t('documentPanel.documentManager.pipelineStatusButton')}
+              {(() => {
+                const SelectionIcon = selectionButtonProps.icon
+                return <SelectionIcon className="h-4 w-4" />
+              })()}
+              {selectionButtonProps.text}
             </Button>
+          )}
 
-            {isSelectionMode && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleRebuildMultimodal}
-                disabled={!canRebuildSelectedDoc}
-                side="bottom"
-                tooltip={rebuildMultimodalTooltip}
-                className="rounded-full"
-              >
-                <ImageIcon className="h-4 w-4" />
-                {t('documentPanel.documentManager.rebuildMultimodalButton')}
-              </Button>
-            )}
+          {isSelectionMode ? (
+            <DeleteDocumentsDialog
+              disabled={!canDeleteDocuments}
+              disabledReason={t('documentPanel.documentManager.accessMessages.deleteDisabled')}
+              selectedDocIds={activeSelectedDocIds}
+              onDocumentsDeleted={handleDocumentsDeleted}
+            />
+          ) : (
+            <ClearDocumentsDialog
+              disabled={!canDeleteDocuments}
+              disabledReason={t('documentPanel.documentManager.accessMessages.deleteDisabled')}
+              canClearCache={canManageSettings}
+              onDocumentsCleared={handleDocumentsCleared}
+            />
+          )}
 
-            {selectionButtonProps && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={selectionButtonProps.action}
-                side="bottom"
-                tooltip={selectionButtonProps.text}
-                className="rounded-full"
-              >
-                {(() => {
-                  const SelectionIcon = selectionButtonProps.icon
-                  return <SelectionIcon className="h-4 w-4" />
-                })()}
-                {selectionButtonProps.text}
-              </Button>
-            )}
+          <UploadDocumentsDialog
+            disabled={!canUploadDocuments}
+            disabledReason={t('documentPanel.documentManager.accessMessages.uploadDisabled')}
+            onDocumentsUploaded={handleUploadedDocuments}
+          />
+          <PipelineStatusDialog
+            canCancelPipeline={canManageSettings}
+            open={showPipelineStatus}
+            onOpenChange={setShowPipelineStatus}
+          />
+        </div>
+      </div>
+
+      {/* Uploaded documents list — single bordered container, takes remaining height */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border/60 bg-background/70">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 px-4 py-2.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <SparklesIcon className="size-4 text-emerald-600 dark:text-emerald-400" />
+            <p className="text-sm font-semibold text-foreground">
+              {t('documentPanel.documentManager.uploadedTitle')}
+            </p>
+            <Button
+              id="toggle-filename-btn"
+              variant="outline"
+              size="sm"
+              onClick={() => setShowFileName(!showFileName)}
+              className="rounded-full"
+            >
+              {showFileName
+                ? t('documentPanel.documentManager.hideButton')
+                : t('documentPanel.documentManager.showButton')}
+              {' '}
+              {t('documentPanel.documentManager.fileNameLabel')}
+            </Button>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            {isSelectionMode ? (
-              <DeleteDocumentsDialog
-                disabled={!canDeleteDocuments}
-                disabledReason={t('documentPanel.documentManager.accessMessages.deleteDisabled')}
-                selectedDocIds={activeSelectedDocIds}
-                onDocumentsDeleted={handleDocumentsDeleted}
-              />
-            ) : (
-              <ClearDocumentsDialog
-                disabled={!canDeleteDocuments}
-                disabledReason={t('documentPanel.documentManager.accessMessages.deleteDisabled')}
-                canClearCache={canManageSettings}
-                onDocumentsCleared={handleDocumentsCleared}
-              />
-            )}
-
-            <UploadDocumentsDialog
-              disabled={!canUploadDocuments}
-              disabledReason={t('documentPanel.documentManager.accessMessages.uploadDisabled')}
-              onDocumentsUploaded={handleUploadedDocuments}
-            />
-            <PipelineStatusDialog
-              canCancelPipeline={canManageSettings}
-              open={showPipelineStatus}
-              onOpenChange={setShowPipelineStatus}
-            />
+          <div className="flex flex-wrap items-center gap-2" dir={i18n.dir()}>
+            {statusFilterItems.map((item) => (
+              <Button
+                key={item.key}
+                size="sm"
+                variant="outline"
+                onClick={() => handleStatusFilterChange(item.key)}
+                className={cn(
+                  'rounded-full border-border/70 bg-background/80',
+                  item.accentClass,
+                  statusFilter === item.key && item.activeClass
+                )}
+              >
+                {item.label} ({item.count})
+              </Button>
+            ))}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleManualRefresh}
+              side="bottom"
+              tooltip={t('documentPanel.documentManager.refreshTooltip')}
+              className={cn(
+                'rounded-full',
+                isRefreshing && '[&_svg]:animate-spin'
+              )}
+            >
+              <RotateCcwIcon className="h-4 w-4" />
+            </Button>
           </div>
         </div>
 
-        <Card className="mb-1 flex min-h-0 flex-1 flex-col overflow-hidden rounded-[28px] border border-border/70 bg-background/92 shadow-sm">
-          <CardHeader className="border-b border-border/60 px-5 py-4">
-            <div className="flex flex-col gap-4">
-              <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
-                <div className="space-y-1">
-                  <CardTitle className="flex items-center gap-2">
-                    <SparklesIcon className="size-4 text-emerald-600 dark:text-emerald-400" />
-                    {t('documentPanel.documentManager.uploadedTitle')}
-                  </CardTitle>
-                  <CardDescription>{t('documentPanel.documentManager.uploadedDescription')}</CardDescription>
-                </div>
+        {pagination.total_pages > 1 && (
+          <div className="border-b border-border/60 px-4 py-2">
+            <PaginationControls
+              currentPage={pagination.page}
+              totalPages={pagination.total_pages}
+              pageSize={pagination.page_size}
+              totalCount={pagination.total_count}
+              onPageChange={handlePageChange}
+              onPageSizeChange={handlePageSizeChange}
+              isLoading={false}
+              compact={true}
+            />
+          </div>
+        )}
 
-                <div className="flex flex-wrap items-center gap-2" dir={i18n.dir()}>
-                  {statusFilterItems.map((item) => (
-                    <Button
-                      key={item.key}
-                      size="sm"
-                      variant="outline"
-                      onClick={() => handleStatusFilterChange(item.key)}
-                      disabled={isRefreshing}
-                      className={cn(
-                        'rounded-full border-border/70 bg-background/80',
-                        item.accentClass,
-                        statusFilter === item.key && item.activeClass
-                      )}
-                    >
-                      {item.label} ({item.count})
-                    </Button>
-                  ))}
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={handleManualRefresh}
-                    disabled={isRefreshing}
-                    side="bottom"
-                    tooltip={t('documentPanel.documentManager.refreshTooltip')}
-                    className="rounded-full"
-                  >
-                    <RotateCcwIcon className="h-4 w-4" />
-                  </Button>
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-                <div className="flex flex-wrap items-center gap-2">
-                  <Badge variant="outline" className="rounded-full bg-muted/20 px-3 py-1">
-                    {t('documentPanel.documentManager.fileNameLabel')}
-                  </Badge>
-                  <Button
-                    id="toggle-filename-btn"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setShowFileName(!showFileName)}
-                    className="rounded-full"
-                  >
-                    {showFileName
-                      ? t('documentPanel.documentManager.hideButton')
-                      : t('documentPanel.documentManager.showButton')}
-                  </Button>
-                </div>
-
-                {pagination.total_pages > 1 && (
-                  <PaginationControls
-                    currentPage={pagination.page}
-                    totalPages={pagination.total_pages}
-                    pageSize={pagination.page_size}
-                    totalCount={pagination.total_count}
-                    onPageChange={handlePageChange}
-                    onPageSizeChange={handlePageSizeChange}
-                    isLoading={isRefreshing}
-                    compact={true}
-                  />
-                )}
-              </div>
-            </div>
-          </CardHeader>
-
-          <CardContent className="relative flex-1 p-0" ref={cardContentRef}>
+        <div className="relative min-h-0 flex-1 overflow-hidden" ref={cardContentRef}>
             {!docs && (
               <div className="absolute inset-0 p-0">
                 <EmptyCard
@@ -2054,9 +1960,8 @@ export default function DocumentManager() {
                 </div>
               </div>
             )}
-          </CardContent>
-        </Card>
-      </CardContent>
-    </Card>
+        </div>
+      </div>
+    </div>
   )
 }
