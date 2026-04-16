@@ -131,14 +131,6 @@ export default function RetrievalPage() {
           <AlertDescription>{t('platformShell.retrieval.unavailableDescription')}</AlertDescription>
         </Alert>
       )}
-      {canQueryKnowledgeBase && !canManageKnowledgeBaseSettings && (
-        <Alert className="mx-6 mt-4 border-border/70 bg-muted/20">
-          <AlertTitle>{t('platformShell.retrieval.readOnlyAdminTitle')}</AlertTitle>
-          <AlertDescription>
-            {t('platformShell.retrieval.readOnlyAdminDescription')}
-          </AlertDescription>
-        </Alert>
-      )}
 
       {canQueryKnowledgeBase ? (
         <div className="min-h-0 flex-1 overflow-hidden">
