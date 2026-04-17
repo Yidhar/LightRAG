@@ -58,7 +58,7 @@
     "rememberUsername": "Remember username",
     "localAuthOnly": "Local auth",
     "brandCardTitle": "Brand system",
-    "brandCardDescription": "Ragenging ui uses a calm Material-style shell to keep dense knowledge operations readable, layered, and trustworthy.",
+    "brandCardDescription": "RagEngine ui uses a calm Material-style shell to keep dense knowledge operations readable, layered, and trustworthy.",
     "workflowCardTitle": "Operator flow",
     "workflowCardDescription": "Move from overview to documents, retrieval, graph, and settings without losing the current workspace / knowledge-base scope.",
     "usernameRequired": "Username is required.",
@@ -244,7 +244,7 @@
   "graphPanel": {
     "dataIsTruncated": "Les données du graphe sont tronquées au nombre maximum de nœuds",
     "statusDialog": {
-      "title": "Paramètres du Serveur Ragenging ui",
+      "title": "Paramètres du Serveur RagEngine ui",
       "description": "Afficher l'état actuel du système et les informations de connexion"
     },
     "legend": "Légende",
@@ -537,7 +537,7 @@
   },
   "apiSite": {
     "loading": "Chargement de la documentation de l'API...",
-    "iframeTitle": "Ragenging ui API documentation"
+    "iframeTitle": "RagEngine ui API documentation"
   },
   "apiKeyAlert": {
     "title": "Clé API requise",
@@ -555,7 +555,7 @@
     "lastPage": "Dernière page"
   },
   "brand": {
-    "name": "RagENging",
+    "name": "RagEngine",
     "logoAlt": "{{name}} logo"
   },
   "permissions": {
@@ -645,7 +645,7 @@
       "loadingDescription": "We are connecting the scoped API reference so engineers can browse live backend docs without leaving the current KB flow.",
       "badge": "API",
       "title": "Scoped API reference",
-      "description": "Ragenging ui keeps the live API reference inside the KB shell so developers can move from documents and retrieval checks into integration work without losing route context.",
+      "description": "RagEngine ui keeps the live API reference inside the KB shell so developers can move from documents and retrieval checks into integration work without losing route context.",
       "openDocsInNewTab": "Open docs in new tab",
       "docsSource": "Docs source",
       "developerAccess": "Developer access",
@@ -725,7 +725,7 @@
       "loadingDescription": "We are loading the scoped retrieval workspace, query controls, and answer review surface for this knowledge base.",
       "badge": "Retrieval",
       "title": "KB retrieval console",
-      "description": "Ragenging ui keeps prompt testing, answer quality checks, and query-mode experiments scoped to this knowledge base so teams can evaluate one source of truth at a time.",
+      "description": "RagEngine ui keeps prompt testing, answer quality checks, and query-mode experiments scoped to this knowledge base so teams can evaluate one source of truth at a time.",
       "queryAccess": "Query access",
       "interactive": "Interactive",
       "accessAndScope": "Access and scope",

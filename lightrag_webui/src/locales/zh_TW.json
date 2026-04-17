@@ -58,7 +58,7 @@
     "rememberUsername": "記住使用者名稱",
     "localAuthOnly": "本地驗證",
     "brandCardTitle": "品牌系統",
-    "brandCardDescription": "Ragenging ui 採用克制的 Material 風格外殼，讓高密度知識操作依然清晰、分層、可信。",
+    "brandCardDescription": "RagEngine ui 採用克制的 Material 風格外殼，讓高密度知識操作依然清晰、分層、可信。",
     "workflowCardTitle": "操作流程",
     "workflowCardDescription": "在不失去目前工作區 / 知識庫範圍的前提下，於總覽、文件、檢索、圖譜與設定之間流暢切換。",
     "usernameRequired": "請輸入使用者名稱。",
@@ -244,7 +244,7 @@
   "graphPanel": {
     "dataIsTruncated": "圖資料已截斷至最大回傳節點數",
     "statusDialog": {
-      "title": "Ragenging ui 伺服器設定",
+      "title": "RagEngine ui 伺服器設定",
       "description": "查看目前系統狀態和連線資訊"
     },
     "legend": "圖例",
@@ -537,7 +537,7 @@
   },
   "apiSite": {
     "loading": "正在載入 API 文件...",
-    "iframeTitle": "Ragenging ui API 文档"
+    "iframeTitle": "RagEngine ui API 文档"
   },
   "apiKeyAlert": {
     "title": "需要 API key",
@@ -555,7 +555,7 @@
     "lastPage": "最後一頁"
   },
   "brand": {
-    "name": "RagENging",
+    "name": "RagEngine",
     "logoAlt": "{{name}} 标志"
   },
   "permissions": {
@@ -645,7 +645,7 @@
       "loadingDescription": "我们正在连接当前知识库范围内的 API 参考，方便工程师在不离开当前流程的情况下查看后端在线文档。",
       "badge": "API",
       "title": "范围化 API 参考",
-      "description": "Ragenging ui 将在线 API 参考保留在知识库外壳内，便于开发者从文档与检索校验直接切换到集成工作，同时不丢失当前上下文。",
+      "description": "RagEngine ui 将在线 API 参考保留在知识库外壳内，便于开发者从文档与检索校验直接切换到集成工作，同时不丢失当前上下文。",
       "openDocsInNewTab": "在新标签页打开文档",
       "docsSource": "文档来源",
       "developerAccess": "开发者访问",
@@ -725,7 +725,7 @@
       "loadingDescription": "我们正在加载当前知识库范围内的检索工作区、查询控制与回答审阅界面。",
       "badge": "检索",
       "title": "知识库检索控制台",
-      "description": "Ragenging ui 将提示测试、回答质量检查和查询模式实验限定在当前知识库中，帮助团队一次只评估一个可信来源。",
+      "description": "RagEngine ui 将提示测试、回答质量检查和查询模式实验限定在当前知识库中，帮助团队一次只评估一个可信来源。",
       "queryAccess": "查询访问",
       "interactive": "可交互",
       "accessAndScope": "访问与范围",

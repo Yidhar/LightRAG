@@ -9,7 +9,7 @@ import Input from '@/components/ui/Input'
 import Button from '@/components/ui/Button'
 import Checkbox from '@/components/ui/Checkbox'
 import AppSettings from '@/components/AppSettings'
-import { EyeIcon, EyeOffIcon, ShieldCheckIcon, ZapIcon } from 'lucide-react'
+import { EyeIcon, EyeOffIcon, ShieldCheckIcon } from 'lucide-react'
 
 const REMEMBERED_USERNAME_STORAGE_KEY = 'LIGHTRAG-REMEMBERED-USERNAME'
 
@@ -314,49 +314,21 @@ const LoginPage = () => {
               </p>
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="rounded-[28px] border border-slate-200/80 bg-white/85 p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900/75">
-                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
-                  {t('login.brandCardTitle')}
-                </p>
-                <p className="mt-3 text-sm leading-7 text-slate-600 dark:text-slate-300">
-                  {t('login.brandCardDescription')}
-                </p>
-              </div>
-              <div className="rounded-[28px] border border-slate-200/80 bg-white/85 p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900/75">
-                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
-                  {t('login.workflowCardTitle')}
-                </p>
-                <p className="mt-3 text-sm leading-7 text-slate-600 dark:text-slate-300">
-                  {t('login.workflowCardDescription')}
-                </p>
-              </div>
-            </div>
           </div>
         </section>
 
         <section className="relative z-10 w-full max-w-[520px] justify-self-center">
           <div className="surface-panel animate-in fade-in slide-in-from-bottom-4 rounded-[32px] border border-slate-200/90 px-8 py-10 shadow-[0_24px_80px_rgba(15,23,42,0.12)] duration-700 dark:border-slate-800 sm:px-10">
-            <div className="mb-10 flex flex-col items-center space-y-5">
-              <div className="relative flex items-center gap-3 rounded-[28px] border border-emerald-100 bg-emerald-500 px-5 py-4 shadow-[0_14px_36px_rgba(16,185,129,0.24)] dark:border-emerald-500/30 dark:bg-emerald-500/90">
-                <img src="logo.svg" alt={t('brand.logoAlt', { name: t('brand.name') })} className="h-10 w-10" />
-                <ZapIcon className="size-7 text-white" aria-hidden="true" />
-              </div>
-
-              <div className="space-y-2 text-center">
-                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-emerald-600/80 dark:text-emerald-400/80">
-                  {t('login.secureWorkspaceLabel')}
-                </p>
-                <h2 className="text-[2rem] font-extrabold tracking-tight text-slate-900 dark:text-slate-50">
-                  {t('login.loginButton')}
-                </h2>
-                <p className="mx-auto max-w-sm text-sm leading-relaxed text-slate-500 dark:text-slate-400">
-                  {t('login.continueDescription')}
-                </p>
-              </div>
+            <div className="mb-6 flex items-center gap-2.5">
+              <img
+                src="logo.svg"
+                alt={t('brand.logoAlt', { name: t('brand.name') })}
+                className="h-8 w-8"
+              />
+              <h2 className="text-xl font-bold tracking-tight text-slate-900 dark:text-slate-50">
+                {t('login.loginButton')}
+              </h2>
             </div>
-
-            <div className="mb-8 h-px bg-slate-200 dark:bg-slate-800" />
 
             {needsBootstrap && (
               <div
