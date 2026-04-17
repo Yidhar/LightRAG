@@ -143,6 +143,31 @@ def test_resolve_effective_role_prefers_exact_kb_membership(monkeypatch):
     assert role == "editor"
 
 
+def test_resolve_effective_role_denies_cross_workspace_access(monkeypatch):
+    """A user whose memberships do not include the requested workspace
+    must fall to ``no_access``, not ``viewer`` (which still has kb:query)."""
+    _auth, _dependencies, permissions, *_ = load_modules(monkeypatch)
+
+    role = permissions.resolve_effective_role(
+        {
+            "role": "user",
+            "memberships": [
+                {"workspace_id": "workspace_a", "kb_id": None, "role": "owner"},
+            ],
+        },
+        workspace_id="workspace_b",
+        kb_id="default",
+    )
+
+    assert role == permissions.NO_ACCESS_ROLE
+    # Sanity: no_access has no entries in ROLE_PERMISSIONS so every
+    # permission check fails — this is what keeps workspace B invisible
+    # to a token that only has membership in workspace A.
+    assert permissions.has_permission(role, permissions.Action.KB_VIEW) is False
+    assert permissions.has_permission(role, permissions.Action.KB_QUERY) is False
+    assert permissions.has_permission(role, permissions.Action.WORKSPACE_VIEW) is False
+
+
 def test_legacy_user_role_maps_to_owner_permissions(monkeypatch):
     auth, dependencies, _permissions, query_routes, _graph_routes, _document_routes = load_modules(
         monkeypatch

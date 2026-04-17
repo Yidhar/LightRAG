@@ -1,4 +1,4 @@
-export type AccessRole = 'owner' | 'admin' | 'editor' | 'viewer'
+export type AccessRole = 'owner' | 'admin' | 'editor' | 'viewer' | 'no_access'
 
 export type PermissionAction =
   | 'workspace:view'
@@ -27,6 +27,11 @@ export interface AccessContextLike {
 }
 
 const ROLE_PERMISSIONS: Record<AccessRole, Set<PermissionAction>> = {
+  // Sentinel role used when an authenticated user's memberships do not
+  // include the requested workspace/KB. Intentionally empty so every
+  // `hasPermission` check fails — mirrors the backend NO_ACCESS_ROLE and
+  // keeps one user's workspace invisible to another user's token.
+  no_access: new Set<PermissionAction>(),
   owner: new Set<PermissionAction>([
     'workspace:view',
     'workspace:update',
@@ -82,6 +87,7 @@ export const roleLabelKeys: Record<AccessRole, string> = {
   admin: 'permissions.roles.admin',
   editor: 'permissions.roles.editor',
   viewer: 'permissions.roles.viewer',
+  no_access: 'permissions.roles.noAccess',
 }
 
 export const roleDescriptionKeys: Record<AccessRole, string> = {
@@ -89,6 +95,7 @@ export const roleDescriptionKeys: Record<AccessRole, string> = {
   admin: 'permissions.roleDescriptions.admin',
   editor: 'permissions.roleDescriptions.editor',
   viewer: 'permissions.roleDescriptions.viewer',
+  no_access: 'permissions.roleDescriptions.noAccess',
 }
 
 export const normalizeMembershipClaims = (memberships: unknown): MembershipClaim[] => {
@@ -158,7 +165,11 @@ export const resolveEffectiveRole = (
       return mapLegacyRole(workspaceScopedMatch.role)
     }
 
-    return 'viewer'
+    // Memberships exist but none target this workspace/KB — return the
+    // no_access sentinel so every hasPermission check fails. Falling
+    // back to 'viewer' would still grant kb:view + kb:query and break
+    // per-user isolation.
+    return 'no_access'
   }
 
   return mapLegacyRole(tokenInfo.role)
@@ -190,11 +201,13 @@ export const summarizeRoleCapabilityKeys = (role: AccessRole): string[] => {
         'permissions.capabilities.editGraphContent',
       ]
     case 'viewer':
-    default:
       return [
         'permissions.capabilities.browseDocuments',
         'permissions.capabilities.runRetrieval',
         'permissions.capabilities.viewGraphAndApiDocs',
       ]
+    case 'no_access':
+    default:
+      return ['permissions.capabilities.noAccess']
   }
 }

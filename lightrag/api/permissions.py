@@ -37,7 +37,18 @@ class Action:
     KB_MANAGE_PERMISSIONS = "kb:manage_permissions"
 
 
+# Sentinel role returned when an authenticated user has memberships but
+# none match the workspace / KB the request targets. Intentionally not
+# present in ROLE_PERMISSIONS so every ``has_permission`` check falls
+# through to False — this is the gate that keeps one user's workspace
+# invisible to another user's token.
+NO_ACCESS_ROLE = "no_access"
+
+
 ROLE_PERMISSIONS: dict[str, set[str]] = {
+    # no_access role: explicitly empty. Do NOT ever add entries here —
+    # that would reopen the cross-workspace leak described above.
+    NO_ACCESS_ROLE: set(),
     "owner": {
         Action.WORKSPACE_VIEW,
         Action.WORKSPACE_UPDATE,
@@ -133,7 +144,12 @@ def resolve_effective_role(
             ):
                 return str(claim.get("role") or "viewer")
 
-        return "viewer"
+        # Memberships exist but none target this workspace/KB. Return the
+        # no_access sentinel rather than falling back to "viewer" — the
+        # latter still grants kb:view + kb:query, which would let user B
+        # read user A's workspace just by flipping the X-Workspace-Id
+        # header (per-user isolation leak).
+        return NO_ACCESS_ROLE
 
     return map_legacy_role(token_info.get("role"))
 

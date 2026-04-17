@@ -51,4 +51,23 @@ describe('permissions helpers', () => {
     expect(hasPermission('viewer', 'kb:query')).toBe(true)
     expect(hasPermission('viewer', 'kb:upload_document')).toBe(false)
   })
+
+  it('returns no_access when memberships exist but none match the workspace', () => {
+    // Isolation guarantee: a user whose only membership is in workspace_A
+    // must not be able to read or query workspace_B just by flipping the
+    // X-Workspace-Id header. Falling back to "viewer" here (which still
+    // has kb:view + kb:query) would break that.
+    const role = resolveEffectiveRole(
+      {
+        role: 'user',
+        memberships: [{ workspace_id: 'workspace_A', kb_id: null, role: 'owner' }],
+      },
+      { workspaceId: 'workspace_B', kbId: 'default' }
+    )
+
+    expect(role).toBe('no_access')
+    expect(hasPermission(role, 'kb:view')).toBe(false)
+    expect(hasPermission(role, 'kb:query')).toBe(false)
+    expect(hasPermission(role, 'workspace:view')).toBe(false)
+  })
 })

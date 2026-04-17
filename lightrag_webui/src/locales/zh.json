@@ -563,13 +563,15 @@
       "owner": "所有者",
       "admin": "管理员",
       "editor": "编辑者",
-      "viewer": "查看者"
+      "viewer": "查看者",
+      "noAccess": "无权访问"
     },
     "roleDescriptions": {
       "owner": "拥有工作区与知识库的完整控制权",
       "admin": "可管理工作区成员与知识库设置",
       "editor": "可维护内容、文档与图谱数据",
-      "viewer": "拥有只读工作区与检索访问权限"
+      "viewer": "拥有只读工作区与检索访问权限",
+      "noAccess": "你不是该工作区的成员，无法查看或查询其知识库"
     },
     "capabilities": {
       "manageMembers": "管理成员",
@@ -580,7 +582,8 @@
       "runRetrieval": "运行检索",
       "editGraphContent": "编辑图谱内容",
       "browseDocuments": "浏览文档",
-      "viewGraphAndApiDocs": "查看图谱与 API 文档"
+      "viewGraphAndApiDocs": "查看图谱与 API 文档",
+      "noAccess": "不可用"
     },
     "accessBadge": "{{role}}权限"
   },

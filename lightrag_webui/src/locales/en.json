@@ -563,13 +563,15 @@
       "owner": "Owner",
       "admin": "Admin",
       "editor": "Editor",
-      "viewer": "Viewer"
+      "viewer": "Viewer",
+      "noAccess": "No access"
     },
     "roleDescriptions": {
       "owner": "Full workspace and knowledge-base control",
       "admin": "Can manage workspace members and KB settings",
       "editor": "Can curate content, documents, and graph data",
-      "viewer": "Read-only workspace and retrieval access"
+      "viewer": "Read-only workspace and retrieval access",
+      "noAccess": "You are not a member of this workspace and cannot view or query its knowledge bases"
     },
     "capabilities": {
       "manageMembers": "Manage members",
@@ -580,7 +582,8 @@
       "runRetrieval": "Run retrieval",
       "editGraphContent": "Edit graph content",
       "browseDocuments": "Browse documents",
-      "viewGraphAndApiDocs": "View graph and API docs"
+      "viewGraphAndApiDocs": "View graph and API docs",
+      "noAccess": "No access"
     },
     "accessBadge": "{{role}} access"
   },
