@@ -18,7 +18,10 @@ import Checkbox from '@/components/ui/Checkbox'
 import UploadDocumentsDialog from '@/components/documents/UploadDocumentsDialog'
 import ClearDocumentsDialog from '@/components/documents/ClearDocumentsDialog'
 import DeleteDocumentsDialog from '@/components/documents/DeleteDocumentsDialog'
+import MoveDocumentDialog from '@/components/documents/MoveDocumentDialog'
 import PaginationControls from '@/components/ui/PaginationControls'
+import { useKBStore } from '@/stores/kb'
+import { defaultKnowledgeBaseId } from '@/app/routes'
 
 import {
   scanNewDocuments,
@@ -39,7 +42,7 @@ import { useAuthStore, useBackendState } from '@/stores/state'
 import { resolveKnowledgeBaseId, resolveWorkspaceId } from '@/app/routeHelpers'
 import { hasPermission, resolveEffectiveRole } from '@/lib/permissions'
 
-import { RefreshCwIcon, ActivityIcon, ArrowUpIcon, ArrowDownIcon, RotateCcwIcon, CheckSquareIcon, XIcon, AlertTriangle, Info, ImageIcon, SparklesIcon, CircleStopIcon } from 'lucide-react'
+import { RefreshCwIcon, ActivityIcon, ArrowUpIcon, ArrowDownIcon, RotateCcwIcon, CheckSquareIcon, XIcon, AlertTriangle, Info, ImageIcon, SparklesIcon, CircleStopIcon, FolderInputIcon } from 'lucide-react'
 import PipelineStatusDialog from '@/components/documents/PipelineStatusDialog'
 
 type StatusFilter = DocStatus | 'all';
@@ -312,6 +315,15 @@ export default function DocumentManager() {
   const canUploadDocuments = hasPermission(effectiveRole, 'kb:upload_document')
   const canDeleteDocuments = hasPermission(effectiveRole, 'kb:delete_document')
   const canManageSettings = hasPermission(effectiveRole, 'kb:manage_settings')
+
+  // Move-to-another-KB state. The axios interceptor injects the active
+  // KB from useKBStore on every read; we key the move dialog on this
+  // so "move X to another KB" always targets the KB the user is
+  // actually viewing (not the URL kb, which defaults to ``default``
+  // on the post-Phase-A flat route shape).
+  const activeKbIdForMove =
+    useKBStore((s) => s.activeKbId) ?? defaultKnowledgeBaseId
+  const [moveTarget, setMoveTarget] = useState<DocStatusResponse | null>(null)
   // Selection is always available inside the documents surface. Destructive
   // actions (rebuild multimodal, delete, clear) remain independently gated by
   // their own ``disabled={!can...}`` props, so allowing a read-only role to
@@ -1798,6 +1810,7 @@ export default function DocumentManager() {
           <UploadDocumentsDialog
             disabled={!canUploadDocuments}
             disabledReason={t('documentPanel.documentManager.accessMessages.uploadDisabled')}
+            workspaceId={currentWorkspaceId}
             onDocumentsUploaded={handleUploadedDocuments}
           />
           <PipelineStatusDialog
@@ -1807,6 +1820,26 @@ export default function DocumentManager() {
           />
         </div>
       </div>
+
+      <MoveDocumentDialog
+        open={moveTarget !== null}
+        onOpenChange={(next) => {
+          if (!next) setMoveTarget(null)
+        }}
+        docId={moveTarget?.id ?? null}
+        docLabel={moveTarget?.file_path || moveTarget?.id}
+        workspaceId={currentWorkspaceId}
+        currentKbId={activeKbIdForMove}
+        onMoved={() => {
+          setMoveTarget(null)
+          // The move endpoint enqueues in target + schedules source
+          // delete; refreshing the current (source) list here makes
+          // the row disappear as soon as the deletion background task
+          // flushes. If the user switches to the target KB, the
+          // doc shows up as PENDING there without extra work.
+          void fetchDocuments()
+        }}
+      />
 
       {/* Uploaded documents list — single bordered container, takes remaining height */}
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border/60 bg-background/70">
@@ -2041,6 +2074,24 @@ export default function DocumentManager() {
                                 }}
                               >
                                 <XIcon className="h-3.5 w-3.5" />
+                              </Button>
+                            )}
+                            {canDeleteDocuments && (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                side="bottom"
+                                tooltip={t(
+                                  'documentPanel.documentManager.moveDocumentTooltip',
+                                  { defaultValue: '移动到其他知识库' }
+                                )}
+                                className="ml-1 h-6 w-6 shrink-0 rounded-full text-muted-foreground hover:bg-emerald-500/10 hover:text-emerald-600 dark:hover:text-emerald-300"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  setMoveTarget(doc)
+                                }}
+                              >
+                                <FolderInputIcon className="h-3.5 w-3.5" />
                               </Button>
                             )}
                           </div>

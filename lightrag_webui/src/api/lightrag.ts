@@ -1395,15 +1395,25 @@ export const insertTexts = async (texts: string[]): Promise<DocActionResponse> =
 
 export const uploadDocument = async (
   file: File,
-  onUploadProgress?: (percentCompleted: number) => void
+  onUploadProgress?: (percentCompleted: number) => void,
+  // Optional override — when set, the upload targets this KB instead
+  // of whatever ``useKBStore.activeKbId`` points at. Lets the upload
+  // dialog offer its own KB picker without having to mutate the
+  // global store for a single-shot operation.
+  targetKbId?: string
 ): Promise<DocActionResponse> => {
   const formData = new FormData()
   formData.append('file', file)
 
+  const headers: Record<string, string> = {
+    'Content-Type': 'multipart/form-data',
+  }
+  if (targetKbId) {
+    headers['X-KB-Id'] = targetKbId
+  }
+
   const response = await axiosInstance.post('/documents/upload', formData, {
-    headers: {
-      'Content-Type': 'multipart/form-data'
-    },
+    headers,
     // prettier-ignore
     onUploadProgress:
       onUploadProgress !== undefined
@@ -1413,6 +1423,25 @@ export const uploadDocument = async (
         }
         : undefined
   })
+  return response.data
+}
+
+export type MoveDocumentResponse = {
+  status: 'moved'
+  message: string
+  doc_id: string
+  source_kb_id: string
+  target_kb_id: string
+}
+
+export const moveDocument = async (
+  docId: string,
+  targetKbId: string
+): Promise<MoveDocumentResponse> => {
+  const response = await axiosInstance.post(
+    `/documents/${encodeURIComponent(docId)}/move`,
+    { target_kb_id: targetKbId }
+  )
   return response.data
 }
 

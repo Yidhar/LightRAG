@@ -5396,6 +5396,201 @@ def create_document_routes(
             previous_status=previous_status,
         )
 
+    # ------------------------------------------------------------------
+    # Move a single document between knowledge bases within the same
+    # workspace. Implemented as "read content from source → enqueue in
+    # target → delete from source (background)" because KB storage
+    # namespaces (vector db, graph, entity/relation stores) are
+    # per-KB — physically moving the extracted artefacts would require
+    # re-indexing anyway, so we let the target KB re-run the pipeline.
+    # ------------------------------------------------------------------
+
+    class MoveDocRequest(BaseModel):
+        target_kb_id: str = Field(
+            min_length=1,
+            description="KB id within the same workspace to move the document to.",
+        )
+
+    class MoveDocResponse(BaseModel):
+        status: Literal["moved"] = Field(
+            description=(
+                "``moved``: document content was re-enqueued under the target KB "
+                "and a delete-from-source background task was scheduled."
+            )
+        )
+        message: str
+        doc_id: str
+        source_kb_id: str
+        target_kb_id: str
+
+    @router.post(
+        "/{doc_id}/move",
+        response_model=MoveDocResponse,
+        dependencies=[Depends(document_delete_permission)],
+        summary="Move a document to another KB inside the same workspace.",
+    )
+    async def move_document(
+        doc_id: str,
+        payload: MoveDocRequest,
+        request: Request,
+        background_tasks: BackgroundTasks,
+        active_rag: LightRAG = Depends(resolve_route_rag),
+        active_doc_manager: DocumentManager = Depends(resolve_route_doc_manager),
+    ) -> "MoveDocResponse":  # noqa: F821 — forward ref in same function
+        rag_factory = getattr(request.app.state, "rag_factory", None)
+        if rag_factory is None:
+            raise HTTPException(
+                status_code=501,
+                detail=(
+                    "Moving documents between KBs requires ENABLE_KB_ISOLATION=true "
+                    "and a per-KB rag factory."
+                ),
+            )
+
+        context = get_request_context(request)
+        source_workspace = context.workspace_id or getattr(
+            request.app.state, "default_workspace_id", "default"
+        )
+        source_kb = context.kb_id or getattr(
+            request.app.state, "default_kb_id", "default"
+        )
+        target_kb = payload.target_kb_id.strip()
+
+        if not target_kb:
+            raise HTTPException(
+                status_code=400, detail="target_kb_id must not be empty"
+            )
+        if target_kb == source_kb:
+            raise HTTPException(
+                status_code=400,
+                detail="Source and target knowledge bases are the same.",
+            )
+
+        # Verify target KB exists in the registry so we don't silently
+        # create a ghost namespace by typoing the id.
+        registry = getattr(request.app.state, "kb_registry", None)
+        if registry is not None and registry.get_kb(source_workspace, target_kb) is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Target knowledge base '{target_kb}' not found in workspace '{source_workspace}'.",
+            )
+
+        source_rag = _resolve_active_rag(active_rag)
+        source_doc_manager = _resolve_active_doc_manager(active_doc_manager)
+
+        # Pull the source content + original file_path so the target
+        # KB can preserve citation metadata after re-ingestion.
+        source_content_record = await source_rag.full_docs.get_by_id(doc_id)
+        if source_content_record is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Document '{doc_id}' not found in workspace "
+                f"'{source_workspace}' / KB '{source_kb}'.",
+            )
+        content = source_content_record.get("content") or ""
+        if not content:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Document '{doc_id}' has empty content — cannot move.",
+            )
+
+        source_status_record = await source_rag.doc_status.get_by_id(doc_id)
+        file_path = (
+            (source_status_record or {}).get("file_path")
+            or source_content_record.get("file_path")
+            or ""
+        )
+
+        # Pipeline cooperation: don't move a document mid-processing,
+        # otherwise the in-flight entity-extraction task for this
+        # doc_id will race with the target-side enqueue.
+        try:
+            from lightrag.kg.shared_storage import (
+                get_namespace_data,
+                get_namespace_lock,
+            )
+
+            pipeline_status = await get_namespace_data(
+                "pipeline_status", workspace=source_rag.workspace
+            )
+            pipeline_status_lock = get_namespace_lock(
+                "pipeline_status", workspace=source_rag.workspace
+            )
+            async with pipeline_status_lock:
+                if pipeline_status.get("busy", False):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Cannot move documents while the source-KB pipeline "
+                            "is busy. Wait for current processing to finish, "
+                            "then retry."
+                        ),
+                    )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "move_document: failed to check source pipeline state: %s", exc
+            )
+
+        # Enqueue in target KB. ``ainsert`` derives an MD5-based doc_id
+        # from the content, so the same content yields the same id in
+        # both source and target — we intentionally forward the
+        # original id so downstream logs / citations line up.
+        target_rag = await rag_factory.get(source_workspace, target_kb)
+        try:
+            await target_rag.ainsert(
+                content,
+                ids=[doc_id],
+                file_paths=[file_path] if file_path else None,
+            )
+        except Exception as exc:
+            logger.error(
+                "move_document: insert into target KB %s failed: %s", target_kb, exc
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to enqueue document in target KB '{target_kb}': {exc}",
+            )
+
+        # Delete from source in the background so the HTTP response
+        # returns quickly. The target-side processing also runs async,
+        # driven by the pipeline's own queue.
+        background_tasks.add_task(
+            background_delete_documents,
+            source_rag,
+            source_doc_manager,
+            [doc_id],
+            False,  # delete_file — keep the on-disk source; move is a
+                    # logical op, not a file wipe.
+            False,  # delete_llm_cache
+        )
+
+        await emit_audit_event(
+            request,
+            action="doc:move",
+            resource_type="document",
+            resource_id=doc_id,
+            outcome="success",
+            status_code=200,
+            metadata={
+                "source_workspace_id": source_workspace,
+                "source_kb_id": source_kb,
+                "target_kb_id": target_kb,
+            },
+        )
+
+        return MoveDocResponse(
+            status="moved",
+            message=(
+                f"Document '{doc_id}' enqueued in KB '{target_kb}'. "
+                f"Delete from source KB '{source_kb}' scheduled in the background."
+            ),
+            doc_id=doc_id,
+            source_kb_id=source_kb,
+            target_kb_id=target_kb,
+        )
+
     @router.post(
         "/clear_cache",
         response_model=ClearCacheResponse,
