@@ -1,6 +1,6 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { Settings2Icon, ShieldCheckIcon, SlidersHorizontalIcon, UserPlusIcon, UsersIcon } from 'lucide-react'
+import { Settings2Icon, ShieldCheckIcon, UserPlusIcon, UsersIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { appRoutes } from '@/app/routes'
@@ -39,7 +39,6 @@ import {
 } from '@/components/ui/AlertDialog'
 import Badge from '@/components/ui/Badge'
 import Button from '@/components/ui/Button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/Card'
 import {
   Dialog,
   DialogContent,
@@ -409,7 +408,7 @@ export default function KnowledgeBaseSettingsPage() {
   const canManageWorkspaceMembers = hasPermission(workspaceRole, 'workspace:invite_member')
 
   const [knowledgeBase, setKnowledgeBase] = useState<KnowledgeBaseRecord | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   const [members, setMembers] = useState<MembershipEntry[]>([])
@@ -589,391 +588,268 @@ export default function KnowledgeBaseSettingsPage() {
     : 'kb-metadata-form'
 
   return (
-    <div className="h-full overflow-auto bg-[radial-gradient(circle_at_top,_rgba(16,185,129,0.08),_transparent_28%)]">
-      <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-6 py-6">
-        <section className="surface-panel overflow-hidden rounded-[28px] border border-border/70 bg-gradient-to-br from-emerald-500/10 via-card to-card">
-          <div className="grid gap-6 px-6 py-7 lg:grid-cols-[1.5fr_1fr] lg:px-8">
-            <div className="space-y-4">
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge variant="outline" className="rounded-full px-3 py-1 uppercase tracking-[0.12em]">
-                  {t('platformShell.common.kbSettings')}
-                </Badge>
-                <AccessBadge role={effectiveRole} />
-              </div>
-              <div className="space-y-2">
-                <h1 className="text-3xl font-semibold tracking-tight text-foreground">
-                  {t('platformShell.kbSettings.title')}
-                </h1>
-                <p className="max-w-2xl text-sm leading-7 text-muted-foreground">
-                  {t('platformShell.kbSettings.description')}
-                </p>
-              </div>
-              <div className="flex flex-wrap gap-3">
-                <Button variant="outline" asChild>
-                  <Link to={appRoutes.kbDocuments(currentWorkspaceId, currentKnowledgeBaseId)}>
-                    {t('platformShell.common.openDocuments')}
-                  </Link>
-                </Button>
-                <Button variant="outline" asChild>
-                  <Link to={appRoutes.workspaces}>{t('platformShell.kbSettings.manageDirectory')}</Link>
-                </Button>
-              </div>
-            </div>
-
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-2">
-              <Card className="border-border/70 bg-background/75 shadow-none">
-                <CardHeader className="pb-3">
-                  <CardDescription>{t('platformShell.common.workspace')}</CardDescription>
-                  <CardTitle className="text-xl">{currentWorkspaceId}</CardTitle>
-                </CardHeader>
-              </Card>
-              <Card className="border-border/70 bg-background/75 shadow-none">
-                <CardHeader className="pb-3">
-                  <CardDescription>{t('platformShell.common.knowledgeBase')}</CardDescription>
-                  <CardTitle className="text-xl">{knowledgeBase?.name || currentKnowledgeBaseId}</CardTitle>
-                </CardHeader>
-              </Card>
-              <Card className="border-border/70 bg-background/75 shadow-none">
-                <CardHeader className="pb-3">
-                  <CardDescription>{t('platformShell.kbSettings.overrides')}</CardDescription>
-                  <CardTitle className="text-xl">
-                    {loading ? t('platformShell.common.loadingCount') : overrides.length}
-                  </CardTitle>
-                </CardHeader>
-              </Card>
-              <Card className="border-border/70 bg-background/75 shadow-none">
-                <CardHeader className="pb-3">
-                  <CardDescription>{t('platformShell.kbSettings.directMembers')}</CardDescription>
-                  <CardTitle className="text-xl">
-                    {canManageKnowledgeBaseMembers
-                      ? membersLoading
-                        ? t('platformShell.common.loadingCount')
-                        : members.length
-                      : t('platformShell.kbSettings.ownerOnly')}
-                  </CardTitle>
-                </CardHeader>
-              </Card>
-            </div>
+    <div className="flex h-full flex-col overflow-hidden bg-background">
+      {/* Hero strip */}
+      <header className="flex flex-wrap items-end justify-between gap-4 border-b border-border/60 px-6 py-4">
+        <div className="min-w-0 space-y-1.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge
+              variant="outline"
+              className="rounded-full px-2.5 py-0.5 text-[11px] uppercase tracking-[0.12em]"
+            >
+              {t('platformShell.common.kbSettings')}
+            </Badge>
+            <span className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
+              {currentWorkspaceId} / {knowledgeBase?.name || currentKnowledgeBaseId}
+            </span>
           </div>
-        </section>
+          <h1 className="text-2xl font-semibold tracking-tight text-foreground">
+            {t('platformShell.kbSettings.title')}
+          </h1>
+          <p className="max-w-3xl text-sm leading-6 text-muted-foreground">
+            {t('platformShell.kbSettings.description')}
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" size="sm" asChild>
+            <Link to={appRoutes.kbDocuments(currentWorkspaceId, currentKnowledgeBaseId)}>
+              {t('platformShell.common.openDocuments')}
+            </Link>
+          </Button>
+          {canManageWorkspaceMembers && (
+            <Button variant="outline" size="sm" asChild>
+              <Link to={appRoutes.workspaceMembers(currentWorkspaceId)}>
+                {t('platformShell.kbSettings.openWorkspaceMembers')}
+              </Link>
+            </Button>
+          )}
+        </div>
+      </header>
 
-        <section className="grid gap-6 xl:grid-cols-[1fr_1.45fr]">
-          <Card className="border-border/70">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <ShieldCheckIcon className="size-4 text-emerald-600 dark:text-emerald-400" />
-                {t('platformShell.kbSettings.effectiveAccessTitle')}
-              </CardTitle>
-              <CardDescription>{t('platformShell.kbSettings.effectiveAccessDescription')}</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex flex-wrap gap-2">
-                {summarizeRoleCapabilityKeys(effectiveRole).map((capabilityKey) => (
-                  <Badge key={capabilityKey} variant="outline" className="rounded-full bg-muted/40 px-3 py-1">
-                    {t(capabilityKey)}
-                  </Badge>
-                ))}
-              </div>
+      {/* Access ribbon */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border/60 bg-muted/20 px-6 py-2 text-sm">
+        <div className="flex min-w-0 items-center gap-2">
+          <ShieldCheckIcon
+            className="size-4 shrink-0 text-emerald-600 dark:text-emerald-400"
+            aria-hidden="true"
+          />
+          <span className="font-medium text-foreground">
+            {t('platformShell.kbSettings.effectiveAccessTitle')}
+          </span>
+          <span className="text-muted-foreground">·</span>
+          <span className="truncate text-muted-foreground">
+            {t(roleDescriptionKeys[effectiveRole])}
+          </span>
+        </div>
+        <div className="ml-auto flex flex-wrap items-center gap-1.5">
+          {summarizeRoleCapabilityKeys(effectiveRole).map((capabilityKey) => (
+            <Badge
+              key={capabilityKey}
+              variant="outline"
+              className="rounded-full bg-background/70 px-2.5 py-0.5 text-[11px]"
+            >
+              {t(capabilityKey)}
+            </Badge>
+          ))}
+        </div>
+      </div>
 
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="rounded-2xl border border-border/70 bg-muted/20 p-4">
-                  <p className="text-xs uppercase tracking-[0.12em] text-muted-foreground">
-                    {t('platformShell.kbSettings.kbRole')}
-                  </p>
-                  <div className="mt-2">
-                    <AccessBadge role={effectiveRole} compact />
-                  </div>
-                </div>
-                <div className="rounded-2xl border border-border/70 bg-muted/20 p-4">
-                  <p className="text-xs uppercase tracking-[0.12em] text-muted-foreground">
-                    {t('platformShell.kbSettings.workspaceFallback')}
-                  </p>
-                  <div className="mt-2">
-                    <AccessBadge role={workspaceRole} compact />
-                  </div>
-                </div>
-              </div>
+      <div className="min-h-0 flex-1 overflow-auto">
+        <div className="mx-auto flex w-full max-w-5xl flex-col gap-5 px-6 py-6">
+          {error && (
+            <Alert className="border-border/70 bg-muted/20">
+              <AlertTitle>
+                {t('platformShell.kbSettings.registryUnavailableTitle')}
+              </AlertTitle>
+              <AlertDescription>
+                {t('platformShell.kbSettings.registryUnavailableDescription')}
+              </AlertDescription>
+            </Alert>
+          )}
 
-              <div className="rounded-2xl border border-border/70 bg-muted/20 p-4">
-                <p className="text-xs uppercase tracking-[0.12em] text-muted-foreground">
-                  {t('platformShell.kbSettings.currentStatus')}
-                </p>
-                <p className="mt-2 text-sm font-medium text-foreground">
-                  {loading
-                    ? t('platformShell.kbSettings.loadingMetadata')
-                    : knowledgeBase?.status || t('platformShell.kbSettings.compatibilityMode')}
-                </p>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card className="border-border/70">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Settings2Icon className="size-4 text-emerald-600 dark:text-emerald-400" />
+          {/* Metadata editor — the primary reason this page exists */}
+          <section className="space-y-3">
+            <div className="flex items-center gap-2">
+              <Settings2Icon
+                className="size-4 text-emerald-600 dark:text-emerald-400"
+                aria-hidden="true"
+              />
+              <h2 className="text-sm font-semibold uppercase tracking-[0.12em] text-muted-foreground">
                 {t('platformShell.kbSettings.metadataAndOverridesTitle')}
-              </CardTitle>
-              <CardDescription>{t('platformShell.kbSettings.metadataAndOverridesDescription')}</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {error && (
-                <Alert className="border-border/70 bg-muted/20">
-                  <AlertTitle>{t('platformShell.kbSettings.registryUnavailableTitle')}</AlertTitle>
-                  <AlertDescription>{t('platformShell.kbSettings.registryUnavailableDescription')}</AlertDescription>
-                </Alert>
+              </h2>
+              {overrides.length > 0 && (
+                <Badge
+                  variant="outline"
+                  className="rounded-full px-2 py-0.5 text-[10px]"
+                >
+                  {overrides.length}{' '}
+                  {t('platformShell.kbSettings.overrides', { defaultValue: 'overrides' })}
+                </Badge>
               )}
+            </div>
 
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="rounded-2xl border border-border/70 bg-background/75 p-4">
-                  <p className="text-xs uppercase tracking-[0.12em] text-muted-foreground">
-                    {t('platformShell.workspaceDirectory.kbId')}
-                  </p>
-                  <p className="mt-2 text-sm font-medium text-foreground">{currentKnowledgeBaseId}</p>
-                </div>
-                <div className="rounded-2xl border border-border/70 bg-background/75 p-4">
-                  <p className="text-xs uppercase tracking-[0.12em] text-muted-foreground">
-                    {t('platformShell.workspaceDirectory.displayName')}
-                  </p>
-                  <p className="mt-2 text-sm font-medium text-foreground">
-                    {knowledgeBase?.name || currentKnowledgeBaseId}
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-border/70 bg-background/75 p-4 sm:col-span-2">
-                  <p className="text-xs uppercase tracking-[0.12em] text-muted-foreground">
-                    {t('platformShell.workspaceDirectory.descriptionLabel')}
-                  </p>
-                  <p className="mt-2 text-sm font-medium text-foreground">
-                    {knowledgeBase?.description || t('platformShell.kbSettings.noDescription')}
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-border/70 bg-background/75 p-4">
-                  <p className="text-xs uppercase tracking-[0.12em] text-muted-foreground">
-                    {t('platformShell.kbSettings.createdAt')}
-                  </p>
-                  <p className="mt-2 text-sm font-medium text-foreground">
-                    {knowledgeBase?.created_at || t('platformShell.kbSettings.notExposedYet')}
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-border/70 bg-background/75 p-4">
-                  <p className="text-xs uppercase tracking-[0.12em] text-muted-foreground">
-                    {t('platformShell.kbSettings.lifecycleStatus')}
-                  </p>
-                  <p className="mt-2 text-sm font-medium text-foreground">
-                    {knowledgeBase?.status || t('platformShell.kbSettings.compatibilityMode')}
-                  </p>
-                </div>
+            {knowledgeBase ? (
+              canManageKnowledgeBaseSettings ? (
+                <KnowledgeBaseMetadataEditor
+                  key={metadataEditorKey}
+                  knowledgeBase={knowledgeBase}
+                  submitting={metadataSubmitting}
+                  onSubmit={handleMetadataSubmit}
+                />
+              ) : (
+                <Alert className="border-border/70 bg-muted/20">
+                  <AlertTitle>
+                    {t('platformShell.kbSettings.metadataReadOnlyTitle')}
+                  </AlertTitle>
+                  <AlertDescription>
+                    {t('platformShell.kbSettings.metadataReadOnlyDescription')}
+                  </AlertDescription>
+                </Alert>
+              )
+            ) : (
+              <div className="rounded-xl border border-dashed border-border/70 px-4 py-8 text-center text-sm text-muted-foreground">
+                {t('platformShell.kbSettings.metadataPlaceholder')}
               </div>
+            )}
+          </section>
 
-              <div className="rounded-2xl border border-border/70 bg-background/75 p-4">
-                <div className="mb-3 flex items-center gap-2">
-                  <SlidersHorizontalIcon className="size-4 text-emerald-600 dark:text-emerald-400" />
-                  <p className="font-medium text-foreground">{t('platformShell.kbSettings.configOverrideKeys')}</p>
-                </div>
-
-                {overrides.length > 0 ? (
-                  <div className="flex flex-wrap gap-2">
-                    {overrides.map(([key, value]) => (
-                      <Badge key={key} variant="outline" className="rounded-full px-3 py-1">
-                        <span className="mr-2 text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
-                          {key}
-                        </span>
-                        <span className="font-medium text-foreground">{String(value)}</span>
-                      </Badge>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-sm leading-6 text-muted-foreground">{t('platformShell.kbSettings.noOverrides')}</p>
+          {/* KB-scoped members — only when the caller can manage them */}
+          {canManageKnowledgeBaseMembers ? (
+            <section className="space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <UsersIcon
+                  className="size-4 text-emerald-600 dark:text-emerald-400"
+                  aria-hidden="true"
+                />
+                <h2 className="text-sm font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                  {t('platformShell.kbSettings.memberAssignmentsTitle')}
+                </h2>
+                {!membersLoading && (
+                  <Badge
+                    variant="outline"
+                    className="rounded-full px-2 py-0.5 text-[10px]"
+                  >
+                    {members.length}
+                  </Badge>
                 )}
-              </div>
-
-              {knowledgeBase ? (
-                canManageKnowledgeBaseSettings ? (
-                  <KnowledgeBaseMetadataEditor
-                    key={metadataEditorKey}
-                    knowledgeBase={knowledgeBase}
-                    submitting={metadataSubmitting}
-                    onSubmit={handleMetadataSubmit}
-                  />
-                ) : (
-                  <Alert className="border-border/70 bg-muted/20">
-                    <AlertTitle>{t('platformShell.kbSettings.metadataReadOnlyTitle')}</AlertTitle>
-                    <AlertDescription>{t('platformShell.kbSettings.metadataReadOnlyDescription')}</AlertDescription>
-                  </Alert>
-                )
-              ) : (
-                <div className="rounded-2xl border border-dashed border-border/70 px-4 py-6 text-sm text-muted-foreground">
-                  {t('platformShell.kbSettings.metadataPlaceholder')}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </section>
-
-        <section className="grid gap-6 xl:grid-cols-[1fr_1.45fr]">
-          <Card className="border-border/70">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <ShieldCheckIcon className="size-4 text-emerald-600 dark:text-emerald-400" />
-                {t('platformShell.kbSettings.permissionScopeTitle')}
-              </CardTitle>
-              <CardDescription>{t(roleDescriptionKeys[effectiveRole])}</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {canManageKnowledgeBaseMembers ? (
-                <div className="grid gap-3 sm:grid-cols-2">
-                  {membershipRoles.map((entryRole) => (
-                    <div key={entryRole} className="rounded-2xl border border-border/70 bg-muted/20 p-4">
-                      <div className="mb-2 flex items-center justify-between gap-3">
+                <div className="ml-auto flex flex-wrap items-center gap-1.5">
+                  {membershipRoles
+                    .filter((entryRole) => (roleCounts[entryRole] || 0) > 0)
+                    .map((entryRole) => (
+                      <div
+                        key={entryRole}
+                        className="inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-background/70 px-2.5 py-0.5"
+                      >
                         <AccessBadge role={entryRole} compact />
-                        <span className="text-sm font-semibold text-foreground">{roleCounts[entryRole] || 0}</span>
+                        <span className="text-xs font-semibold text-foreground">
+                          {roleCounts[entryRole] || 0}
+                        </span>
                       </div>
-                      <p className="text-xs text-muted-foreground">
-                        {t('platformShell.kbSettings.directAssignmentsUsingRole')}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <Alert className="border-border/70 bg-muted/20">
-                  <AlertTitle>{t('platformShell.kbSettings.permissionsOwnerManagedTitle')}</AlertTitle>
-                  <AlertDescription>{t('platformShell.kbSettings.permissionsOwnerManagedDescription')}</AlertDescription>
-                </Alert>
-              )}
-
-              <div className="rounded-2xl border border-border/70 bg-background/75 p-4">
-                <p className="text-sm font-medium text-foreground">{t('platformShell.kbSettings.permissionLayeringTitle')}</p>
-                <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                  {t('platformShell.kbSettings.permissionLayeringDescription')}
-                </p>
-              </div>
-
-              {canManageWorkspaceMembers && (
-                <Button variant="outline" asChild>
-                  <Link to={appRoutes.workspaceMembers(currentWorkspaceId)}>
-                    {t('platformShell.kbSettings.openWorkspaceMembers')}
-                  </Link>
-                </Button>
-              )}
-            </CardContent>
-          </Card>
-
-          <Card className="border-border/70">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <UsersIcon className="size-4 text-emerald-600 dark:text-emerald-400" />
-                {t('platformShell.kbSettings.memberAssignmentsTitle')}
-              </CardTitle>
-              <CardDescription>{t('platformShell.kbSettings.memberAssignmentsDescription')}</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {canManageKnowledgeBaseMembers ? (
-                <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border/70 bg-background/75 p-4">
-                  <div className="space-y-1">
-                    <p className="text-sm font-medium text-foreground">
-                      {t('platformShell.kbSettings.directAssignmentManagementTitle')}
-                    </p>
-                    <p className="text-sm text-muted-foreground">
-                      {t('platformShell.kbSettings.directAssignmentManagementDescription')}
-                    </p>
-                  </div>
-                  <Button onClick={openCreateDialog}>
+                    ))}
+                  <Button size="sm" onClick={openCreateDialog}>
                     <UserPlusIcon className="size-4" />
                     {t('platformShell.kbSettings.members.dialog.addMember')}
                   </Button>
                 </div>
-              ) : (
-                <div className="rounded-2xl border border-dashed border-border/70 px-4 py-6 text-sm text-muted-foreground">
-                  {t('platformShell.kbSettings.memberEditingHidden')}
-                </div>
-              )}
+              </div>
 
               {membersError && (
                 <Alert className="border-border/70 bg-muted/20">
-                  <AlertTitle>{t('platformShell.kbSettings.memberManagementUnavailableTitle')}</AlertTitle>
-                  <AlertDescription>{t('platformShell.kbSettings.memberManagementUnavailableDescription')}</AlertDescription>
+                  <AlertTitle>
+                    {t('platformShell.kbSettings.memberManagementUnavailableTitle')}
+                  </AlertTitle>
+                  <AlertDescription>
+                    {t('platformShell.kbSettings.memberManagementUnavailableDescription')}
+                  </AlertDescription>
                 </Alert>
               )}
 
-              {canManageKnowledgeBaseMembers ? (
-                membersLoading ? (
-                  <div className="rounded-2xl border border-dashed border-border/70 px-4 py-6 text-sm text-muted-foreground">
-                    {t('platformShell.kbSettings.loadingMembers')}
-                  </div>
-                ) : members.length > 0 ? (
-                  <div className="space-y-3 rounded-2xl border border-border/70 bg-background/70 p-0">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>{t('platformShell.kbSettings.table.user')}</TableHead>
-                          <TableHead>{t('platformShell.kbSettings.table.role')}</TableHead>
-                          <TableHead>{t('platformShell.kbSettings.table.source')}</TableHead>
-                          <TableHead>{t('platformShell.kbSettings.table.updated')}</TableHead>
-                          <TableHead className="text-right">{t('platformShell.kbSettings.table.actions')}</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {members.map((member) => {
-                          const isCurrentUser = Boolean(username) && member.username === username
-
-                          return (
-                            <TableRow key={member.membership_id}>
-                              <TableCell className="font-medium">
-                                <div className="flex flex-wrap items-center gap-2">
-                                  <span>{member.username}</span>
-                                  {isCurrentUser && (
-                                    <Badge variant="outline" className="rounded-full px-2.5 py-0.5 text-[11px]">
-                                      {t('platformShell.kbSettings.currentSession')}
-                                    </Badge>
-                                  )}
-                                </div>
-                              </TableCell>
-                              <TableCell>
-                                <AccessBadge role={member.role} compact />
-                              </TableCell>
-                              <TableCell className="text-muted-foreground">{member.source}</TableCell>
-                              <TableCell className="text-muted-foreground">{member.updated_at}</TableCell>
-                              <TableCell className="text-right">
-                                <div className="flex items-center justify-end gap-2">
-                                  <Button
+              {membersLoading ? (
+                <div className="rounded-xl border border-dashed border-border/70 px-4 py-8 text-center text-sm text-muted-foreground">
+                  {t('platformShell.kbSettings.loadingMembers')}
+                </div>
+              ) : members.length > 0 ? (
+                <div className="rounded-xl border border-border/60 bg-background/70">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>{t('platformShell.kbSettings.table.user')}</TableHead>
+                        <TableHead>{t('platformShell.kbSettings.table.role')}</TableHead>
+                        <TableHead>{t('platformShell.kbSettings.table.source')}</TableHead>
+                        <TableHead>{t('platformShell.kbSettings.table.updated')}</TableHead>
+                        <TableHead className="text-right">
+                          {t('platformShell.kbSettings.table.actions')}
+                        </TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {members.map((member) => {
+                        const isCurrentUser =
+                          Boolean(username) && member.username === username
+                        return (
+                          <TableRow key={member.membership_id}>
+                            <TableCell className="font-medium">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span>{member.username}</span>
+                                {isCurrentUser && (
+                                  <Badge
                                     variant="outline"
-                                    size="sm"
-                                    onClick={() => openEditDialog(member)}
-                                    disabled={isCurrentUser}
+                                    className="rounded-full px-2.5 py-0.5 text-[11px]"
                                   >
-                                    {t('platformShell.common.edit')}
-                                  </Button>
-                                  <Button
-                                    variant="outline"
-                                    size="sm"
-                                    className="border-destructive/30 text-destructive hover:bg-destructive/10 hover:text-destructive"
-                                    onClick={() => setDeleteTarget(member)}
-                                    disabled={isCurrentUser}
-                                  >
-                                    {t('platformShell.common.remove')}
-                                  </Button>
-                                </div>
-                              </TableCell>
-                            </TableRow>
-                          )
-                        })}
-                      </TableBody>
-                    </Table>
-
-                    {hasCurrentUserAssignment && (
-                      <div className="px-4 pb-4 text-xs leading-5 text-muted-foreground">
-                        {t('platformShell.kbSettings.currentSessionLocked')}
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div className="rounded-2xl border border-dashed border-border/70 px-4 py-6 text-sm text-muted-foreground">
-                    {t('platformShell.kbSettings.noMembers')}
-                  </div>
-                )
-              ) : null}
-            </CardContent>
-          </Card>
-        </section>
+                                    {t('platformShell.kbSettings.currentSession')}
+                                  </Badge>
+                                )}
+                              </div>
+                            </TableCell>
+                            <TableCell>
+                              <AccessBadge role={member.role} compact />
+                            </TableCell>
+                            <TableCell className="text-muted-foreground">
+                              {member.source}
+                            </TableCell>
+                            <TableCell className="text-muted-foreground">
+                              {member.updated_at}
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <div className="flex items-center justify-end gap-2">
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() => openEditDialog(member)}
+                                  disabled={isCurrentUser}
+                                >
+                                  {t('platformShell.common.edit')}
+                                </Button>
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="border-destructive/30 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                                  onClick={() => setDeleteTarget(member)}
+                                  disabled={isCurrentUser}
+                                >
+                                  {t('platformShell.common.remove')}
+                                </Button>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        )
+                      })}
+                    </TableBody>
+                  </Table>
+                  {hasCurrentUserAssignment && (
+                    <div className="border-t border-border/60 px-4 py-2 text-xs leading-5 text-muted-foreground">
+                      {t('platformShell.kbSettings.currentSessionLocked')}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="rounded-xl border border-dashed border-border/70 px-4 py-8 text-center text-sm text-muted-foreground">
+                  {t('platformShell.kbSettings.noMembers')}
+                </div>
+              )}
+            </section>
+          ) : null}
+        </div>
       </div>
 
       <KnowledgeBaseMemberFormDialog

@@ -35,7 +35,6 @@ import {
 } from '@/components/ui/AlertDialog'
 import Badge from '@/components/ui/Badge'
 import Button from '@/components/ui/Button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/Card'
 import {
   Dialog,
   DialogContent,
@@ -313,203 +312,186 @@ export default function MembersPage() {
   }
 
   return (
-    <div className="h-full overflow-auto bg-[radial-gradient(circle_at_top,_rgba(16,185,129,0.08),_transparent_28%)]">
-      <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-6 px-4 py-6 sm:px-6">
-        <section className="surface-panel overflow-hidden rounded-[32px] border border-border/70 bg-gradient-to-br from-emerald-500/10 via-card to-card">
-          <div className="px-6 py-7 lg:px-8">
-            <div className="space-y-6">
-              <div className="space-y-5 rounded-[28px] border border-border/70 bg-background/80 p-6 shadow-sm">
-                <div className="flex flex-wrap items-center gap-2">
-                  <Badge variant="outline" className="rounded-full px-3 py-1 uppercase tracking-[0.12em]">
-                    {t('platformShell.workspaceMembers.badge')}
-                  </Badge>
-                  <AccessBadge role={effectiveRole} />
-                </div>
+    <div className="flex h-full flex-col overflow-hidden bg-background">
+      {/* Hero strip */}
+      <header className="flex flex-wrap items-end justify-between gap-4 border-b border-border/60 px-6 py-4">
+        <div className="min-w-0 space-y-1.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge
+              variant="outline"
+              className="rounded-full px-2.5 py-0.5 text-[11px] uppercase tracking-[0.12em]"
+            >
+              {t('platformShell.workspaceMembers.badge')}
+            </Badge>
+            <span className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
+              {currentWorkspaceId}
+            </span>
+          </div>
+          <h1 className="text-2xl font-semibold tracking-tight text-foreground">
+            {t('platformShell.workspaceMembers.title')}
+          </h1>
+          <p className="max-w-3xl text-sm leading-6 text-muted-foreground">
+            {t('platformShell.workspaceMembers.description')}
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" size="sm" asChild>
+            <Link to={appRoutes.workspaceSettings(currentWorkspaceId)}>
+              {t('platformShell.workspaceMembers.openWorkspaceSettings')}
+            </Link>
+          </Button>
+          {canManageMembers && (
+            <Button size="sm" onClick={openCreateDialog}>
+              <UserPlusIcon className="size-4" />
+              {t('platformShell.workspaceMembers.addMember')}
+            </Button>
+          )}
+        </div>
+      </header>
 
-                <div className="space-y-2">
-                  <h1 className="text-3xl font-semibold tracking-tight text-foreground sm:text-4xl">
-                    {t('platformShell.workspaceMembers.title')}
-                  </h1>
-                  <p className="max-w-3xl text-sm leading-7 text-muted-foreground sm:text-[15px]">
-                    {t('platformShell.workspaceMembers.description')}
-                  </p>
-                </div>
+      {/* Access ribbon */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border/60 bg-muted/20 px-6 py-2 text-sm">
+        <div className="flex min-w-0 items-center gap-2">
+          <ShieldCheckIcon
+            className="size-4 shrink-0 text-emerald-600 dark:text-emerald-400"
+            aria-hidden="true"
+          />
+          <span className="font-medium text-foreground">
+            {t('platformShell.workspaceMembers.roleSummary')}
+          </span>
+          <span className="text-muted-foreground">·</span>
+          <span className="truncate text-muted-foreground">
+            {t(roleDescriptionKeys[effectiveRole])}
+          </span>
+        </div>
+        <div className="ml-auto flex flex-wrap items-center gap-1.5">
+          {summarizeRoleCapabilityKeys(effectiveRole).map((capabilityKey) => (
+            <Badge
+              key={capabilityKey}
+              variant="outline"
+              className="rounded-full bg-background/70 px-2.5 py-0.5 text-[11px]"
+            >
+              {t(capabilityKey)}
+            </Badge>
+          ))}
+        </div>
+      </div>
 
-                <div className="grid gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(300px,0.8fr)]">
-                  <div className="rounded-[24px] border border-border/70 bg-muted/20 p-5">
-                    <div className="mb-3 flex items-center gap-2">
-                      <ShieldCheckIcon className="size-4 text-emerald-600 dark:text-emerald-400" />
-                      <p className="font-medium text-foreground">{t('platformShell.workspaceMembers.roleSummary')}</p>
+      <div className="min-h-0 flex-1 overflow-auto">
+        <div className="mx-auto flex w-full max-w-[1400px] flex-col gap-4 px-6 py-6">
+          {/* Role-count strip — only roles with ≥1 member, inline, no */}
+          {/* giant card. */}
+          {!loading && members.length > 0 && (
+            <div className="flex items-center gap-2">
+              <UsersIcon
+                className="size-4 text-emerald-600 dark:text-emerald-400"
+                aria-hidden="true"
+              />
+              <h2 className="text-sm font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                {t('platformShell.workspaceMembers.workspaceRoster')}
+              </h2>
+              <Badge variant="outline" className="rounded-full px-2 py-0.5 text-[10px]">
+                {members.length}
+              </Badge>
+              <div className="ml-auto flex flex-wrap items-center gap-1.5">
+                {membershipRoles
+                  .filter((entryRole) => (roleCounts[entryRole] || 0) > 0)
+                  .map((entryRole) => (
+                    <div
+                      key={entryRole}
+                      className="inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-background/70 px-2.5 py-0.5"
+                    >
+                      <AccessBadge role={entryRole} compact />
+                      <span className="text-xs font-semibold text-foreground">
+                        {roleCounts[entryRole] || 0}
+                      </span>
                     </div>
-                    <p className="text-sm leading-6 text-muted-foreground">{t(roleDescriptionKeys[effectiveRole])}</p>
-
-                    <div className="mt-5 flex flex-wrap gap-2">
-                      {summarizeRoleCapabilityKeys(effectiveRole).map((capabilityKey) => (
-                        <Badge key={capabilityKey} variant="outline" className="rounded-full bg-background/80 px-3 py-1">
-                          {t(capabilityKey)}
-                        </Badge>
-                      ))}
-                    </div>
-
-                    <div className="mt-5 flex flex-wrap gap-2">
-                      <Badge variant="outline" className="rounded-full px-3 py-1">
-                        {t('platformShell.workspaceMembers.workspaceScope')}: {currentWorkspaceId}
-                      </Badge>
-                      <Badge variant="outline" className="rounded-full px-3 py-1">
-                        {t('platformShell.workspaceMembers.loadedMembers')}:{' '}
-                        {loading ? t('platformShell.common.loadingCount') : members.length}
-                      </Badge>
-                    </div>
-                  </div>
-
-                  <div className="rounded-[24px] border border-border/70 bg-muted/20 p-5">
-                    <div className="mb-3 flex items-center gap-2">
-                      <UsersIcon className="size-4 text-emerald-600 dark:text-emerald-400" />
-                      <p className="font-medium text-foreground">{t('platformShell.workspaceMembers.workspaceRoster')}</p>
-                    </div>
-                    <p className="text-sm leading-6 text-muted-foreground">
-                      {t('platformShell.workspaceMembers.workspaceRosterDescription')}
-                    </p>
-
-                    <div className="mt-5 flex flex-wrap gap-2">
-                      {membershipRoles.map((entryRole) => (
-                        <div
-                          key={entryRole}
-                          className="inline-flex items-center gap-2 rounded-full border border-border/70 bg-background/80 px-3 py-2"
-                        >
-                          <AccessBadge role={entryRole} compact />
-                          <span className="text-sm font-semibold text-foreground">
-                            {loading ? t('platformShell.common.loadingCount') : roleCounts[entryRole] || 0}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-
-                    <div className="mt-5 flex flex-wrap gap-3">
-                      <Button variant="outline" asChild>
-                        <Link to={appRoutes.workspaceSettings(currentWorkspaceId)}>
-                          {t('platformShell.workspaceMembers.openWorkspaceSettings')}
-                        </Link>
-                      </Button>
-                      {canManageMembers && (
-                        <Button onClick={openCreateDialog}>
-                          <UserPlusIcon className="size-4" />
-                          {t('platformShell.workspaceMembers.addMember')}
-                        </Button>
-                      )}
-                    </div>
-                  </div>
-                </div>
+                  ))}
               </div>
             </div>
-          </div>
-        </section>
+          )}
 
-        <section>
-          <Card className="border-border/70">
-            <CardHeader className="gap-4 sm:flex-row sm:items-center sm:justify-between">
-              <div className="space-y-2">
-                <CardTitle className="flex items-center gap-2">
-                  <UsersIcon className="size-4 text-emerald-600 dark:text-emerald-400" />
-                  {t('platformShell.workspaceMembers.workspaceRoster')}
-                </CardTitle>
-                <CardDescription>
-                  {t('platformShell.workspaceMembers.workspaceRosterDescription')}
-                </CardDescription>
-              </div>
-              {canManageMembers && (
-                <Button onClick={openCreateDialog}>
-                  <UserPlusIcon className="size-4" />
-                  {t('platformShell.workspaceMembers.addMember')}
-                </Button>
-              )}
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {error && (
-                <Alert className="border-border/70 bg-muted/20">
-                  <AlertTitle>{t('platformShell.workspaceMembers.unavailableTitle')}</AlertTitle>
-                  <AlertDescription>{t('platformShell.workspaceMembers.unavailableDescription')}</AlertDescription>
-                </Alert>
-              )}
+          {error && (
+            <Alert className="border-border/70 bg-muted/20">
+              <AlertTitle>
+                {t('platformShell.workspaceMembers.unavailableTitle')}
+              </AlertTitle>
+              <AlertDescription>
+                {t('platformShell.workspaceMembers.unavailableDescription')}
+              </AlertDescription>
+            </Alert>
+          )}
 
-              {!canManageMembers && (
-                <Alert className="border-border/70 bg-muted/20">
-                  <AlertTitle>{t('platformShell.workspaceMembers.readOnlyTitle')}</AlertTitle>
-                  <AlertDescription>{t('platformShell.workspaceMembers.readOnlyDescription')}</AlertDescription>
-                </Alert>
-              )}
+          {!canManageMembers && !error && (
+            <Alert className="border-border/70 bg-muted/20">
+              <AlertTitle>{t('platformShell.workspaceMembers.readOnlyTitle')}</AlertTitle>
+              <AlertDescription>
+                {t('platformShell.workspaceMembers.readOnlyDescription')}
+              </AlertDescription>
+            </Alert>
+          )}
 
-              {!loading && members.length > 0 && (
-                <div className="flex flex-wrap gap-2">
-                  {membershipRoles
-                    .filter((entryRole) => (roleCounts[entryRole] || 0) > 0)
-                    .map((entryRole) => (
-                      <div
-                        key={entryRole}
-                        className="inline-flex items-center gap-2 rounded-full border border-border/70 bg-muted/20 px-3 py-2"
-                      >
-                        <AccessBadge role={entryRole} compact />
-                        <span className="text-sm font-semibold text-foreground">{roleCounts[entryRole] || 0}</span>
-                      </div>
-                    ))}
-                </div>
-              )}
-
-              {loading ? (
-                <div className="rounded-2xl border border-dashed border-border/70 px-4 py-6 text-sm text-muted-foreground">
-                  {t('platformShell.workspaceMembers.loadingMembers')}
-                </div>
-              ) : members.length > 0 ? (
-                <div className="rounded-2xl border border-border/70 bg-background/70">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>{t('platformShell.workspaceMembers.table.user')}</TableHead>
-                        <TableHead>{t('platformShell.workspaceMembers.table.role')}</TableHead>
-                        <TableHead>{t('platformShell.workspaceMembers.table.source')}</TableHead>
-                        <TableHead>{t('platformShell.workspaceMembers.table.updated')}</TableHead>
-                        {canManageMembers && <TableHead className="text-right">{t('platformShell.workspaceMembers.table.actions')}</TableHead>}
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {members.map((member) => (
-                        <TableRow key={member.membership_id}>
-                          <TableCell className="font-medium">{member.username}</TableCell>
-                          <TableCell>
-                            <AccessBadge role={member.role} compact />
-                          </TableCell>
-                          <TableCell className="text-muted-foreground">{member.source}</TableCell>
-                          <TableCell className="text-muted-foreground">{member.updated_at}</TableCell>
-                          {canManageMembers && (
-                            <TableCell className="text-right">
-                              <div className="flex items-center justify-end gap-2">
-                                <Button variant="outline" size="sm" onClick={() => openEditDialog(member)}>
-                                  {t('platformShell.common.edit')}
-                                </Button>
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  className="border-destructive/30 text-destructive hover:bg-destructive/10 hover:text-destructive"
-                                  onClick={() => setDeleteTarget(member)}
-                                >
-                                  {t('platformShell.common.remove')}
-                                </Button>
-                              </div>
-                            </TableCell>
-                          )}
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
-              ) : (
-                <div className="rounded-2xl border border-dashed border-border/70 px-4 py-6 text-sm text-muted-foreground">
-                  {t('platformShell.workspaceMembers.empty')}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </section>
+          {loading ? (
+            <div className="rounded-xl border border-dashed border-border/70 px-4 py-8 text-center text-sm text-muted-foreground">
+              {t('platformShell.workspaceMembers.loadingMembers')}
+            </div>
+          ) : members.length > 0 ? (
+            <div className="rounded-xl border border-border/60 bg-background/70">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>{t('platformShell.workspaceMembers.table.user')}</TableHead>
+                    <TableHead>{t('platformShell.workspaceMembers.table.role')}</TableHead>
+                    <TableHead>{t('platformShell.workspaceMembers.table.source')}</TableHead>
+                    <TableHead>{t('platformShell.workspaceMembers.table.updated')}</TableHead>
+                    {canManageMembers && (
+                      <TableHead className="text-right">
+                        {t('platformShell.workspaceMembers.table.actions')}
+                      </TableHead>
+                    )}
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {members.map((member) => (
+                    <TableRow key={member.membership_id}>
+                      <TableCell className="font-medium">{member.username}</TableCell>
+                      <TableCell>
+                        <AccessBadge role={member.role} compact />
+                      </TableCell>
+                      <TableCell className="text-muted-foreground">{member.source}</TableCell>
+                      <TableCell className="text-muted-foreground">{member.updated_at}</TableCell>
+                      {canManageMembers && (
+                        <TableCell className="text-right">
+                          <div className="flex items-center justify-end gap-2">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => openEditDialog(member)}
+                            >
+                              {t('platformShell.common.edit')}
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="border-destructive/30 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                              onClick={() => setDeleteTarget(member)}
+                            >
+                              {t('platformShell.common.remove')}
+                            </Button>
+                          </div>
+                        </TableCell>
+                      )}
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          ) : (
+            <div className="rounded-xl border border-dashed border-border/70 px-4 py-8 text-center text-sm text-muted-foreground">
+              {t('platformShell.workspaceMembers.empty')}
+            </div>
+          )}
+        </div>
       </div>
 
       <MemberFormDialog
