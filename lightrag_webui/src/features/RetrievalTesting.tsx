@@ -752,149 +752,149 @@ export default function RetrievalTesting() {
   return (
     <div className="flex size-full min-h-0 flex-col gap-4 overflow-hidden p-4">
       <div className="flex min-h-0 flex-1 flex-col gap-4">
-          <div className="relative min-h-0 flex-1 overflow-hidden rounded-2xl border border-border/70 bg-background/92 shadow-sm">
-            <div
-              ref={messagesContainerRef}
-              className="absolute inset-0 flex flex-col overflow-auto px-3 py-4 sm:px-4"
-              onClick={() => {
-                if (shouldFollowScrollRef.current) {
-                  shouldFollowScrollRef.current = false
-                }
-              }}
-            >
-              <div className="flex min-h-full flex-1 flex-col gap-3">
-                {messages.length === 0 ? (
-                  <div className="flex flex-1 items-center justify-center">
-                    <div className="max-w-xl rounded-[28px] border border-dashed border-border/80 bg-muted/20 px-8 py-10 text-center">
-                      <div className="mx-auto flex size-14 items-center justify-center rounded-3xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-300">
-                        <ScanSearchIcon className="size-6" />
-                      </div>
-                      <h3 className="mt-5 text-lg font-semibold text-foreground">
-                        {t('retrievePanel.retrieval.startPrompt')}
-                      </h3>
-                      <p className="mt-2 text-sm leading-7 text-muted-foreground">
-                        {t('platformShell.retrieval.askKnowledgeBaseDescription')}
-                      </p>
+        <div className="relative min-h-0 flex-1 overflow-hidden rounded-2xl border border-border/70 bg-background/92 shadow-sm">
+          <div
+            ref={messagesContainerRef}
+            className="absolute inset-0 flex flex-col overflow-auto px-3 py-4 sm:px-4"
+            onClick={() => {
+              if (shouldFollowScrollRef.current) {
+                shouldFollowScrollRef.current = false
+              }
+            }}
+          >
+            <div className="flex min-h-full flex-1 flex-col gap-3">
+              {messages.length === 0 ? (
+                <div className="flex flex-1 items-center justify-center">
+                  <div className="max-w-xl rounded-[28px] border border-dashed border-border/80 bg-muted/20 px-8 py-10 text-center">
+                    <div className="mx-auto flex size-14 items-center justify-center rounded-3xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-300">
+                      <ScanSearchIcon className="size-6" />
                     </div>
+                    <h3 className="mt-5 text-lg font-semibold text-foreground">
+                      {t('retrievePanel.retrieval.startPrompt')}
+                    </h3>
+                    <p className="mt-2 text-sm leading-7 text-muted-foreground">
+                      {t('platformShell.retrieval.askKnowledgeBaseDescription')}
+                    </p>
                   </div>
-                ) : (
-                  messages.map((message) => (
-                    <div
-                      key={message.id}
-                      className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'} items-end gap-2`}
-                    >
-                      {message.role === 'user' && (
-                        <Button
-                          onClick={() => handleCopyMessage(message)}
-                          className="mb-2 size-7 shrink-0 rounded-full opacity-60 transition-opacity hover:opacity-100"
-                          tooltip={t('retrievePanel.chatMessage.copyTooltip')}
-                          variant="ghost"
-                          size="icon"
-                        >
-                          <CopyIcon className="size-4" />
-                        </Button>
-                      )}
-                      <ChatMessage message={message} isTabActive={isRetrievalTabActive} />
-                      {message.role === 'assistant' && (
-                        <Button
-                          onClick={() => handleCopyMessage(message)}
-                          className="mb-2 size-7 shrink-0 rounded-full opacity-60 transition-opacity hover:opacity-100"
-                          tooltip={t('retrievePanel.chatMessage.copyTooltip')}
-                          variant="ghost"
-                          size="icon"
-                        >
-                          <CopyIcon className="size-4" />
-                        </Button>
-                      )}
-                    </div>
-                  ))
-                )}
-                <div ref={messagesEndRef} className="pb-1" />
-              </div>
+                </div>
+              ) : (
+                messages.map((message) => (
+                  <div
+                    key={message.id}
+                    className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'} items-end gap-2`}
+                  >
+                    {message.role === 'user' && (
+                      <Button
+                        onClick={() => handleCopyMessage(message)}
+                        className="mb-2 size-7 shrink-0 rounded-full opacity-60 transition-opacity hover:opacity-100"
+                        tooltip={t('retrievePanel.chatMessage.copyTooltip')}
+                        variant="ghost"
+                        size="icon"
+                      >
+                        <CopyIcon className="size-4" />
+                      </Button>
+                    )}
+                    <ChatMessage message={message} isTabActive={isRetrievalTabActive} />
+                    {message.role === 'assistant' && (
+                      <Button
+                        onClick={() => handleCopyMessage(message)}
+                        className="mb-2 size-7 shrink-0 rounded-full opacity-60 transition-opacity hover:opacity-100"
+                        tooltip={t('retrievePanel.chatMessage.copyTooltip')}
+                        variant="ghost"
+                        size="icon"
+                      >
+                        <CopyIcon className="size-4" />
+                      </Button>
+                    )}
+                  </div>
+                ))
+              )}
+              <div ref={messagesEndRef} className="pb-1" />
             </div>
           </div>
-
-          <form
-            onSubmit={handleSubmit}
-            className="shrink-0"
-            autoComplete="on"
-            method="post"
-            action="#"
-            role="search"
-          >
-            <input type="submit" style={{ display: 'none' }} tabIndex={-1} />
-            <div className="rounded-[30px] border border-border/70 bg-background/95 p-3 shadow-sm">
-              <div className="mb-3 flex flex-wrap items-center gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={clearMessages}
-                  disabled={isLoading}
-                  size="sm"
-                  className="rounded-full"
-                >
-                  <EraserIcon className="size-4" />
-                  {t('retrievePanel.retrieval.clear')}
-                </Button>
-              </div>
-
-              <div className="relative flex items-end gap-3 rounded-[24px] border border-border/70 bg-muted/20 px-3 py-3">
-                <div className="min-w-0 flex-1">
-                  <label htmlFor="query-input" className="sr-only">
-                    {t('retrievePanel.retrieval.placeholder')}
-                  </label>
-                  {hasMultipleLines ? (
-                    <Textarea
-                      ref={inputRef as React.RefObject<HTMLTextAreaElement>}
-                      id="query-input"
-                      autoComplete="on"
-                      className="min-h-[64px] max-h-[160px] w-full overflow-y-auto border-0 bg-transparent px-1 py-1 shadow-none focus-visible:ring-0"
-                      value={inputValue}
-                      onChange={handleChange}
-                      onKeyDown={handleKeyDown}
-                      onPaste={handlePaste}
-                      placeholder={t('retrievePanel.retrieval.placeholder')}
-                      disabled={isLoading}
-                      rows={1}
-                      style={{
-                        resize: 'none',
-                        height: 'auto',
-                        minHeight: '64px',
-                        maxHeight: '160px',
-                      }}
-                      onInput={(e: React.FormEvent<HTMLTextAreaElement>) => {
-                        const target = e.target as HTMLTextAreaElement
-                        requestAnimationFrame(() => {
-                          target.style.height = 'auto'
-                          target.style.height = Math.min(target.scrollHeight, 160) + 'px'
-                        })
-                      }}
-                    />
-                  ) : (
-                    <Input
-                      ref={inputRef as React.RefObject<HTMLInputElement>}
-                      id="query-input"
-                      autoComplete="on"
-                      className="h-14 w-full border-0 bg-transparent px-1 text-sm shadow-none focus-visible:ring-0"
-                      value={inputValue}
-                      onChange={handleChange}
-                      onKeyDown={handleKeyDown}
-                      onPaste={handlePaste}
-                      placeholder={t('retrievePanel.retrieval.placeholder')}
-                      disabled={isLoading}
-                    />
-                  )}
-                  {inputError && <div className="px-1 pt-1 text-xs text-red-500">{inputError}</div>}
-                </div>
-
-                <Button type="submit" variant="default" disabled={isLoading} className="rounded-full px-5">
-                  <SendIcon className="size-4" />
-                  {t('retrievePanel.retrieval.send')}
-                </Button>
-              </div>
-            </div>
-          </form>
         </div>
+
+        <form
+          onSubmit={handleSubmit}
+          className="shrink-0"
+          autoComplete="on"
+          method="post"
+          action="#"
+          role="search"
+        >
+          <input type="submit" style={{ display: 'none' }} tabIndex={-1} />
+          <div className="rounded-[30px] border border-border/70 bg-background/95 p-3 shadow-sm">
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={clearMessages}
+                disabled={isLoading}
+                size="sm"
+                className="rounded-full"
+              >
+                <EraserIcon className="size-4" />
+                {t('retrievePanel.retrieval.clear')}
+              </Button>
+            </div>
+
+            <div className="relative flex items-end gap-3 rounded-[24px] border border-border/70 bg-muted/20 px-3 py-3">
+              <div className="min-w-0 flex-1">
+                <label htmlFor="query-input" className="sr-only">
+                  {t('retrievePanel.retrieval.placeholder')}
+                </label>
+                {hasMultipleLines ? (
+                  <Textarea
+                    ref={inputRef as React.RefObject<HTMLTextAreaElement>}
+                    id="query-input"
+                    autoComplete="on"
+                    className="min-h-[64px] max-h-[160px] w-full overflow-y-auto border-0 bg-transparent px-1 py-1 shadow-none focus-visible:ring-0"
+                    value={inputValue}
+                    onChange={handleChange}
+                    onKeyDown={handleKeyDown}
+                    onPaste={handlePaste}
+                    placeholder={t('retrievePanel.retrieval.placeholder')}
+                    disabled={isLoading}
+                    rows={1}
+                    style={{
+                      resize: 'none',
+                      height: 'auto',
+                      minHeight: '64px',
+                      maxHeight: '160px',
+                    }}
+                    onInput={(e: React.FormEvent<HTMLTextAreaElement>) => {
+                      const target = e.target as HTMLTextAreaElement
+                      requestAnimationFrame(() => {
+                        target.style.height = 'auto'
+                        target.style.height = Math.min(target.scrollHeight, 160) + 'px'
+                      })
+                    }}
+                  />
+                ) : (
+                  <Input
+                    ref={inputRef as React.RefObject<HTMLInputElement>}
+                    id="query-input"
+                    autoComplete="on"
+                    className="h-14 w-full border-0 bg-transparent px-1 text-sm shadow-none focus-visible:ring-0"
+                    value={inputValue}
+                    onChange={handleChange}
+                    onKeyDown={handleKeyDown}
+                    onPaste={handlePaste}
+                    placeholder={t('retrievePanel.retrieval.placeholder')}
+                    disabled={isLoading}
+                  />
+                )}
+                {inputError && <div className="px-1 pt-1 text-xs text-red-500">{inputError}</div>}
+              </div>
+
+              <Button type="submit" variant="default" disabled={isLoading} className="rounded-full px-5">
+                <SendIcon className="size-4" />
+                {t('retrievePanel.retrieval.send')}
+              </Button>
+            </div>
+          </div>
+        </form>
+      </div>
 
     </div>
   )

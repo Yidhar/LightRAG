@@ -707,8 +707,8 @@ export default function WorkspaceListPage() {
                   const isUncategorized = groupKey === UNCATEGORIZED_KEY
                   const label = isUncategorized
                     ? t('platformShell.workspaceDirectory.uncategorized', {
-                        defaultValue: '未分类',
-                      })
+                      defaultValue: '未分类',
+                    })
                     : groupKey
                   return (
                     <div key={groupKey} className="space-y-3">
@@ -776,9 +776,9 @@ export default function WorkspaceListPage() {
             <AlertDialogDescription>
               {kbDeleteTarget
                 ? t('platformShell.workspaceDirectory.deleteDialog.descriptionWithName', {
-                    knowledgeBaseName: kbDeleteTarget.name || kbDeleteTarget.id,
-                    workspaceId: currentWorkspaceId,
-                  })
+                  knowledgeBaseName: kbDeleteTarget.name || kbDeleteTarget.id,
+                  workspaceId: currentWorkspaceId,
+                })
                 : t('platformShell.workspaceDirectory.deleteDialog.description')}
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -862,8 +862,8 @@ export default function WorkspaceListPage() {
                 {workspaceSubmitting
                   ? t('platformShell.common.saving', { defaultValue: '保存中…' })
                   : t('platformShell.workspaceDirectory.workspaceForm.submit', {
-                      defaultValue: '创建',
-                    })}
+                    defaultValue: '创建',
+                  })}
               </Button>
             </DialogFooter>
           </form>
@@ -885,10 +885,10 @@ export default function WorkspaceListPage() {
             <AlertDialogDescription>
               {workspaceDeleteTarget
                 ? t('platformShell.workspaceDirectory.workspaceForm.deleteConfirm', {
-                    defaultValue:
+                  defaultValue:
                       '删除工作区 "{{name}}" 将一并移除其成员和知识库授权。此操作不可撤销。',
-                    name: workspaceDeleteTarget.name,
-                  })
+                  name: workspaceDeleteTarget.name,
+                })
                 : ''}
             </AlertDialogDescription>
           </AlertDialogHeader>

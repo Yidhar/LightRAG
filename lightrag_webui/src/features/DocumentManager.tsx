@@ -1879,192 +1879,192 @@ export default function DocumentManager() {
         )}
 
         <div className="relative min-h-0 flex-1 overflow-hidden" ref={cardContentRef}>
-            {!docs && (
-              <div className="absolute inset-0 p-0">
-                <EmptyCard
-                  title={t('documentPanel.documentManager.emptyTitle')}
-                  description={t('documentPanel.documentManager.emptyDescription')}
-                />
-              </div>
-            )}
-            {docs && (
-              <div className="absolute inset-0 flex flex-col p-0">
-                <div className="absolute inset-[-1px] flex flex-col overflow-hidden rounded-[24px] border border-gray-200 p-0 dark:border-gray-700">
-                  <Table className="w-full">
-                    <TableHeader className="sticky top-0 z-10 bg-background shadow-sm">
-                      <TableRow className="border-b bg-card/95 shadow-[inset_0_-1px_0_rgba(0,0,0,0.08)] backdrop-blur supports-[backdrop-filter]:bg-card/75">
-                        <TableHead
-                          onClick={() => handleSort('id')}
-                          className="cursor-pointer select-none hover:bg-gray-200 dark:hover:bg-gray-800"
-                        >
-                          <div className="flex items-center">
-                            {showFileName
-                              ? t('documentPanel.documentManager.columns.fileName')
-                              : t('documentPanel.documentManager.columns.id')}
-                            {((sortField === 'id' && !showFileName) || (sortField === 'file_path' && showFileName)) && (
-                              <span className="ml-1">
-                                {sortDirection === 'asc' ? <ArrowUpIcon size={14} /> : <ArrowDownIcon size={14} />}
-                              </span>
-                            )}
-                          </div>
+          {!docs && (
+            <div className="absolute inset-0 p-0">
+              <EmptyCard
+                title={t('documentPanel.documentManager.emptyTitle')}
+                description={t('documentPanel.documentManager.emptyDescription')}
+              />
+            </div>
+          )}
+          {docs && (
+            <div className="absolute inset-0 flex flex-col p-0">
+              <div className="absolute inset-[-1px] flex flex-col overflow-hidden rounded-[24px] border border-gray-200 p-0 dark:border-gray-700">
+                <Table className="w-full">
+                  <TableHeader className="sticky top-0 z-10 bg-background shadow-sm">
+                    <TableRow className="border-b bg-card/95 shadow-[inset_0_-1px_0_rgba(0,0,0,0.08)] backdrop-blur supports-[backdrop-filter]:bg-card/75">
+                      <TableHead
+                        onClick={() => handleSort('id')}
+                        className="cursor-pointer select-none hover:bg-gray-200 dark:hover:bg-gray-800"
+                      >
+                        <div className="flex items-center">
+                          {showFileName
+                            ? t('documentPanel.documentManager.columns.fileName')
+                            : t('documentPanel.documentManager.columns.id')}
+                          {((sortField === 'id' && !showFileName) || (sortField === 'file_path' && showFileName)) && (
+                            <span className="ml-1">
+                              {sortDirection === 'asc' ? <ArrowUpIcon size={14} /> : <ArrowDownIcon size={14} />}
+                            </span>
+                          )}
+                        </div>
+                      </TableHead>
+                      <TableHead>{t('documentPanel.documentManager.columns.summary')}</TableHead>
+                      <TableHead>{t('documentPanel.documentManager.columns.status')}</TableHead>
+                      <TableHead>{t('documentPanel.documentManager.columns.length')}</TableHead>
+                      <TableHead>{t('documentPanel.documentManager.columns.chunks')}</TableHead>
+                      <TableHead
+                        onClick={() => handleSort('created_at')}
+                        className="cursor-pointer select-none hover:bg-gray-200 dark:hover:bg-gray-800"
+                      >
+                        <div className="flex items-center">
+                          {t('documentPanel.documentManager.columns.created')}
+                          {sortField === 'created_at' && (
+                            <span className="ml-1">
+                              {sortDirection === 'asc' ? <ArrowUpIcon size={14} /> : <ArrowDownIcon size={14} />}
+                            </span>
+                          )}
+                        </div>
+                      </TableHead>
+                      <TableHead
+                        onClick={() => handleSort('updated_at')}
+                        className="cursor-pointer select-none hover:bg-gray-200 dark:hover:bg-gray-800"
+                      >
+                        <div className="flex items-center">
+                          {t('documentPanel.documentManager.columns.updated')}
+                          {sortField === 'updated_at' && (
+                            <span className="ml-1">
+                              {sortDirection === 'asc' ? <ArrowUpIcon size={14} /> : <ArrowDownIcon size={14} />}
+                            </span>
+                          )}
+                        </div>
+                      </TableHead>
+                      {canUseDocumentSelection && (
+                        <TableHead className="w-16 text-center">
+                          {t('documentPanel.documentManager.columns.select')}
                         </TableHead>
-                        <TableHead>{t('documentPanel.documentManager.columns.summary')}</TableHead>
-                        <TableHead>{t('documentPanel.documentManager.columns.status')}</TableHead>
-                        <TableHead>{t('documentPanel.documentManager.columns.length')}</TableHead>
-                        <TableHead>{t('documentPanel.documentManager.columns.chunks')}</TableHead>
-                        <TableHead
-                          onClick={() => handleSort('created_at')}
-                          className="cursor-pointer select-none hover:bg-gray-200 dark:hover:bg-gray-800"
-                        >
-                          <div className="flex items-center">
-                            {t('documentPanel.documentManager.columns.created')}
-                            {sortField === 'created_at' && (
-                              <span className="ml-1">
-                                {sortDirection === 'asc' ? <ArrowUpIcon size={14} /> : <ArrowDownIcon size={14} />}
-                              </span>
-                            )}
-                          </div>
-                        </TableHead>
-                        <TableHead
-                          onClick={() => handleSort('updated_at')}
-                          className="cursor-pointer select-none hover:bg-gray-200 dark:hover:bg-gray-800"
-                        >
-                          <div className="flex items-center">
-                            {t('documentPanel.documentManager.columns.updated')}
-                            {sortField === 'updated_at' && (
-                              <span className="ml-1">
-                                {sortDirection === 'asc' ? <ArrowUpIcon size={14} /> : <ArrowDownIcon size={14} />}
-                              </span>
-                            )}
-                          </div>
-                        </TableHead>
-                        {canUseDocumentSelection && (
-                          <TableHead className="w-16 text-center">
-                            {t('documentPanel.documentManager.columns.select')}
-                          </TableHead>
-                        )}
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody className="overflow-auto text-sm">
-                      {filteredAndSortedDocs && filteredAndSortedDocs.map((doc) => (
-                        <TableRow key={doc.id}>
-                          <TableCell className="max-w-[250px] truncate overflow-visible font-mono">
-                            {showFileName ? (
-                              <>
-                                <div className="group tooltip-container relative overflow-visible">
-                                  <div className="truncate">{getDisplayFileName(doc, 30)}</div>
-                                  <div className="tooltip invisible group-hover:visible">{doc.file_path}</div>
-                                </div>
-                                <div className="text-xs text-gray-500">{doc.id}</div>
-                              </>
-                            ) : (
+                      )}
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody className="overflow-auto text-sm">
+                    {filteredAndSortedDocs && filteredAndSortedDocs.map((doc) => (
+                      <TableRow key={doc.id}>
+                        <TableCell className="max-w-[250px] truncate overflow-visible font-mono">
+                          {showFileName ? (
+                            <>
                               <div className="group tooltip-container relative overflow-visible">
-                                <div className="truncate">{doc.id}</div>
+                                <div className="truncate">{getDisplayFileName(doc, 30)}</div>
                                 <div className="tooltip invisible group-hover:visible">{doc.file_path}</div>
                               </div>
-                            )}
-                          </TableCell>
-                          <TableCell className="max-w-xs min-w-45 truncate overflow-visible">
+                              <div className="text-xs text-gray-500">{doc.id}</div>
+                            </>
+                          ) : (
                             <div className="group tooltip-container relative overflow-visible">
-                              <div className="truncate">{doc.content_summary}</div>
-                              <div className="tooltip invisible group-hover:visible">{doc.content_summary}</div>
+                              <div className="truncate">{doc.id}</div>
+                              <div className="tooltip invisible group-hover:visible">{doc.file_path}</div>
                             </div>
-                          </TableCell>
-                          <TableCell>
-                            <div className="group tooltip-container relative flex items-center overflow-visible">
-                              {doc.metadata?.multimodal_rebuild_in_progress && (
-                                <span className="text-blue-600">
-                                  {t('documentPanel.documentManager.status.rebuildingMultimodal')}
-                                </span>
-                              )}
-                              {doc.status === 'processed' && (
-                                <span className="text-green-600">{t('documentPanel.documentManager.status.completed')}</span>
-                              )}
-                              {doc.status === 'preprocessed' &&
+                          )}
+                        </TableCell>
+                        <TableCell className="max-w-xs min-w-45 truncate overflow-visible">
+                          <div className="group tooltip-container relative overflow-visible">
+                            <div className="truncate">{doc.content_summary}</div>
+                            <div className="tooltip invisible group-hover:visible">{doc.content_summary}</div>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <div className="group tooltip-container relative flex items-center overflow-visible">
+                            {doc.metadata?.multimodal_rebuild_in_progress && (
+                              <span className="text-blue-600">
+                                {t('documentPanel.documentManager.status.rebuildingMultimodal')}
+                              </span>
+                            )}
+                            {doc.status === 'processed' && (
+                              <span className="text-green-600">{t('documentPanel.documentManager.status.completed')}</span>
+                            )}
+                            {doc.status === 'preprocessed' &&
                                 !doc.metadata?.multimodal_rebuild_in_progress && (
-                                  <span className="text-purple-600">
-                                    {t('documentPanel.documentManager.status.preprocessed')}
-                                  </span>
-                                )}
-                              {doc.status === 'processing' &&
+                              <span className="text-purple-600">
+                                {t('documentPanel.documentManager.status.preprocessed')}
+                              </span>
+                            )}
+                            {doc.status === 'processing' &&
                                 !doc.metadata?.multimodal_rebuild_in_progress && (
-                                  <span className="text-blue-600">
-                                    {t('documentPanel.documentManager.status.processing')}
-                                  </span>
-                                )}
-                              {doc.status === 'pending' &&
+                              <span className="text-blue-600">
+                                {t('documentPanel.documentManager.status.processing')}
+                              </span>
+                            )}
+                            {doc.status === 'pending' &&
                                 !doc.metadata?.multimodal_rebuild_in_progress && (
-                                  <span className="text-yellow-600">
-                                    {t('documentPanel.documentManager.status.pending')}
-                                  </span>
+                              <span className="text-yellow-600">
+                                {t('documentPanel.documentManager.status.pending')}
+                              </span>
+                            )}
+                            {doc.status === 'failed' && (
+                              <span className="text-red-600">{t('documentPanel.documentManager.status.failed')}</span>
+                            )}
+
+                            {doc.error_msg ? (
+                              <AlertTriangle className="ml-2 h-4 w-4 text-yellow-500" />
+                            ) : doc.metadata && Object.keys(doc.metadata).length > 0 ? (
+                              <Info className="ml-2 h-4 w-4 text-blue-500" />
+                            ) : null}
+
+                            {(doc.error_msg || (doc.metadata && Object.keys(doc.metadata).length > 0)) && (
+                              <div className="tooltip invisible group-hover:visible">
+                                {doc.metadata && Object.keys(doc.metadata).length > 0 && (
+                                  <pre>{formatMetadata(doc.metadata)}</pre>
                                 )}
-                              {doc.status === 'failed' && (
-                                <span className="text-red-600">{t('documentPanel.documentManager.status.failed')}</span>
-                              )}
+                                {doc.error_msg && <pre>{doc.error_msg}</pre>}
+                              </div>
+                            )}
 
-                              {doc.error_msg ? (
-                                <AlertTriangle className="ml-2 h-4 w-4 text-yellow-500" />
-                              ) : doc.metadata && Object.keys(doc.metadata).length > 0 ? (
-                                <Info className="ml-2 h-4 w-4 text-blue-500" />
-                              ) : null}
-
-                              {(doc.error_msg || (doc.metadata && Object.keys(doc.metadata).length > 0)) && (
-                                <div className="tooltip invisible group-hover:visible">
-                                  {doc.metadata && Object.keys(doc.metadata).length > 0 && (
-                                    <pre>{formatMetadata(doc.metadata)}</pre>
-                                  )}
-                                  {doc.error_msg && <pre>{doc.error_msg}</pre>}
-                                </div>
-                              )}
-
-                              {canDeleteDocuments &&
+                            {canDeleteDocuments &&
                                 (doc.status === 'processing' ||
                                   doc.status === 'pending' ||
                                   doc.status === 'preprocessed') && (
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    side="bottom"
-                                    tooltip={t(
-                                      'documentPanel.documentManager.cancelDocumentTooltip',
-                                      {
-                                        defaultValue:
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                side="bottom"
+                                tooltip={t(
+                                  'documentPanel.documentManager.cancelDocumentTooltip',
+                                  {
+                                    defaultValue:
                                           doc.status === 'processing'
                                             ? '请求取消此文档（下一个检查点生效）'
                                             : '取消此文档',
-                                      }
-                                    )}
-                                    className="ml-1 h-6 w-6 shrink-0 rounded-full text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                                    onClick={(e) => {
-                                      e.stopPropagation()
-                                      void handleCancelDocument(doc.id)
-                                    }}
-                                  >
-                                    <XIcon className="h-3.5 w-3.5" />
-                                  </Button>
+                                  }
                                 )}
-                            </div>
+                                className="ml-1 h-6 w-6 shrink-0 rounded-full text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  void handleCancelDocument(doc.id)
+                                }}
+                              >
+                                <XIcon className="h-3.5 w-3.5" />
+                              </Button>
+                            )}
+                          </div>
+                        </TableCell>
+                        <TableCell>{doc.content_length ?? '-'}</TableCell>
+                        <TableCell>{doc.chunks_count ?? '-'}</TableCell>
+                        <TableCell className="truncate">{new Date(doc.created_at).toLocaleString()}</TableCell>
+                        <TableCell className="truncate">{new Date(doc.updated_at).toLocaleString()}</TableCell>
+                        {canUseDocumentSelection && (
+                          <TableCell className="text-center">
+                            <Checkbox
+                              checked={activeSelectedDocIds.includes(doc.id)}
+                              onCheckedChange={(checked) => handleDocumentSelect(doc.id, checked === true)}
+                              className="mx-auto"
+                            />
                           </TableCell>
-                          <TableCell>{doc.content_length ?? '-'}</TableCell>
-                          <TableCell>{doc.chunks_count ?? '-'}</TableCell>
-                          <TableCell className="truncate">{new Date(doc.created_at).toLocaleString()}</TableCell>
-                          <TableCell className="truncate">{new Date(doc.updated_at).toLocaleString()}</TableCell>
-                          {canUseDocumentSelection && (
-                            <TableCell className="text-center">
-                              <Checkbox
-                                checked={activeSelectedDocIds.includes(doc.id)}
-                                onCheckedChange={(checked) => handleDocumentSelect(doc.id, checked === true)}
-                                className="mx-auto"
-                              />
-                            </TableCell>
-                          )}
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
+                        )}
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
               </div>
-            )}
+            </div>
+          )}
         </div>
       </div>
     </div>
