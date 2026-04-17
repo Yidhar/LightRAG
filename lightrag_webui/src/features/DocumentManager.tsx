@@ -310,7 +310,11 @@ export default function DocumentManager() {
   const canUploadDocuments = hasPermission(effectiveRole, 'kb:upload_document')
   const canDeleteDocuments = hasPermission(effectiveRole, 'kb:delete_document')
   const canManageSettings = hasPermission(effectiveRole, 'kb:manage_settings')
-  const canUseDocumentSelection = canUploadDocuments || canDeleteDocuments
+  // Selection is always available inside the documents surface. Destructive
+  // actions (rebuild multimodal, delete, clear) remain independently gated by
+  // their own ``disabled={!can...}`` props, so allowing a read-only role to
+  // tick rows does not bypass permissions.
+  const canUseDocumentSelection = true
 
   // Legacy state for backward compatibility
   const [docs, setDocs] = useState<DocsStatusesResponse | null>(null)
