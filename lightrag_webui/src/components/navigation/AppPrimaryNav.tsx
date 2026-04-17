@@ -24,20 +24,19 @@ export default function AppPrimaryNav() {
     { workspaceId: currentWorkspaceId, kbId: null }
   )
   const pathname = location.pathname
+  // Workspace settings + members merged into the unified /workspaces
+  // management page. The admin-route branch therefore only fires on
+  // bare /members paths (kept for LDAP / multi-tenant deploys) — on
+  // those routes we just show a single "工作区管理" shortcut.
   const isWorkspaceAdminRoute =
     pathname.endsWith('/members') || pathname.endsWith('/settings')
 
   const items = isWorkspaceAdminRoute
     ? [
       {
-        label: t('header.members'),
-        to: appRoutes.workspaceMembers(currentWorkspaceId),
-        requiredPermission: 'workspace:invite_member' as PermissionAction,
-      },
-      {
-        label: t('header.workspaceSettings'),
-        to: appRoutes.workspaceSettings(currentWorkspaceId),
-        requiredPermission: 'workspace:update' as PermissionAction,
+        label: t('header.workspaceManagement', { defaultValue: '工作区管理' }),
+        to: appRoutes.workspaces,
+        requiredPermission: null,
       },
     ]
     : [

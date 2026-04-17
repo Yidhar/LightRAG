@@ -1,17 +1,16 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useParams } from 'react-router-dom'
 import {
   BookOpenTextIcon,
+  BriefcaseBusinessIcon,
   FolderKanbanIcon,
-  LayoutGridIcon,
   PlusIcon,
-  ShieldCheckIcon,
   Trash2Icon,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
-import { appRoutes, defaultKnowledgeBaseId, defaultWorkspaceId } from '@/app/routes'
+import { appRoutes, defaultWorkspaceId } from '@/app/routes'
 import {
   createKnowledgeBase,
   createWorkspace,
@@ -23,15 +22,12 @@ import {
   type KnowledgeBaseRecord,
   type WorkspaceRecord,
   updateKnowledgeBase,
+  updateWorkspace,
 } from '@/api/lightrag'
 import { useAuthStore } from '@/stores/state'
-import {
-  hasPermission,
-  resolveEffectiveRole,
-  roleDescriptionKeys,
-  summarizeRoleCapabilityKeys,
-} from '@/lib/permissions'
+import { hasPermission, resolveEffectiveRole } from '@/lib/permissions'
 import { errorMessage } from '@/lib/utils'
+import { cn } from '@/lib/utils'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/Alert'
 import {
   AlertDialog,
@@ -55,21 +51,28 @@ import {
 } from '@/components/ui/Dialog'
 import Input from '@/components/ui/Input'
 import Textarea from '@/components/ui/Textarea'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/Table'
 
 // ---------------------------------------------------------------------------
-// Knowledge-base form dialog
+// Workspace management — one page, everything.
 //
-// User-facing fields only: display name (required), description, category.
-//
-// Intentionally dropped:
-//   - KB id input. The backend auto-generates ``kb_<uuid4[:8]>`` when
-//     the payload omits ``kb_id``; users should not be typing internal
-//     identifiers.
-//   - status input. Lifecycle state is a backend concern ("active" by
-//     default); surfacing it as a free-text field just confused users
-//     who didn't know what to type.
-//   - config_override JSON textarea. Operators who truly need to pin
-//     KB-level overrides can PATCH /workspaces/{ws}/kb/{kb} directly.
+// User feedback ("交互很奇怪… 集成到一个子页. 在这个子页面我可以创建或移除
+// 工作区 也可以配置某一个工作区可以访问哪些知识库") merged the old
+// WorkspaceDirectory + WorkspaceSettings into a single screen:
+//   - Tab strip at the top lists every workspace the user belongs to,
+//     plus a + tile for creating a new one.
+//   - Selecting a tab swaps in that workspace's metadata form + KB
+//     list below.
+//   - Deleting the current workspace lives in a danger-zone strip at
+//     the bottom (hidden for the reserved ``default`` id, backend
+//     refuses that anyway).
 // ---------------------------------------------------------------------------
 
 interface KnowledgeBaseFormDialogProps {
@@ -118,11 +121,9 @@ function KnowledgeBaseFormDialogContent({
       return
     }
     await onSubmit({
-      // kb_id omitted → backend generates kb_<uuid4[:8]> (see kb_registry)
+      // kb_id omitted → backend auto-generates kb_<uuid4[:8]>.
       name: trimmedName,
       description: description.trim(),
-      // Send trimmed category; backend treats "" as "uncategorised"
-      // which is exactly what we want when the user leaves the field blank.
       category: category.trim(),
     })
   }
@@ -199,12 +200,6 @@ function KnowledgeBaseFormDialogContent({
               ))}
             </datalist>
           )}
-          <p className="text-xs text-muted-foreground">
-            {t('platformShell.workspaceDirectory.categoryHint', {
-              defaultValue:
-                '用于在工作区知识库列表按组展示；输入已有分类可复用，新分类会自动加入候选。',
-            })}
-          </p>
         </div>
 
         <DialogFooter className="gap-2 sm:gap-2">
@@ -258,46 +253,48 @@ function KnowledgeBaseFormDialog({
 export default function WorkspaceListPage() {
   const { t } = useTranslation()
   const { role, memberships } = useAuthStore()
+  const params = useParams()
 
-  // Workspaces (API-backed) + derived current workspace for the KB panel.
   const [workspaces, setWorkspaces] = useState<WorkspaceRecord[]>([])
   const [workspacesLoading, setWorkspacesLoading] = useState(true)
   const [workspaceError, setWorkspaceError] = useState<string | null>(null)
-  const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false)
-  const [workspaceForm, setWorkspaceForm] = useState<{ name: string; description: string }>(
-    { name: '', description: '' }
-  )
-  const [workspaceDeleteTarget, setWorkspaceDeleteTarget] = useState<WorkspaceRecord | null>(null)
-  const [workspaceSubmitting, setWorkspaceSubmitting] = useState(false)
 
-  const fallbackWorkspaceIds = useMemo(
-    () =>
-      Array.from(
-        new Set([defaultWorkspaceId, ...memberships.map((membership) => membership.workspace_id)])
-      ).sort(),
-    [memberships]
+  // Which workspace tab is active. Defaults to the URL workspaceId if
+  // this page is rendered at ``/workspaces/:workspaceId/settings`` (the
+  // legacy settings URL now redirects through this component); otherwise
+  // the first workspace we load.
+  const [selectedId, setSelectedId] = useState<string | null>(
+    params.workspaceId ?? null
   )
 
-  const currentWorkspaceId =
-    workspaces[0]?.id || fallbackWorkspaceIds[0] || defaultWorkspaceId
+  // Workspace metadata edit buffer — scoped to the currently selected tab.
+  const [metaName, setMetaName] = useState('')
+  const [metaDescription, setMetaDescription] = useState('')
+  const [metaSubmitting, setMetaSubmitting] = useState(false)
 
-  const effectiveRole = resolveEffectiveRole(
-    { role, memberships },
-    { workspaceId: currentWorkspaceId, kbId: defaultKnowledgeBaseId }
-  )
-  const capabilitySummary = summarizeRoleCapabilityKeys(effectiveRole)
-  const canManageKnowledgeBases = hasPermission(effectiveRole, 'workspace:update')
+  // Create-workspace dialog
+  const [wsCreateOpen, setWsCreateOpen] = useState(false)
+  const [wsCreateForm, setWsCreateForm] = useState({ name: '', description: '' })
+  const [wsCreateSubmitting, setWsCreateSubmitting] = useState(false)
 
-  // Knowledge bases for the current workspace.
-  const UNCATEGORIZED_KEY = '__uncategorized__'
+  // Delete-workspace confirm
+  const [wsDeleteOpen, setWsDeleteOpen] = useState(false)
+  const [wsDeleteSubmitting, setWsDeleteSubmitting] = useState(false)
+
+  // KB state for the selected workspace
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseRecord[]>([])
   const [kbLoading, setKbLoading] = useState(true)
   const [kbError, setKbError] = useState<string | null>(null)
+
+  // KB form dialog
   const [kbDialogOpen, setKbDialogOpen] = useState(false)
   const [kbDialogMode, setKbDialogMode] = useState<'create' | 'edit'>('create')
-  const [selectedKnowledgeBase, setSelectedKnowledgeBase] = useState<KnowledgeBaseRecord | null>(null)
-  const [kbDeleteTarget, setKbDeleteTarget] = useState<KnowledgeBaseRecord | null>(null)
+  const [selectedKnowledgeBase, setSelectedKnowledgeBase] =
+    useState<KnowledgeBaseRecord | null>(null)
   const [kbSubmitting, setKbSubmitting] = useState(false)
+  const [kbDeleteTarget, setKbDeleteTarget] = useState<KnowledgeBaseRecord | null>(
+    null
+  )
 
   const loadWorkspaces = useCallback(async () => {
     try {
@@ -305,6 +302,15 @@ export default function WorkspaceListPage() {
       setWorkspaceError(null)
       const response = await listWorkspaces()
       setWorkspaces(response.items)
+      // Pick the first available workspace when nothing is selected yet
+      // or when the selection points at a workspace that just got
+      // deleted out from under us.
+      setSelectedId((current) => {
+        if (current && response.items.some((ws) => ws.id === current)) {
+          return current
+        }
+        return response.items[0]?.id ?? null
+      })
     } catch (loadError) {
       setWorkspaceError(errorMessage(loadError))
       setWorkspaces([])
@@ -313,11 +319,36 @@ export default function WorkspaceListPage() {
     }
   }, [])
 
+  useEffect(() => {
+    void loadWorkspaces()
+  }, [loadWorkspaces])
+
+  const selectedWorkspace = useMemo(
+    () => workspaces.find((ws) => ws.id === selectedId) ?? null,
+    [workspaces, selectedId]
+  )
+
+  // Seed the metadata form whenever the active tab changes.
+  useEffect(() => {
+    if (selectedWorkspace) {
+      setMetaName(selectedWorkspace.name)
+      setMetaDescription(selectedWorkspace.description ?? '')
+    } else {
+      setMetaName('')
+      setMetaDescription('')
+    }
+  }, [selectedWorkspace])
+
   const loadKnowledgeBases = useCallback(async () => {
+    if (!selectedId) {
+      setKnowledgeBases([])
+      setKbLoading(false)
+      return
+    }
     try {
       setKbLoading(true)
       setKbError(null)
-      const response = await listKnowledgeBases(currentWorkspaceId)
+      const response = await listKnowledgeBases(selectedId)
       setKnowledgeBases(response.items)
     } catch (loadError) {
       setKbError(errorMessage(loadError))
@@ -325,19 +356,29 @@ export default function WorkspaceListPage() {
     } finally {
       setKbLoading(false)
     }
-  }, [currentWorkspaceId])
-
-  useEffect(() => {
-    void loadWorkspaces()
-  }, [loadWorkspaces])
+  }, [selectedId])
 
   useEffect(() => {
     void loadKnowledgeBases()
   }, [loadKnowledgeBases])
 
-  // Derived category buckets. We group in-memory off whatever the registry
-  // returned rather than hitting /categories separately — that endpoint is
-  // still useful elsewhere but here we already have every KB loaded.
+  const effectiveRole = selectedId
+    ? resolveEffectiveRole(
+      { role, memberships },
+      { workspaceId: selectedId, kbId: null }
+    )
+    : 'viewer'
+  const canManage = hasPermission(effectiveRole, 'workspace:update')
+  const canDelete = hasPermission(effectiveRole, 'workspace:delete')
+  const isDefaultWorkspace = selectedId === defaultWorkspaceId
+
+  const metaDirty = selectedWorkspace
+    ? metaName.trim() !== selectedWorkspace.name ||
+      (metaDescription.trim() || null) !== (selectedWorkspace.description ?? null)
+    : false
+  const canSaveMeta =
+    canManage && metaDirty && !metaSubmitting && metaName.trim().length > 0
+
   const categorySuggestions = useMemo(() => {
     const seen = new Set<string>()
     for (const kb of knowledgeBases) {
@@ -349,41 +390,16 @@ export default function WorkspaceListPage() {
     )
   }, [knowledgeBases])
 
-  const knowledgeBaseGroups = useMemo(() => {
-    const buckets = new Map<string, KnowledgeBaseRecord[]>()
-    for (const kb of knowledgeBases) {
-      const tag = (kb.category || '').trim()
-      const key = tag || UNCATEGORIZED_KEY
-      const existing = buckets.get(key)
-      if (existing) {
-        existing.push(kb)
-      } else {
-        buckets.set(key, [kb])
-      }
-    }
-
-    // Sort named categories case-insensitively, push the "uncategorized"
-    // bucket to the end so uncategorised KBs never obscure the grouping.
-    const named = Array.from(buckets.entries())
-      .filter(([key]) => key !== UNCATEGORIZED_KEY)
-      .sort(([a], [b]) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
-    const uncategorized = buckets.get(UNCATEGORIZED_KEY)
-    if (uncategorized && uncategorized.length > 0) {
-      named.push([UNCATEGORIZED_KEY, uncategorized])
-    }
-    return named
-  }, [knowledgeBases])
-
   // ---------- workspace handlers ----------
 
   const openWorkspaceCreateDialog = () => {
-    setWorkspaceForm({ name: '', description: '' })
-    setWorkspaceDialogOpen(true)
+    setWsCreateForm({ name: '', description: '' })
+    setWsCreateOpen(true)
   }
 
-  const handleWorkspaceSubmit = async (event: FormEvent<HTMLFormElement>) => {
+  const handleWorkspaceCreate = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    const trimmedName = workspaceForm.name.trim()
+    const trimmedName = wsCreateForm.name.trim()
     if (!trimmedName) {
       toast.error(
         t('platformShell.workspaceDirectory.workspaceForm.nameRequired', {
@@ -393,44 +409,77 @@ export default function WorkspaceListPage() {
       return
     }
     try {
-      setWorkspaceSubmitting(true)
-      // Backend auto-assigns an opaque uuid4 hex id when omitted.
+      setWsCreateSubmitting(true)
       const created = await createWorkspace({
         name: trimmedName,
-        description: workspaceForm.description.trim() || null,
+        description: wsCreateForm.description.trim() || null,
       })
       toast.success(
         t('platformShell.workspaceDirectory.workspaceForm.createSuccess', {
-          defaultValue: 'Workspace "{{name}}" created',
+          defaultValue: '工作区 "{{name}}" 已创建',
           name: created.name,
         })
       )
-      setWorkspaceDialogOpen(false)
+      setWsCreateOpen(false)
+      setSelectedId(created.id)
       await loadWorkspaces()
     } catch (submitError) {
       toast.error(errorMessage(submitError))
     } finally {
-      setWorkspaceSubmitting(false)
+      setWsCreateSubmitting(false)
     }
   }
 
-  const handleWorkspaceDelete = async () => {
-    if (!workspaceDeleteTarget) return
+  const handleWorkspaceMetadataSave = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!selectedWorkspace || !canSaveMeta) return
     try {
-      setWorkspaceSubmitting(true)
-      await deleteWorkspace(workspaceDeleteTarget.id)
+      setMetaSubmitting(true)
+      const payload: { name?: string; description?: string | null } = {}
+      if (metaName.trim() !== selectedWorkspace.name) {
+        payload.name = metaName.trim()
+      }
+      if ((metaDescription.trim() || null) !== (selectedWorkspace.description ?? null)) {
+        payload.description = metaDescription.trim() || null
+      }
+      await updateWorkspace(selectedWorkspace.id, payload)
       toast.success(
-        t('platformShell.workspaceDirectory.workspaceForm.deleteSuccess', {
-          defaultValue: 'Workspace "{{name}}" deleted',
-          name: workspaceDeleteTarget.name,
+        t('platformShell.workspaceSettings.saveSuccess', {
+          defaultValue: '工作区已更新',
         })
       )
-      setWorkspaceDeleteTarget(null)
       await loadWorkspaces()
-    } catch (deleteError) {
-      toast.error(errorMessage(deleteError))
+    } catch (err) {
+      toast.error(errorMessage(err))
     } finally {
-      setWorkspaceSubmitting(false)
+      setMetaSubmitting(false)
+    }
+  }
+
+  const handleWorkspaceMetadataReset = () => {
+    if (!selectedWorkspace) return
+    setMetaName(selectedWorkspace.name)
+    setMetaDescription(selectedWorkspace.description ?? '')
+  }
+
+  const handleWorkspaceDelete = async () => {
+    if (!selectedWorkspace) return
+    try {
+      setWsDeleteSubmitting(true)
+      await deleteWorkspace(selectedWorkspace.id)
+      toast.success(
+        t('platformShell.workspaceDirectory.workspaceForm.deleteSuccess', {
+          defaultValue: '工作区 "{{name}}" 已删除',
+          name: selectedWorkspace.name,
+        })
+      )
+      setWsDeleteOpen(false)
+      setSelectedId(null)
+      await loadWorkspaces()
+    } catch (err) {
+      toast.error(errorMessage(err))
+    } finally {
+      setWsDeleteSubmitting(false)
     }
   }
 
@@ -449,28 +498,33 @@ export default function WorkspaceListPage() {
   }
 
   const handleKnowledgeBaseSubmit = async (payload: KnowledgeBaseCreateRequest) => {
+    if (!selectedId) return
     try {
       setKbSubmitting(true)
       if (kbDialogMode === 'create') {
-        const response = await createKnowledgeBase(currentWorkspaceId, payload)
+        const response = await createKnowledgeBase(selectedId, payload)
         toast.success(response.message)
       } else if (selectedKnowledgeBase) {
-        // status + config_override are intentionally omitted — the
-        // simplified dialog doesn't expose them, so the PATCH body
-        // only carries the fields the user actually edited. Backend
-        // treats missing fields as "no change".
-        const response = await updateKnowledgeBase(currentWorkspaceId, selectedKnowledgeBase.id, {
-          name: payload.name,
-          description: payload.description,
-          // Forward as-is; "" (blank) clears the tag back to uncategorised,
-          // any other string sets/renames it.
-          category: payload.category,
-        })
+        const response = await updateKnowledgeBase(
+          selectedId,
+          selectedKnowledgeBase.id,
+          {
+            name: payload.name,
+            description: payload.description,
+            category: payload.category,
+          }
+        )
         toast.success(response.message)
       }
       setKbDialogOpen(false)
       setSelectedKnowledgeBase(null)
       await loadKnowledgeBases()
+      // Notify the KB picker dropdown on the documents page.
+      window.dispatchEvent(
+        new CustomEvent('lightrag:kb-updated', {
+          detail: { workspaceId: selectedId },
+        })
+      )
     } catch (submitError) {
       toast.error(errorMessage(submitError))
     } finally {
@@ -479,13 +533,18 @@ export default function WorkspaceListPage() {
   }
 
   const handleKnowledgeBaseDelete = async () => {
-    if (!kbDeleteTarget) return
+    if (!kbDeleteTarget || !selectedId) return
     try {
       setKbSubmitting(true)
-      const response = await deleteKnowledgeBase(currentWorkspaceId, kbDeleteTarget.id)
+      const response = await deleteKnowledgeBase(selectedId, kbDeleteTarget.id)
       toast.success(response.message)
       setKbDeleteTarget(null)
       await loadKnowledgeBases()
+      window.dispatchEvent(
+        new CustomEvent('lightrag:kb-updated', {
+          detail: { workspaceId: selectedId },
+        })
+      )
     } catch (deleteError) {
       toast.error(errorMessage(deleteError))
     } finally {
@@ -495,7 +554,7 @@ export default function WorkspaceListPage() {
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
-      {/* Page header */}
+      {/* Header — DocumentsPage-shaped. Primary action is "新建工作区". */}
       <header className="flex flex-wrap items-end justify-between gap-4 border-b border-border/60 px-6 py-4">
         <div className="min-w-0 space-y-1.5">
           <div className="flex flex-wrap items-center gap-2">
@@ -503,205 +562,434 @@ export default function WorkspaceListPage() {
               variant="outline"
               className="rounded-full px-2.5 py-0.5 text-[11px] uppercase tracking-[0.12em]"
             >
-              {t('platformShell.workspaceDirectory.badge')}
+              {t('platformShell.workspaceDirectory.badge', {
+                defaultValue: '工作区',
+              })}
             </Badge>
+            {!workspacesLoading && (
+              <span className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
+                {workspaces.length}{' '}
+                {t('platformShell.workspaceDirectory.workspaceCount', {
+                  defaultValue: '个',
+                })}
+              </span>
+            )}
           </div>
           <h1 className="text-2xl font-semibold tracking-tight text-foreground">
-            {t('platformShell.workspaceDirectory.title')}
+            {t('platformShell.workspaceDirectory.title', {
+              defaultValue: '工作区管理',
+            })}
           </h1>
-          <p className="max-w-3xl text-sm leading-6 text-muted-foreground">
-            {t('platformShell.workspaceDirectory.description')}
-          </p>
         </div>
-        <Button onClick={openWorkspaceCreateDialog}>
+        <Button size="sm" onClick={openWorkspaceCreateDialog}>
           <PlusIcon className="size-4" />
-          {t('platformShell.workspaceDirectory.createWorkspace', { defaultValue: '新建工作区' })}
+          {t('platformShell.workspaceDirectory.createWorkspace', {
+            defaultValue: '新建工作区',
+          })}
         </Button>
       </header>
 
-      {/* Access ribbon */}
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border/60 bg-muted/20 px-6 py-2 text-sm">
-        <div className="flex min-w-0 items-center gap-2">
-          <ShieldCheckIcon
-            className="size-4 shrink-0 text-emerald-600 dark:text-emerald-400"
-            aria-hidden="true"
-          />
-          <span className="font-medium text-foreground">
-            {t('platformShell.workspaceDirectory.activeWorkspace')}
+      {/* Workspace tab strip. Tabs + a "+" shortcut at the end. Uses
+          native <button> so no Radix focus chrome leaks in — the user
+          specifically complained about the previous Badge/pill row
+          looking "clicked" by default. */}
+      <div className="flex items-center gap-2 overflow-x-auto border-b border-border/60 bg-muted/10 px-4 py-2">
+        {workspacesLoading ? (
+          <span className="text-xs text-muted-foreground">
+            {t('platformShell.common.loading', { defaultValue: '加载中…' })}
           </span>
-          <span className="text-muted-foreground">·</span>
-          <span className="truncate text-muted-foreground">
-            {t(roleDescriptionKeys[effectiveRole])}
+        ) : workspaces.length === 0 ? (
+          <span className="text-xs text-muted-foreground">
+            {t('platformShell.workspaceDirectory.emptyWorkspaces', {
+              defaultValue: '还没有工作区 — 点击右上角按钮创建第一个。',
+            })}
           </span>
-        </div>
-        <div className="ml-auto flex flex-wrap items-center gap-1.5">
-          {capabilitySummary.map((capabilityKey) => (
-            <Badge
-              key={capabilityKey}
-              variant="outline"
-              className="rounded-full bg-background/70 px-2.5 py-0.5 text-[11px]"
-            >
-              {t(capabilityKey)}
-            </Badge>
-          ))}
-        </div>
+        ) : (
+          workspaces.map((ws) => {
+            const isActive = ws.id === selectedId
+            return (
+              <button
+                key={ws.id}
+                type="button"
+                onClick={() => setSelectedId(ws.id)}
+                className={cn(
+                  'inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors',
+                  isActive
+                    ? 'border-emerald-500/50 bg-emerald-500/[0.12] text-emerald-700 dark:text-emerald-200'
+                    : 'border-border/60 bg-background/70 text-muted-foreground hover:border-emerald-500/30 hover:text-foreground'
+                )}
+              >
+                <BriefcaseBusinessIcon className="size-3.5" aria-hidden="true" />
+                <span className="max-w-[200px] truncate">{ws.name}</span>
+                {ws.id === defaultWorkspaceId && (
+                  <span className="text-[10px] text-muted-foreground">
+                    ·{' '}
+                    {t('platformShell.workspaceDirectory.defaultBadge', {
+                      defaultValue: '默认',
+                    })}
+                  </span>
+                )}
+              </button>
+            )
+          })
+        )}
+        <button
+          type="button"
+          onClick={openWorkspaceCreateDialog}
+          className="inline-flex shrink-0 items-center gap-1 rounded-full border border-dashed border-border/60 bg-transparent px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:border-emerald-500/40 hover:text-foreground"
+        >
+          <PlusIcon className="size-3.5" aria-hidden="true" />
+          {t('platformShell.workspaceDirectory.createWorkspace', {
+            defaultValue: '新建工作区',
+          })}
+        </button>
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto">
-        <div className="mx-auto flex w-full max-w-[1400px] flex-col gap-6 px-6 py-6">
-          {/* ---- Workspaces section ---- */}
-          <section className="space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <FolderKanbanIcon className="size-4 text-emerald-600 dark:text-emerald-400" />
-                <h2 className="text-sm font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-                  {t('platformShell.workspaceDirectory.workspacesDirectory', {
-                    defaultValue: 'Workspaces',
-                  })}
-                </h2>
-                {!workspacesLoading && (
-                  <Badge variant="outline" className="rounded-full px-2 py-0.5 text-[10px]">
-                    {workspaces.length}
-                  </Badge>
-                )}
-              </div>
-            </div>
-
-            {workspaceError && (
-              <Alert className="border-border/70 bg-muted/20">
-                <AlertTitle>
-                  {t('platformShell.workspaceDirectory.workspacesUnavailable', {
-                    defaultValue: '暂时无法读取工作区',
-                  })}
-                </AlertTitle>
-                <AlertDescription className="text-xs">
-                  {t('platformShell.workspaceDirectory.workspacesUnavailableHint', {
-                    defaultValue:
-                      '后端尚未就绪，或未运行 migrate_workspaces_create_table 迁移。稍后重试即可。',
-                  })}
-                </AlertDescription>
-              </Alert>
-            )}
-
-            {workspacesLoading ? (
-              <div className="rounded-xl border border-dashed border-border/70 px-4 py-8 text-center text-sm text-muted-foreground">
-                {t('platformShell.workspaceDirectory.loadingWorkspaces', {
-                  defaultValue: '加载工作区…',
+        {workspaceError && (
+          <div className="border-b border-border/60 px-6 py-4">
+            <Alert className="border-border/70 bg-muted/20">
+              <AlertTitle>
+                {t('platformShell.workspaceDirectory.workspacesUnavailable', {
+                  defaultValue: '暂时无法读取工作区',
                 })}
-              </div>
-            ) : workspaces.length === 0 ? (
-              <div className="rounded-xl border border-dashed border-border/70 px-4 py-8 text-center text-sm text-muted-foreground">
-                {t('platformShell.workspaceDirectory.emptyWorkspaces', {
-                  defaultValue: '还没有工作区 — 点击右上角按钮创建第一个。',
-                })}
-              </div>
-            ) : (
-              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-                {workspaces.map((workspace) => (
-                  <WorkspaceCard
-                    key={workspace.id}
-                    workspace={workspace}
-                    onDelete={() => setWorkspaceDeleteTarget(workspace)}
+              </AlertTitle>
+              <AlertDescription className="text-xs">
+                {workspaceError}
+              </AlertDescription>
+            </Alert>
+          </div>
+        )}
+
+        {selectedWorkspace && (
+          <>
+            {/* Metadata section — rename + re-describe + inline meta */}
+            <section className="border-b border-border/60 px-6 py-5">
+              <form
+                onSubmit={handleWorkspaceMetadataSave}
+                className="flex flex-col gap-4"
+              >
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <div className="space-y-2">
+                    <label
+                      htmlFor="ws-name"
+                      className="text-sm font-medium text-foreground"
+                    >
+                      {t('platformShell.workspaceSettings.form.nameLabel', {
+                        defaultValue: '名称',
+                      })}
+                    </label>
+                    <Input
+                      id="ws-name"
+                      value={metaName}
+                      onChange={(event) => setMetaName(event.target.value)}
+                      disabled={!canManage || metaSubmitting}
+                      required
+                      maxLength={255}
+                      className="h-10 rounded-xl border-border/70"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <span className="text-sm font-medium text-foreground">
+                      {t('platformShell.workspaceSettings.form.meta', {
+                        defaultValue: '标识',
+                      })}
+                    </span>
+                    <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 rounded-xl border border-border/60 bg-muted/10 px-3 py-2 text-xs leading-5">
+                      <dt className="text-muted-foreground">ID</dt>
+                      <dd className="truncate font-mono text-foreground">
+                        {selectedWorkspace.id}
+                      </dd>
+                      <dt className="text-muted-foreground">
+                        {t('platformShell.workspaceSettings.form.createdAt', {
+                          defaultValue: '创建时间',
+                        })}
+                      </dt>
+                      <dd className="truncate font-mono text-foreground">
+                        {selectedWorkspace.created_at}
+                      </dd>
+                      <dt className="text-muted-foreground">
+                        {t('platformShell.workspaceSettings.form.lastUpdated', {
+                          defaultValue: '上次更新',
+                        })}
+                      </dt>
+                      <dd className="truncate font-mono text-foreground">
+                        {selectedWorkspace.updated_at}
+                      </dd>
+                    </dl>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label
+                    htmlFor="ws-description"
+                    className="text-sm font-medium text-foreground"
+                  >
+                    {t('platformShell.workspaceSettings.form.descriptionLabel', {
+                      defaultValue: '描述',
+                    })}
+                  </label>
+                  <Textarea
+                    id="ws-description"
+                    value={metaDescription}
+                    onChange={(event) => setMetaDescription(event.target.value)}
+                    disabled={!canManage || metaSubmitting}
+                    rows={3}
+                    maxLength={1024}
+                    placeholder={t(
+                      'platformShell.workspaceSettings.form.descriptionPlaceholder',
+                      {
+                        defaultValue:
+                          '简要说明这个工作区的用途，方便在切换器里找到它。',
+                      }
+                    )}
+                    className="rounded-xl border-border/70"
                   />
-                ))}
-              </div>
-            )}
-          </section>
+                </div>
 
-          {/* ---- KBs section ---- */}
-          <section className="space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <LayoutGridIcon className="size-4 text-emerald-600 dark:text-emerald-400" />
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleWorkspaceMetadataReset}
+                    disabled={!metaDirty || metaSubmitting}
+                  >
+                    {t('common.reset', { defaultValue: '还原' })}
+                  </Button>
+                  <Button type="submit" size="sm" disabled={!canSaveMeta}>
+                    {metaSubmitting
+                      ? t('platformShell.common.saving', {
+                        defaultValue: '保存中…',
+                      })
+                      : t('platformShell.workspaceSettings.form.save', {
+                        defaultValue: '保存',
+                      })}
+                  </Button>
+                </div>
+              </form>
+            </section>
+
+            {/* KB section — this workspace's knowledge bases */}
+            <section className="border-b border-border/60 px-6 py-5">
+              <div className="mb-3 flex flex-wrap items-center gap-2">
+                <FolderKanbanIcon
+                  className="size-4 text-emerald-600 dark:text-emerald-400"
+                  aria-hidden="true"
+                />
                 <h2 className="text-sm font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-                  {t('platformShell.workspaceDirectory.knowledgeBaseDirectory')}
+                  {t('platformShell.workspaceSettings.knowledgeBases', {
+                    defaultValue: '本工作区的知识库',
+                  })}
                 </h2>
                 {!kbLoading && (
-                  <Badge variant="outline" className="rounded-full px-2 py-0.5 text-[10px]">
+                  <Badge
+                    variant="outline"
+                    className="rounded-full px-2 py-0.5 text-[10px]"
+                  >
                     {knowledgeBases.length}
                   </Badge>
                 )}
-                <span className="text-xs text-muted-foreground">· {currentWorkspaceId}</span>
+                {canManage && (
+                  <Button
+                    size="sm"
+                    className="ml-auto"
+                    onClick={openKbCreateDialog}
+                  >
+                    <PlusIcon className="size-4" />
+                    {t('platformShell.workspaceDirectory.createKb', {
+                      defaultValue: '新建知识库',
+                    })}
+                  </Button>
+                )}
               </div>
-              {canManageKnowledgeBases && (
-                <Button size="sm" variant="outline" onClick={openKbCreateDialog}>
-                  <PlusIcon className="size-4" />
-                  {t('platformShell.workspaceDirectory.createKb', { defaultValue: '新建知识库' })}
-                </Button>
+
+              {kbError && (
+                <Alert className="mb-3 border-border/70 bg-muted/20">
+                  <AlertTitle>
+                    {t('platformShell.workspaceDirectory.compatibilityMode')}
+                  </AlertTitle>
+                  <AlertDescription className="text-xs">
+                    {kbError}
+                  </AlertDescription>
+                </Alert>
               )}
-            </div>
 
-            {kbError && (
-              <Alert className="border-border/70 bg-muted/20">
-                <AlertTitle>
-                  {t('platformShell.workspaceDirectory.compatibilityMode')}
-                </AlertTitle>
-                <AlertDescription className="text-xs">
-                  {t('platformShell.workspaceDirectory.compatibilityDescription')}
-                </AlertDescription>
-              </Alert>
+              {kbLoading ? (
+                <div className="rounded-xl border border-dashed border-border/70 px-4 py-6 text-center text-sm text-muted-foreground">
+                  {t('platformShell.common.loading', { defaultValue: '加载中…' })}
+                </div>
+              ) : knowledgeBases.length > 0 ? (
+                <div className="overflow-hidden rounded-xl border border-border/60 bg-background/70">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>
+                          {t('platformShell.workspaceDirectory.displayName', {
+                            defaultValue: '名称',
+                          })}
+                        </TableHead>
+                        <TableHead>
+                          {t('platformShell.workspaceDirectory.categoryLabel', {
+                            defaultValue: '分类',
+                          })}
+                        </TableHead>
+                        <TableHead>
+                          {t('platformShell.workspaceDirectory.descriptionLabel', {
+                            defaultValue: '描述',
+                          })}
+                        </TableHead>
+                        <TableHead className="text-right">
+                          {t('platformShell.common.actions', {
+                            defaultValue: '操作',
+                          })}
+                        </TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {knowledgeBases.map((kb) => (
+                        <TableRow key={kb.id}>
+                          <TableCell className="font-medium">
+                            <div className="flex min-w-0 items-center gap-2">
+                              <BookOpenTextIcon
+                                className="size-3.5 shrink-0 text-muted-foreground"
+                                aria-hidden="true"
+                              />
+                              <span className="truncate">{kb.name || kb.id}</span>
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-muted-foreground">
+                            {kb.category ? (
+                              <Badge
+                                variant="outline"
+                                className="rounded-full px-2 py-0.5 text-[11px]"
+                              >
+                                {kb.category}
+                              </Badge>
+                            ) : (
+                              <span className="text-xs text-muted-foreground/60">
+                                —
+                              </span>
+                            )}
+                          </TableCell>
+                          <TableCell className="max-w-[320px] truncate text-muted-foreground">
+                            {kb.description || (
+                              <span className="text-muted-foreground/60">—</span>
+                            )}
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <div className="flex items-center justify-end gap-1.5">
+                              <Button variant="outline" size="sm" asChild>
+                                <Link
+                                  to={appRoutes.kbDocuments(selectedId!, kb.id)}
+                                >
+                                  {t('platformShell.common.documents', {
+                                    defaultValue: '文档',
+                                  })}
+                                </Link>
+                              </Button>
+                              {canManage && (
+                                <>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => openKbEditDialog(kb)}
+                                  >
+                                    {t('platformShell.common.edit', {
+                                      defaultValue: '编辑',
+                                    })}
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                                    onClick={() => setKbDeleteTarget(kb)}
+                                  >
+                                    <Trash2Icon className="size-3.5" />
+                                  </Button>
+                                </>
+                              )}
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              ) : (
+                <div className="rounded-xl border border-dashed border-border/70 px-4 py-8 text-center text-sm text-muted-foreground">
+                  {t('platformShell.workspaceDirectory.empty', {
+                    defaultValue:
+                      '还没有知识库 — 点击"新建知识库"创建第一个。',
+                  })}
+                </div>
+              )}
+            </section>
+
+            {/* Danger zone — delete this workspace */}
+            {canDelete && !isDefaultWorkspace && (
+              <section className="px-6 py-5">
+                <div className="flex flex-wrap items-start justify-between gap-3 rounded-xl border border-destructive/30 bg-destructive/[0.05] p-4">
+                  <div className="min-w-0 space-y-1">
+                    <h2 className="text-sm font-semibold text-destructive">
+                      {t('platformShell.workspaceSettings.dangerZoneTitle', {
+                        defaultValue: '删除工作区',
+                      })}
+                    </h2>
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      {t(
+                        'platformShell.workspaceSettings.dangerZoneDescription',
+                        {
+                          defaultValue:
+                            '删除后会一并移除成员授权。存储中的文档与图谱不会被自动清理，可稍后手动清理。',
+                        }
+                      )}
+                    </p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="border-destructive/30 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                    onClick={() => setWsDeleteOpen(true)}
+                  >
+                    <Trash2Icon className="size-4" />
+                    {t('platformShell.workspaceSettings.deleteAction', {
+                      defaultValue: '删除此工作区',
+                    })}
+                  </Button>
+                </div>
+              </section>
             )}
+          </>
+        )}
 
-            {kbLoading ? (
-              <div className="rounded-xl border border-dashed border-border/70 px-4 py-8 text-center text-sm text-muted-foreground">
-                {t('platformShell.workspaceDirectory.loadingKnowledgeBases')}
+        {!workspacesLoading && !selectedWorkspace && workspaces.length === 0 && (
+          <div className="flex flex-1 items-center justify-center px-6 py-12">
+            <div className="flex max-w-sm flex-col items-center gap-3 text-center">
+              <div className="flex size-12 items-center justify-center rounded-full bg-muted/40">
+                <BriefcaseBusinessIcon
+                  className="size-5 text-muted-foreground"
+                  aria-hidden="true"
+                />
               </div>
-            ) : knowledgeBases.length === 0 ? (
-              <div className="rounded-xl border border-dashed border-border/70 px-4 py-8 text-center text-sm text-muted-foreground">
-                {t('platformShell.workspaceDirectory.empty')}
-              </div>
-            ) : (
-              <div className="space-y-5">
-                {knowledgeBaseGroups.map(([groupKey, items]) => {
-                  const isUncategorized = groupKey === UNCATEGORIZED_KEY
-                  const label = isUncategorized
-                    ? t('platformShell.workspaceDirectory.uncategorized', {
-                      defaultValue: '未分类',
-                    })
-                    : groupKey
-                  return (
-                    <div key={groupKey} className="space-y-3">
-                      <div className="flex items-center gap-2">
-                        <h3
-                          className={`text-xs font-semibold uppercase tracking-[0.14em] ${
-                            isUncategorized
-                              ? 'text-muted-foreground/70'
-                              : 'text-foreground'
-                          }`}
-                        >
-                          {label}
-                        </h3>
-                        <Badge
-                          variant="outline"
-                          className="rounded-full px-2 py-0.5 text-[10px]"
-                        >
-                          {items.length}
-                        </Badge>
-                      </div>
-                      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                        {items.map((kb) => (
-                          <KnowledgeBaseCard
-                            key={kb.id}
-                            kb={kb}
-                            canManage={canManageKnowledgeBases}
-                            onOpen={appRoutes.kbDocuments(kb.workspace_id, kb.id)}
-                            onEdit={() => openKbEditDialog(kb)}
-                            onDelete={() => setKbDeleteTarget(kb)}
-                          />
-                        ))}
-                      </div>
-                    </div>
-                  )
+              <p className="text-sm text-muted-foreground">
+                {t('platformShell.workspaceDirectory.emptyWorkspaces', {
+                  defaultValue: '还没有工作区 — 点击右上角按钮创建第一个。',
                 })}
-              </div>
-            )}
-          </section>
-        </div>
+              </p>
+              <Button size="sm" onClick={openWorkspaceCreateDialog}>
+                <PlusIcon className="size-4" />
+                {t('platformShell.workspaceDirectory.createWorkspace', {
+                  defaultValue: '新建工作区',
+                })}
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* ---- Dialogs ---- */}
+      {/* --- dialogs --- */}
 
-      {/* KB form */}
       <KnowledgeBaseFormDialog
         open={kbDialogOpen}
         mode={kbDialogMode}
@@ -712,7 +1000,6 @@ export default function WorkspaceListPage() {
         onSubmit={handleKnowledgeBaseSubmit}
       />
 
-      {/* KB delete confirm */}
       <AlertDialog
         open={Boolean(kbDeleteTarget)}
         onOpenChange={(open) => !open && setKbDeleteTarget(null)}
@@ -724,15 +1011,20 @@ export default function WorkspaceListPage() {
             </AlertDialogTitle>
             <AlertDialogDescription>
               {kbDeleteTarget
-                ? t('platformShell.workspaceDirectory.deleteDialog.descriptionWithName', {
-                  knowledgeBaseName: kbDeleteTarget.name || kbDeleteTarget.id,
-                  workspaceId: currentWorkspaceId,
-                })
+                ? t(
+                  'platformShell.workspaceDirectory.deleteDialog.descriptionWithName',
+                  {
+                    knowledgeBaseName: kbDeleteTarget.name || kbDeleteTarget.id,
+                    workspaceId: selectedId ?? '',
+                  }
+                )
                 : t('platformShell.workspaceDirectory.deleteDialog.description')}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={kbSubmitting}>{t('common.cancel')}</AlertDialogCancel>
+            <AlertDialogCancel disabled={kbSubmitting}>
+              {t('common.cancel')}
+            </AlertDialogCancel>
             <AlertDialogAction
               onClick={handleKnowledgeBaseDelete}
               disabled={kbSubmitting}
@@ -746,8 +1038,7 @@ export default function WorkspaceListPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Workspace create dialog */}
-      <Dialog open={workspaceDialogOpen} onOpenChange={setWorkspaceDialogOpen}>
+      <Dialog open={wsCreateOpen} onOpenChange={setWsCreateOpen}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>
@@ -762,7 +1053,7 @@ export default function WorkspaceListPage() {
               })}
             </DialogDescription>
           </DialogHeader>
-          <form className="space-y-4" onSubmit={handleWorkspaceSubmit}>
+          <form className="space-y-4" onSubmit={handleWorkspaceCreate}>
             <div className="space-y-2">
               <label className="text-sm font-medium">
                 {t('platformShell.workspaceDirectory.workspaceForm.nameLabel', {
@@ -772,229 +1063,93 @@ export default function WorkspaceListPage() {
               <Input
                 required
                 autoFocus
-                value={workspaceForm.name}
+                value={wsCreateForm.name}
                 onChange={(event) =>
-                  setWorkspaceForm((prev) => ({ ...prev, name: event.target.value }))
+                  setWsCreateForm((prev) => ({
+                    ...prev,
+                    name: event.target.value,
+                  }))
                 }
                 placeholder={t(
                   'platformShell.workspaceDirectory.workspaceForm.namePlaceholder',
                   { defaultValue: '例如：Marketing Research' }
                 )}
-                disabled={workspaceSubmitting}
+                disabled={wsCreateSubmitting}
               />
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">
-                {t('platformShell.workspaceDirectory.workspaceForm.descriptionLabel', {
-                  defaultValue: '描述',
-                })}
+                {t(
+                  'platformShell.workspaceDirectory.workspaceForm.descriptionLabel',
+                  { defaultValue: '描述' }
+                )}
               </label>
               <Textarea
-                value={workspaceForm.description}
+                value={wsCreateForm.description}
                 onChange={(event) =>
-                  setWorkspaceForm((prev) => ({ ...prev, description: event.target.value }))
+                  setWsCreateForm((prev) => ({
+                    ...prev,
+                    description: event.target.value,
+                  }))
                 }
                 rows={3}
-                disabled={workspaceSubmitting}
+                disabled={wsCreateSubmitting}
               />
             </div>
             <DialogFooter>
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => setWorkspaceDialogOpen(false)}
-                disabled={workspaceSubmitting}
+                onClick={() => setWsCreateOpen(false)}
+                disabled={wsCreateSubmitting}
               >
                 {t('common.cancel')}
               </Button>
-              <Button type="submit" disabled={workspaceSubmitting}>
-                {workspaceSubmitting
+              <Button type="submit" disabled={wsCreateSubmitting}>
+                {wsCreateSubmitting
                   ? t('platformShell.common.saving', { defaultValue: '保存中…' })
-                  : t('platformShell.workspaceDirectory.workspaceForm.submit', {
-                    defaultValue: '创建',
-                  })}
+                  : t(
+                    'platformShell.workspaceDirectory.workspaceForm.submit',
+                    { defaultValue: '创建' }
+                  )}
               </Button>
             </DialogFooter>
           </form>
         </DialogContent>
       </Dialog>
 
-      {/* Workspace delete confirm */}
-      <AlertDialog
-        open={Boolean(workspaceDeleteTarget)}
-        onOpenChange={(open) => !open && setWorkspaceDeleteTarget(null)}
-      >
+      <AlertDialog open={wsDeleteOpen} onOpenChange={setWsDeleteOpen}>
         <AlertDialogContent className="rounded-2xl border-border/70">
           <AlertDialogHeader>
             <AlertDialogTitle>
-              {t('platformShell.workspaceDirectory.workspaceForm.deleteTitle', {
-                defaultValue: '删除工作区',
+              {t('platformShell.workspaceSettings.deleteDialogTitle', {
+                defaultValue: '确认删除工作区',
               })}
             </AlertDialogTitle>
             <AlertDialogDescription>
-              {workspaceDeleteTarget
-                ? t('platformShell.workspaceDirectory.workspaceForm.deleteConfirm', {
-                  defaultValue:
-                      '删除工作区 "{{name}}" 将一并移除其成员和知识库授权。此操作不可撤销。',
-                  name: workspaceDeleteTarget.name,
-                })
-                : ''}
+              {t('platformShell.workspaceSettings.deleteDialogDescription', {
+                defaultValue:
+                  '删除工作区 "{{name}}" 将同时移除其成员授权。此操作不可撤销。',
+                name: selectedWorkspace?.name ?? '',
+              })}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={workspaceSubmitting}>
+            <AlertDialogCancel disabled={wsDeleteSubmitting}>
               {t('common.cancel')}
             </AlertDialogCancel>
             <AlertDialogAction
               onClick={handleWorkspaceDelete}
-              disabled={workspaceSubmitting}
+              disabled={wsDeleteSubmitting}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
-              {workspaceSubmitting
+              {wsDeleteSubmitting
                 ? t('platformShell.common.deleting')
                 : t('platformShell.common.delete')}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Cards
-// ---------------------------------------------------------------------------
-
-function WorkspaceCard({
-  workspace,
-  onDelete,
-}: {
-  workspace: WorkspaceRecord
-  onDelete: () => void
-}) {
-  const { t } = useTranslation()
-  const isDefault = workspace.id === defaultWorkspaceId
-
-  return (
-    <div className="flex flex-col gap-3 rounded-xl border border-border/60 bg-background/70 px-4 py-3 transition-colors hover:border-emerald-500/30">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-foreground">
-            {workspace.name}
-          </p>
-        </div>
-        {isDefault && (
-          <Badge variant="outline" className="shrink-0 rounded-full px-2 py-0.5 text-[10px]">
-            {t('platformShell.workspaceDirectory.defaultBadge')}
-          </Badge>
-        )}
-      </div>
-
-      {workspace.description ? (
-        <p className="line-clamp-2 text-xs leading-5 text-muted-foreground">
-          {workspace.description}
-        </p>
-      ) : (
-        <p className="text-xs leading-5 text-muted-foreground/60">—</p>
-      )}
-
-      <div className="mt-auto flex flex-wrap gap-2">
-        <Button size="sm" variant="outline" asChild>
-          <Link to={appRoutes.kbOverview(workspace.id, defaultKnowledgeBaseId)}>
-            {t('platformShell.common.open', { defaultValue: '打开' })}
-          </Link>
-        </Button>
-        {!isDefault && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-            onClick={onDelete}
-            tooltip={t('platformShell.common.delete')}
-            side="bottom"
-          >
-            <Trash2Icon className="size-4" />
-          </Button>
-        )}
-      </div>
-    </div>
-  )
-}
-
-function KnowledgeBaseCard({
-  kb,
-  canManage,
-  onOpen,
-  onEdit,
-  onDelete,
-}: {
-  kb: KnowledgeBaseRecord
-  canManage: boolean
-  onOpen: string
-  onEdit: () => void
-  onDelete: () => void
-}) {
-  const { t } = useTranslation()
-  const isDefault = kb.id === defaultKnowledgeBaseId
-
-  return (
-    <div className="flex flex-col gap-3 rounded-xl border border-border/60 bg-background/70 px-4 py-3 transition-colors hover:border-emerald-500/30">
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex min-w-0 items-start gap-2.5">
-          <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-300">
-            <BookOpenTextIcon className="size-4" />
-          </span>
-          <div className="min-w-0">
-            <p className="truncate text-sm font-semibold text-foreground">
-              {kb.name || kb.id}
-            </p>
-            <p className="mt-0.5 truncate text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
-              {kb.id}
-            </p>
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-1.5">
-          {isDefault && (
-            <Badge variant="outline" className="rounded-full px-2 py-0.5 text-[10px]">
-              {t('platformShell.workspaceDirectory.defaultBadge')}
-            </Badge>
-          )}
-          {kb.status && kb.status !== 'active' && (
-            <Badge variant="outline" className="rounded-full px-2 py-0.5 text-[10px]">
-              {kb.status}
-            </Badge>
-          )}
-        </div>
-      </div>
-
-      <p className="line-clamp-2 text-xs leading-5 text-muted-foreground">
-        {kb.description || t('platformShell.workspaceDirectory.noDescription')}
-      </p>
-
-      <div className="mt-auto flex flex-wrap gap-2">
-        <Button size="sm" asChild>
-          <Link to={onOpen}>{t('platformShell.common.documents')}</Link>
-        </Button>
-        {canManage && (
-          <>
-            <Button variant="outline" size="sm" onClick={onEdit}>
-              {t('platformShell.common.edit')}
-            </Button>
-            {!isDefault && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                onClick={onDelete}
-                tooltip={t('platformShell.common.delete')}
-                side="bottom"
-              >
-                <Trash2Icon className="size-4" />
-              </Button>
-            )}
-          </>
-        )}
-      </div>
     </div>
   )
 }

@@ -6,7 +6,6 @@ import {
   FolderKanbanIcon,
   LayoutDashboardIcon,
   NetworkIcon,
-  Settings2Icon,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
@@ -107,24 +106,17 @@ export default function AppSidebarNav() {
   // log are still route-reachable for power users / multi-tenant deploys
   // (LDAP, shared workspaces, etc.) — they just don't take up sidebar
   // real estate when the product surface is "personal workspace + KBs".
+  //
+  // The unified workspace-management page (create / rename / delete /
+  // pick KBs) is the sole admin entry — the old per-workspace
+  // "Workspace Settings" page now redirects into this same screen.
   const adminItems: NavItem[] = [
     {
-      // Global directory — create new workspaces + list every workspace
-      // the user has access to. Users previously reported they couldn't
-      // find the "新建工作区" entry point from inside a workspace; this
-      // pins it to the sidebar so it's always one click away.
       key: 'workspaces',
-      label: t('header.workspaces', { defaultValue: '工作区目录' }),
+      label: t('header.workspaceManagement', { defaultValue: '工作区管理' }),
       to: appRoutes.workspaces,
       icon: FolderKanbanIcon,
       requiredPermission: null,
-    },
-    {
-      key: 'settings',
-      label: t('header.workspaceSettings'),
-      to: appRoutes.workspaceSettings(currentWorkspaceId),
-      icon: Settings2Icon,
-      requiredPermission: 'workspace:update',
     },
   ]
 
