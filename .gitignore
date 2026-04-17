@@ -15,6 +15,12 @@ venv/
 .env
 .env.backup.*
 
+# Platform V2 local state (sqlite auth / audit dev DB)
+lightrag_auth.db
+lightrag_auth.db-journal
+lightrag_auth.db-wal
+lightrag_auth.db-shm
+
 # Generated Docker Compose files (output of setup wizard)
 docker-compose.*.yml
 
