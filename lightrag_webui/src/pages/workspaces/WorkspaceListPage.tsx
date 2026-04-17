@@ -273,8 +273,8 @@ export default function WorkspaceListPage() {
   const [workspacesLoading, setWorkspacesLoading] = useState(true)
   const [workspaceError, setWorkspaceError] = useState<string | null>(null)
   const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false)
-  const [workspaceForm, setWorkspaceForm] = useState<{ id: string; name: string; description: string }>(
-    { id: '', name: '', description: '' }
+  const [workspaceForm, setWorkspaceForm] = useState<{ name: string; description: string }>(
+    { name: '', description: '' }
   )
   const [workspaceDeleteTarget, setWorkspaceDeleteTarget] = useState<WorkspaceRecord | null>(null)
   const [workspaceSubmitting, setWorkspaceSubmitting] = useState(false)
@@ -346,7 +346,7 @@ export default function WorkspaceListPage() {
   // ---------- workspace handlers ----------
 
   const openWorkspaceCreateDialog = () => {
-    setWorkspaceForm({ id: '', name: '', description: '' })
+    setWorkspaceForm({ name: '', description: '' })
     setWorkspaceDialogOpen(true)
   }
 
@@ -363,8 +363,8 @@ export default function WorkspaceListPage() {
     }
     try {
       setWorkspaceSubmitting(true)
+      // Backend auto-assigns an opaque uuid4 hex id when omitted.
       const created = await createWorkspace({
-        id: workspaceForm.id.trim() || undefined,
         name: trimmedName,
         description: workspaceForm.description.trim() || null,
       })
@@ -703,6 +703,7 @@ export default function WorkspaceListPage() {
               </label>
               <Input
                 required
+                autoFocus
                 value={workspaceForm.name}
                 onChange={(event) =>
                   setWorkspaceForm((prev) => ({ ...prev, name: event.target.value }))
@@ -710,24 +711,6 @@ export default function WorkspaceListPage() {
                 placeholder={t(
                   'platformShell.workspaceDirectory.workspaceForm.namePlaceholder',
                   { defaultValue: '例如：Marketing Research' }
-                )}
-                disabled={workspaceSubmitting}
-              />
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium">
-                {t('platformShell.workspaceDirectory.workspaceForm.idLabel', {
-                  defaultValue: 'ID（可选）',
-                })}
-              </label>
-              <Input
-                value={workspaceForm.id}
-                onChange={(event) =>
-                  setWorkspaceForm((prev) => ({ ...prev, id: event.target.value }))
-                }
-                placeholder={t(
-                  'platformShell.workspaceDirectory.workspaceForm.idPlaceholder',
-                  { defaultValue: '留空则从名称生成' }
                 )}
                 disabled={workspaceSubmitting}
               />
@@ -831,9 +814,6 @@ function WorkspaceCard({
           <p className="truncate text-sm font-semibold text-foreground">
             {workspace.name}
           </p>
-          <p className="mt-0.5 truncate text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
-            {workspace.id}
-          </p>
         </div>
         {isDefault && (
           <Badge variant="outline" className="shrink-0 rounded-full px-2 py-0.5 text-[10px]">
@@ -842,10 +822,12 @@ function WorkspaceCard({
         )}
       </div>
 
-      {workspace.description && (
+      {workspace.description ? (
         <p className="line-clamp-2 text-xs leading-5 text-muted-foreground">
           {workspace.description}
         </p>
+      ) : (
+        <p className="text-xs leading-5 text-muted-foreground/60">—</p>
       )}
 
       <div className="mt-auto flex flex-wrap gap-2">

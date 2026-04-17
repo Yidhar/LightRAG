@@ -22,6 +22,7 @@ Permissions:
 from __future__ import annotations
 
 from typing import Optional
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, model_validator
@@ -114,15 +115,9 @@ def _sanitize_workspace_id(raw_id: str) -> str:
     return sanitized
 
 
-def _workspace_id_from_name(name: str) -> str:
-    """Derive a default id when the client omitted one, using the name."""
-    candidate = sanitize_platform_identifier(name, label="workspace id")
-    if not candidate:
-        raise HTTPException(
-            status_code=400,
-            detail="workspace name does not yield a valid id; pass `id` explicitly",
-        )
-    return candidate
+def _generate_workspace_id() -> str:
+    """Generate an opaque, slug-safe workspace id (32-char uuid4 hex)."""
+    return uuid4().hex
 
 
 def create_workspace_routes(api_key: Optional[str] = None) -> APIRouter:
@@ -181,11 +176,23 @@ def create_workspace_routes(api_key: Optional[str] = None) -> APIRouter:
                 detail="Creating a workspace requires an authenticated DB user",
             )
 
-        workspace_id = (
-            _sanitize_workspace_id(payload.id)
-            if payload.id
-            else _workspace_id_from_name(payload.name)
-        )
+        # Client may optionally provide an explicit id (legacy / import paths).
+        # The UI no longer exposes this field; new workspaces get an opaque
+        # uuid4 hex so users never have to think up a slug.
+        if payload.id:
+            workspace_id = _sanitize_workspace_id(payload.id)
+        else:
+            # Retry a few times in the astronomically unlikely collision case.
+            for _ in range(5):
+                candidate = _generate_workspace_id()
+                if await get_workspace(candidate) is None:
+                    workspace_id = candidate
+                    break
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Unable to allocate a workspace id after repeated retries",
+                )
 
         existing = await get_workspace(workspace_id)
         if existing is not None:
