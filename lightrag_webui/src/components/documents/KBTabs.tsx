@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { BookOpenTextIcon, PlusIcon } from 'lucide-react'
 
@@ -7,6 +8,10 @@ import { useKBStore } from '@/stores/kb'
 import { defaultKnowledgeBaseId } from '@/app/routes'
 import { cn } from '@/lib/utils'
 import Button from '@/components/ui/Button'
+
+// Query-string key used to persist the active KB selection across reloads.
+// Keeping the key short so shared URLs read cleanly.
+const KB_QUERY_KEY = 'kb'
 
 interface KBTabsProps {
   workspaceId: string
@@ -26,11 +31,44 @@ interface KBTabsProps {
  */
 export default function KBTabs({ workspaceId, onChange, onCreate }: KBTabsProps) {
   const { t } = useTranslation()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(false)
   const activeKbId = useKBStore((s) => s.activeKbId) ?? defaultKnowledgeBaseId
   const setActiveKb = useKBStore((s) => s.setActiveKb)
+
+  // Writes the active KB into the URL with replaceState so we don't
+  // pollute history with a back-button entry per tab click.
+  const writeKbQuery = useCallback(
+    (kbId: string | null) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev)
+          if (kbId) {
+            next.set(KB_QUERY_KEY, kbId)
+          } else {
+            next.delete(KB_QUERY_KEY)
+          }
+          return next
+        },
+        { replace: true }
+      )
+    },
+    [setSearchParams]
+  )
+
+  // Seed activeKbId from ``?kb=`` on the first mount of this component.
+  // Runs before the list loads so the correct tab is highlighted as
+  // soon as the fetch returns. Intentionally [] — we do not want URL
+  // edits made *after* mount to fight the tab picker.
+  useEffect(() => {
+    const fromUrl = searchParams.get(KB_QUERY_KEY)
+    if (fromUrl && fromUrl !== activeKbId) {
+      setActiveKb(fromUrl)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const load = useCallback(async () => {
     try {
@@ -39,13 +77,15 @@ export default function KBTabs({ workspaceId, onChange, onCreate }: KBTabsProps)
       const response = await listKnowledgeBases(workspaceId)
       setKnowledgeBases(response.items)
       // If the currently-active KB no longer exists (deleted, workspace
-      // switched), fall back to the default.
+      // switched, or stale URL ``?kb=``), fall back to the default and
+      // clean up the URL so share-links stay valid.
       if (
         response.items.length > 0 &&
         activeKbId &&
         !response.items.some((kb) => kb.id === activeKbId)
       ) {
         setActiveKb(defaultKnowledgeBaseId)
+        writeKbQuery(null)
       }
     } catch {
       setKnowledgeBases([])
@@ -53,7 +93,7 @@ export default function KBTabs({ workspaceId, onChange, onCreate }: KBTabsProps)
     } finally {
       setLoading(false)
     }
-  }, [workspaceId, activeKbId, setActiveKb])
+  }, [workspaceId, activeKbId, setActiveKb, writeKbQuery])
 
   useEffect(() => {
     void load()
@@ -76,6 +116,7 @@ export default function KBTabs({ workspaceId, onChange, onCreate }: KBTabsProps)
 
   const handlePick = (kbId: string) => {
     setActiveKb(kbId)
+    writeKbQuery(kbId)
     if (onChange) onChange(kbId)
   }
 
