@@ -94,21 +94,39 @@ class AuthProvider(ABC):
         """
         Resolve the signed-in user profile.
 
+        Membership claims are read **fresh from the DB** when a DB-backed
+        user is identified — *not* from the JWT's ``memberships`` claim,
+        which is frozen at login. A user who creates a new workspace
+        after logging in needs ``/auth/me`` to show that new membership
+        so the frontend can unlock UI gating immediately (we hit this
+        bug with ``工作区2`` where ``canManage`` was false because the
+        JWT predated the new workspace).
+
         Remote providers can override this to surface upstream directory
         attributes while keeping the `/auth/me` response stable.
         """
         user_id = token_info.get("user_id")
-        memberships = list(token_info.get("memberships") or [])
+        # Snapshot-from-JWT fallback used when the DB is unavailable or
+        # the user is env-seeded (no DB row).
+        token_memberships = list(token_info.get("memberships") or [])
+
         if user_id:
             user = await get_user_by_id(user_id)
             if user is not None:
+                try:
+                    fresh_memberships = await get_membership_claims(user_id)
+                except Exception:
+                    # DB hiccup — fall back to the JWT snapshot. Still
+                    # correct for the "existed at login" set, just
+                    # missing anything granted since then.
+                    fresh_memberships = token_memberships
                 return {
                     "user_id": user.user_id,
                     "username": user.username,
                     "source": user.source,
                     "is_active": user.is_active,
                     "role": token_info.get("role", "viewer"),
-                    "memberships": memberships,
+                    "memberships": fresh_memberships,
                     "provider": self.provider_name,
                 }
 
@@ -118,7 +136,7 @@ class AuthProvider(ABC):
             "source": "env",
             "is_active": True,
             "role": token_info.get("role", "viewer"),
-            "memberships": memberships,
+            "memberships": token_memberships,
             "provider": self.provider_name,
         }
 
