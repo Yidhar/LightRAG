@@ -4059,6 +4059,18 @@ class LightRAG:
                                 )
                             content = content_data["content"]
 
+                            # Fire the LLM-backed document summary task in
+                            # parallel with chunking. It runs through the
+                            # LLM cache so duplicate content never
+                            # re-invokes the provider, and we await it
+                            # just before the final PROCESSED upsert
+                            # (with a short timeout) so a slow LLM call
+                            # falls back to the truncated prefix rather
+                            # than blocking the pipeline.
+                            doc_summary_task = asyncio.create_task(
+                                self._agenerate_document_summary(content)
+                            )
+
                             # Call chunking function, supporting both sync and async implementations
                             chunking_result = self.chunking_func(
                                 self.tokenizer,
@@ -4311,13 +4323,37 @@ class LightRAG:
                                 # Record processing end time
                                 processing_end_time = int(time.time())
 
+                                # Wait up to 10s for the LLM-backed
+                                # document summary to arrive. The task
+                                # was kicked off at the very start of
+                                # process_document, so by the time we
+                                # land here (post-extraction + merge)
+                                # it's usually already resolved. If it
+                                # isn't — slow LLM, transient error —
+                                # fall back to the truncated prefix so
+                                # the PROCESSED row always has a sane
+                                # summary.
+                                resolved_summary = status_doc.content_summary
+                                try:
+                                    llm_summary = await asyncio.wait_for(
+                                        doc_summary_task, timeout=10
+                                    )
+                                    if llm_summary:
+                                        resolved_summary = llm_summary
+                                except (asyncio.TimeoutError, Exception):
+                                    # Keep the prefix fallback. Any
+                                    # actual LLM-call error was already
+                                    # logged inside _agenerate_document_summary.
+                                    if not doc_summary_task.done():
+                                        doc_summary_task.cancel()
+
                                 await self.doc_status.upsert(
                                     {
                                         doc_id: {
                                             "status": DocStatus.PROCESSED,
                                             "chunks_count": len(chunks),
                                             "chunks_list": list(chunks.keys()),
-                                            "content_summary": status_doc.content_summary,
+                                            "content_summary": resolved_summary,
                                             "content_length": status_doc.content_length,
                                             "created_at": status_doc.created_at,
                                             "updated_at": datetime.now(
@@ -4470,6 +4506,74 @@ class LightRAG:
                 )
                 pipeline_status["latest_message"] = log_message
                 pipeline_status["history_messages"].append(log_message)
+
+    async def _agenerate_document_summary(
+        self, content: str, *, max_input_chars: int = 12000
+    ) -> str | None:
+        """LLM-generate a short document summary for the list view.
+
+        Fire this at the start of ``process_document`` in parallel with
+        chunking. It goes through the same ``use_llm_func_with_cache``
+        path as entity/relation merging, so identical content hits the
+        LLM cache and never re-invokes the provider.
+
+        Returns ``None`` on any failure — callers should fall back to
+        ``get_content_summary(content)`` (truncated prefix) so the
+        doc-status row always has *something* in the summary column.
+
+        ``max_input_chars`` caps how much of the document we hand to
+        the LLM. ~12k chars is roughly 3k-4k tokens on Chinese / English
+        mixed text, which is a reasonable bound for a one-sentence
+        summary task; going higher just burns tokens without improving
+        the output.
+        """
+        from lightrag.prompt import PROMPTS
+        from lightrag.utils import use_llm_func_with_cache
+        from lightrag.constants import DEFAULT_SUMMARY_LANGUAGE
+
+        if not content or not content.strip():
+            return None
+
+        # Slice on character count rather than tokens — the LLM will
+        # stop reading once the main thrust of the doc is clear anyway,
+        # and we want this step to stay cheap.
+        input_text = content.strip()
+        if len(input_text) > max_input_chars:
+            input_text = input_text[:max_input_chars]
+
+        language = self.addon_params.get("language", DEFAULT_SUMMARY_LANGUAGE)
+        prompt = PROMPTS["document_summary"].format(
+            language=language,
+            content=input_text,
+        )
+
+        # _priority=8 matches the entity/relation summary path so doc
+        # summaries don't starve foreground retrieval calls.
+        use_llm_func = partial(self.llm_model_func, _priority=8)
+
+        try:
+            summary, _ = await use_llm_func_with_cache(
+                prompt,
+                use_llm_func,
+                llm_response_cache=self.llm_response_cache,
+                cache_type="doc_summary",
+            )
+        except Exception as exc:
+            logger.warning(
+                "Document summary LLM call failed (%s); using truncated prefix fallback.",
+                exc,
+            )
+            return None
+
+        if not summary:
+            return None
+
+        # Hard cap the output to keep wide-screen table cells tidy even
+        # if the model ignores the prompt's length hint.
+        summary = summary.strip()
+        if len(summary) > 200:
+            summary = summary[:200].rstrip() + "…"
+        return summary
 
     async def _check_doc_cancelled(self, doc_id: str) -> bool:
         """

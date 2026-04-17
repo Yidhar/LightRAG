@@ -217,6 +217,26 @@ Description List:
 ---Output---
 """
 
+PROMPTS["document_summary"] = """---Role---
+You are an assistant that distills a document into a short, informative summary for a document list.
+
+---Task---
+Write a single plain-text summary of the document below.
+
+---Instructions---
+1. Length: 1 - 2 sentences, at most 120 {language} characters total.
+2. Style: factual, neutral, third-person. No quotation marks, no markdown, no "this document...", no trailing period-space-period.
+3. Content: capture the *subject* (what the document is about) plus the single most salient detail. Skip generic framing such as "this is a file that contains".
+4. If the document is a log or stack trace, summarise the dominant error or pattern, not the header line.
+5. Output only the summary text — no headings, no prefix, no explanation.
+6. Language: write the entire summary in {language}. Keep proper nouns / code identifiers in their original form.
+
+---Input---
+{content}
+
+---Output---
+"""
+
 PROMPTS["fail_response"] = (
     "Sorry, I'm not able to provide an answer to that question.[no-context]"
 )
