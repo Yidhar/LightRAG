@@ -135,6 +135,19 @@ def has_permission(role: str, action: str) -> bool:
     return action in ROLE_PERMISSIONS.get(role, set())
 
 
+def _resource_type_for_action(action: str) -> str:
+    """Best-effort mapping of Action.* values to audit resource_type tokens."""
+    if action.startswith("workspace:"):
+        return "workspace"
+    if action.startswith("kb:"):
+        return "kb"
+    if action.startswith("audit:"):
+        return "audit"
+    if ":" in action:
+        return action.split(":", 1)[0]
+    return action or "unknown"
+
+
 def require_permission(action: str, api_key: Optional[str] = None):
     """
     Enforce RBAC while preserving legacy auth-disabled and V1 flat-role behavior.
@@ -197,6 +210,28 @@ def require_permission(action: str, api_key: Optional[str] = None):
             kb_id=permission_kb_id,
         )
         if not has_permission(effective_role, action):
+            # PR-AUDIT-2: every denial is automatically recorded so
+            # individual route handlers do not have to remember.
+            try:
+                from lightrag.api.audit import emit_audit_event
+
+                await emit_audit_event(
+                    request,
+                    action=action,
+                    resource_type=_resource_type_for_action(action),
+                    outcome="denied",
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    actor_user_id=token_info.get("user_id"),
+                    actor_username=token_info.get("username"),
+                    actor_role=effective_role,
+                    metadata={
+                        "permission_kb_id": permission_kb_id,
+                    },
+                )
+            except Exception:
+                # Never let audit emission turn a 403 into a 500.
+                pass
+
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Permission denied for action '{action}'",
