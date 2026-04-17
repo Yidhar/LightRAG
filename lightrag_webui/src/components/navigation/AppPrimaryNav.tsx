@@ -2,27 +2,32 @@ import { NavLink, useLocation, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { appRoutes } from '@/app/routes'
-import { resolveKnowledgeBaseId, resolveWorkspaceId } from '@/app/routeHelpers'
+import { resolveWorkspaceId } from '@/app/routeHelpers'
 import { useAuthStore } from '@/stores/state'
 import { hasPermission, resolveEffectiveRole, type PermissionAction } from '@/lib/permissions'
 
+/**
+ * Tablet primary nav. Phase A removed the KB URL tier, so the visible
+ * items are either the workspace-admin pair (members + settings) when
+ * the user is on one of those routes, or the workspace-scoped feature
+ * group otherwise.
+ */
 export default function AppPrimaryNav() {
   const { t } = useTranslation()
   const location = useLocation()
-  const { workspaceId, kbId } = useParams()
+  const { workspaceId } = useParams()
   const { role, memberships } = useAuthStore()
 
   const currentWorkspaceId = resolveWorkspaceId(workspaceId)
-  const currentKnowledgeBaseId = resolveKnowledgeBaseId(kbId)
   const effectiveRole = resolveEffectiveRole(
     { role, memberships },
-    { workspaceId: currentWorkspaceId, kbId: currentKnowledgeBaseId }
+    { workspaceId: currentWorkspaceId, kbId: null }
   )
-  const isWorkspaceScopedRoute =
-    location.pathname.endsWith('/members') ||
-    (!location.pathname.includes('/kb/') && location.pathname.endsWith('/settings'))
+  const pathname = location.pathname
+  const isWorkspaceAdminRoute =
+    pathname.endsWith('/members') || pathname.endsWith('/settings')
 
-  const items = isWorkspaceScopedRoute
+  const items = isWorkspaceAdminRoute
     ? [
       {
         label: t('header.members'),
@@ -38,32 +43,32 @@ export default function AppPrimaryNav() {
     : [
       {
         label: t('header.overview'),
-        to: appRoutes.kbOverview(currentWorkspaceId, currentKnowledgeBaseId),
+        to: appRoutes.kbOverview(currentWorkspaceId),
         requiredPermission: null,
       },
       {
         label: t('header.documents'),
-        to: appRoutes.kbDocuments(currentWorkspaceId, currentKnowledgeBaseId),
+        to: appRoutes.kbDocuments(currentWorkspaceId),
         requiredPermission: 'kb:view' as PermissionAction,
       },
       {
         label: t('header.retrieval'),
-        to: appRoutes.kbRetrieval(currentWorkspaceId, currentKnowledgeBaseId),
+        to: appRoutes.kbRetrieval(currentWorkspaceId),
         requiredPermission: 'kb:query' as PermissionAction,
       },
       {
         label: t('header.knowledgeGraph'),
-        to: appRoutes.kbGraph(currentWorkspaceId, currentKnowledgeBaseId),
+        to: appRoutes.kbGraph(currentWorkspaceId),
         requiredPermission: 'kb:view' as PermissionAction,
       },
       {
         label: t('header.api'),
-        to: appRoutes.kbApi(currentWorkspaceId, currentKnowledgeBaseId),
+        to: appRoutes.kbApi(currentWorkspaceId),
         requiredPermission: 'kb:query' as PermissionAction,
       },
       {
         label: t('header.kbSettings'),
-        to: appRoutes.kbSettings(currentWorkspaceId, currentKnowledgeBaseId),
+        to: appRoutes.kbSettings(currentWorkspaceId),
         requiredPermission: 'kb:manage_settings' as PermissionAction,
       },
     ]

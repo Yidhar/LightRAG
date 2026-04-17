@@ -1,12 +1,12 @@
 import '@/lib/extensions'; // Import all global extensions
-import { HashRouter as Router, Routes, Route, useNavigate, Navigate, useLocation } from 'react-router-dom'
+import { HashRouter as Router, Routes, Route, useNavigate, Navigate, useLocation, useParams } from 'react-router-dom'
 import { Suspense, lazy, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAuthStore } from '@/stores/state'
 import { navigationService } from '@/services/navigation'
 import { Toaster } from 'sonner'
 import ThemeProvider from '@/components/ThemeProvider'
-import { appRoutes, defaultKnowledgeBaseId, defaultWorkspaceId } from '@/app/routes'
+import { appRoutes, defaultWorkspaceId } from '@/app/routes'
 
 const AppShell = lazy(() => import('./App'))
 const LoginPage = lazy(() => import('@/features/LoginPage'))
@@ -125,22 +125,52 @@ const AppContent = () => {
       <Route path="/login" element={withRouteSuspense(<LoginPage />)} />
       <Route path="/" element={<Navigate to={appRoutes.kbDocuments()} replace />} />
       <Route path="/app" element={<RequireAuth />}>
-        <Route index element={<Navigate to={`workspaces/${defaultWorkspaceId}/kb/${defaultKnowledgeBaseId}/documents`} replace />} />
+        <Route
+          index
+          element={<Navigate to={`workspaces/${defaultWorkspaceId}/documents`} replace />}
+        />
         <Route path="workspaces">
           <Route index element={withRouteSuspense(<WorkspaceListPage />)} />
           <Route path=":workspaceId">
-            <Route index element={<Navigate to={`kb/${defaultKnowledgeBaseId}/documents`} replace />} />
+            {/* Flat workspace-scoped routes (Phase A): KB is no longer a
+                URL tier. Feature pages internally fall back to
+                defaultKnowledgeBaseId, and the backend federation path
+                maps 'default' to "all KBs in the workspace". */}
+            <Route index element={<Navigate to="documents" replace />} />
+            <Route path="overview" element={withRouteSuspense(<KnowledgeBaseOverviewPage />)} />
+            <Route path="documents" element={withRouteSuspense(<DocumentsPage />)} />
+            <Route path="retrieval" element={withRouteSuspense(<RetrievalPage />)} />
+            <Route path="graph" element={withRouteSuspense(<GraphPage />)} />
+            <Route path="api" element={withRouteSuspense(<ApiPage />)} />
+            <Route
+              path="knowledge-bases"
+              element={withRouteSuspense(<KnowledgeBaseSettingsPage />)}
+            />
             <Route path="members" element={withRouteSuspense(<MembersPage />)} />
             <Route path="settings" element={withRouteSuspense(<WorkspaceSettingsPage />)} />
-            <Route path="kb/:kbId">
-              <Route index element={<Navigate to="documents" replace />} />
-              <Route path="overview" element={withRouteSuspense(<KnowledgeBaseOverviewPage />)} />
-              <Route path="documents" element={withRouteSuspense(<DocumentsPage />)} />
-              <Route path="retrieval" element={withRouteSuspense(<RetrievalPage />)} />
-              <Route path="graph" element={withRouteSuspense(<GraphPage />)} />
-              <Route path="api" element={withRouteSuspense(<ApiPage />)} />
-              <Route path="settings" element={withRouteSuspense(<KnowledgeBaseSettingsPage />)} />
-            </Route>
+
+            {/* Legacy ``/kb/:kbId/<leaf>`` paths redirect to the flat form
+                so bookmarks, shared links, and the backend KB-id-prefixed
+                URLs cut before Phase A keep working. */}
+            <Route path="kb/:kbId" element={<LegacyKbRedirect leaf="documents" />} />
+            <Route
+              path="kb/:kbId/overview"
+              element={<LegacyKbRedirect leaf="overview" />}
+            />
+            <Route
+              path="kb/:kbId/documents"
+              element={<LegacyKbRedirect leaf="documents" />}
+            />
+            <Route
+              path="kb/:kbId/retrieval"
+              element={<LegacyKbRedirect leaf="retrieval" />}
+            />
+            <Route path="kb/:kbId/graph" element={<LegacyKbRedirect leaf="graph" />} />
+            <Route path="kb/:kbId/api" element={<LegacyKbRedirect leaf="api" />} />
+            <Route
+              path="kb/:kbId/settings"
+              element={<LegacyKbRedirect leaf="knowledge-bases" />}
+            />
           </Route>
         </Route>
       </Route>
@@ -150,6 +180,18 @@ const AppContent = () => {
       />
     </Routes>
   )
+}
+
+/**
+ * Redirect ``/app/workspaces/:workspaceId/kb/:kbId/<legacy-leaf>`` to
+ * ``/app/workspaces/:workspaceId/<leaf>``. The kb id from the URL is
+ * dropped because the KB is no longer a URL tier; federation in the
+ * backend maps the implicit 'default' kb to "all KBs in the workspace".
+ */
+function LegacyKbRedirect({ leaf }: { leaf: string }) {
+  const { workspaceId } = useParams()
+  const resolvedWorkspace = workspaceId || defaultWorkspaceId
+  return <Navigate to={`/app/workspaces/${resolvedWorkspace}/${leaf}`} replace />
 }
 
 const AppRouter = () => {

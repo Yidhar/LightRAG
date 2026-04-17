@@ -5,6 +5,11 @@ export const resolveWorkspaceId = (workspaceId?: string) => workspaceId || defau
 
 export const resolveKnowledgeBaseId = (kbId?: string) => kbId || defaultKnowledgeBaseId
 
+/**
+ * Map a pathname to the legacy ``Tab`` enum used by the settings store.
+ * Updated in Phase A to recognise the flat ``/app/workspaces/:ws/<leaf>``
+ * shape as well as the legacy ``/kb/:kb/<leaf>`` redirect targets.
+ */
 export const resolveCurrentTabFromPath = (pathname: string): Tab => {
   if (pathname.endsWith('/overview')) {
     return 'overview'
@@ -22,7 +27,7 @@ export const resolveCurrentTabFromPath = (pathname: string): Tab => {
     return 'api'
   }
 
-  if (pathname.includes('/kb/') && pathname.endsWith('/settings')) {
+  if (pathname.endsWith('/knowledge-bases') || pathname.includes('/knowledge-bases/')) {
     return 'kb-settings'
   }
 
@@ -30,7 +35,7 @@ export const resolveCurrentTabFromPath = (pathname: string): Tab => {
     return 'members'
   }
 
-  if (!pathname.includes('/kb/') && pathname.endsWith('/settings')) {
+  if (pathname.endsWith('/settings')) {
     return 'workspace-settings'
   }
 
