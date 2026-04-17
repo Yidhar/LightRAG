@@ -4,7 +4,7 @@ import ApiKeyAlert from '@/components/ApiKeyAlert'
 import StatusIndicator from '@/components/status/StatusIndicator'
 import { useBackendState, useAuthStore } from '@/stores/state'
 import { useSettingsStore } from '@/stores/settings'
-import { getAuthStatus } from '@/api/lightrag'
+import { getAuthStatus, getCurrentUser } from '@/api/lightrag'
 import { InvalidApiKeyError, RequireApiKeError } from '@/api/lightrag'
 import { ZapIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -135,6 +135,37 @@ function App() {
     // Execute version check
     checkVersion();
   }, []); // Empty dependency array ensures it only runs once on mount
+
+  // Refresh memberships from DB on every app mount.
+  //
+  // Motivation: the JWT signs a snapshot of the user's memberships at
+  // login, so workspaces the user joined / was invited to / created
+  // AFTER login are invisible to the JWT-derived gate until they log
+  // out and back in. Backend permission resolution already reads DB
+  // fresh per request (commit 9b05024b), but the frontend still hides
+  // the "+新建知识库" / "删除此工作区" buttons etc. because its
+  // gating is local-only.
+  //
+  // ``/auth/me`` returns the DB-backed list; we drop it into the auth
+  // store so UI gating matches what the backend would actually allow.
+  // Safe to skip on error — the JWT fallback still works.
+  const membershipsRefreshedRef = useRef(false)
+  useEffect(() => {
+    if (membershipsRefreshedRef.current) return
+    const token = localStorage.getItem('LIGHTRAG-API-TOKEN')
+    if (!token) return
+    membershipsRefreshedRef.current = true
+    getCurrentUser()
+      .then((profile) => {
+        useAuthStore.getState().replaceMembershipClaims(profile.memberships || [])
+      })
+      .catch((err) => {
+        // Don't spam the console if the user simply isn't logged in
+        // yet or the DB path is disabled — the JWT-derived
+        // memberships list is already in place as a fallback.
+        console.debug('Could not refresh memberships from /auth/me', err)
+      })
+  }, [])
 
   useEffect(() => {
     if (message) {

@@ -1434,6 +1434,25 @@ export type MoveDocumentResponse = {
   target_kb_id: string
 }
 
+export type CurrentUserResponse = {
+  user_id: string | null
+  username: string | null
+  source: string
+  is_active: boolean
+  role: string
+  memberships: Array<{
+    workspace_id: string
+    kb_id?: string | null
+    role: string
+  }>
+  provider: string
+}
+
+export const getCurrentUser = async (): Promise<CurrentUserResponse> => {
+  const response = await axiosInstance.get('/auth/me')
+  return response.data
+}
+
 export const moveDocument = async (
   docId: string,
   targetKbId: string

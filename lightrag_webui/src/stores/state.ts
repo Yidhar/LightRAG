@@ -49,6 +49,11 @@ interface AuthState {
   // claim in its DB, we just patch the frontend's JWT-derived copy so
   // UI gating unlocks immediately instead of on next login.
   grantMembershipClaim: (claim: MembershipClaim) => void;
+  // Replace the whole membership claim list with a fresh snapshot
+  // (typically from /auth/me). Used on app boot so the frontend
+  // gating uses DB-backed memberships even when the JWT is stale —
+  // mirrors the backend's permission resolver which always reads DB.
+  replaceMembershipClaims: (claims: MembershipClaim[]) => void;
 }
 
 const useBackendStateStoreBase = create<BackendState>()((set, get) => ({
@@ -379,6 +384,15 @@ export const useAuthStore = create<AuthState>(set => {
       );
       if (alreadyPresent) return;
       set({ memberships: [...current, normalizedClaim] });
+    },
+
+    replaceMembershipClaims: (claims) => {
+      // Normalise every entry the same way ``normalizeMembershipClaims``
+      // does for JWT-derived claims so the UI never trips on a
+      // server-side row with a stray undefined field.
+      set({
+        memberships: normalizeMembershipClaims(claims || []),
+      });
     },
 
     setCustomTitle: (webuiTitle, webuiDescription) => {
