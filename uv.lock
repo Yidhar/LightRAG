@@ -2552,6 +2552,18 @@ wheels = [
 ]
 
 [[package]]
+name = "ldap3"
+version = "2.9.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyasn1" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/43/ac/96bd5464e3edbc61595d0d69989f5d9969ae411866427b2500a8e5b812c0/ldap3-2.9.1.tar.gz", hash = "sha256:f3e7fc4718e3f09dda568b57100095e0ce58633bcabbed8667ce3f8fbaa4229f", size = 398830, upload-time = "2021-07-18T06:34:21.786Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4e/f6/71d6ec9f18da0b2201287ce9db6afb1a1f637dedb3f0703409558981c723/ldap3-2.9.1-py2.py3-none-any.whl", hash = "sha256:5869596fc4948797020d3f03b7939da938778a0f9e2009f7a072ccf92b8e8d70", size = 432192, upload-time = "2021-07-18T06:34:12.905Z" },
+]
+
+[[package]]
 name = "lightrag-hku"
 source = { editable = "." }
 dependencies = [
@@ -2663,6 +2675,9 @@ evaluation = [
     { name = "tiktoken" },
     { name = "uvicorn" },
     { name = "xlsxwriter" },
+]
+ldap = [
+    { name = "ldap3" },
 ]
 observability = [
     { name = "langfuse" },
@@ -2830,6 +2845,7 @@ requires-dist = [
     { name = "json-repair" },
     { name = "json-repair", marker = "extra == 'api'" },
     { name = "langfuse", marker = "extra == 'observability'", specifier = ">=3.8.1" },
+    { name = "ldap3", marker = "extra == 'ldap'", specifier = ">=2.9.1" },
     { name = "lightrag-hku", extras = ["api"], marker = "extra == 'evaluation'" },
     { name = "lightrag-hku", extras = ["api"], marker = "extra == 'test'" },
     { name = "lightrag-hku", extras = ["api", "offline-llm", "offline-storage"], marker = "extra == 'offline'" },
@@ -2893,7 +2909,7 @@ requires-dist = [
     { name = "xlsxwriter", marker = "extra == 'api'", specifier = ">=3.1.0" },
     { name = "zhipuai", marker = "extra == 'offline-llm'", specifier = ">=2.0.0,<3.0.0" },
 ]
-provides-extras = ["pytest", "api", "docling", "offline-storage", "offline-llm", "offline", "test", "evaluation", "observability"]
+provides-extras = ["pytest", "api", "docling", "offline-storage", "offline-llm", "offline", "test", "evaluation", "observability", "ldap"]
 
 [[package]]
 name = "llama-cloud"

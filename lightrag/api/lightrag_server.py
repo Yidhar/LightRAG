@@ -17,7 +17,7 @@ import sys
 import uvicorn
 import pipmaster as pm
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pathlib import Path
 from ascii_colors import ASCIIColors
 from fastapi.middleware.cors import CORSMiddleware
@@ -511,7 +511,8 @@ def create_app(args):
 
     # Initialize FastAPI
     base_description = (
-        "Providing API for LightRAG core, Web UI and Ollama Model Emulation"
+        "RagEngine HTTP API — knowledge-base management, document ingestion, "
+        "retrieval, and an Ollama-compatible chat surface."
     )
     swagger_description = (
         base_description
@@ -519,7 +520,7 @@ def create_app(args):
         + "\n\n[View ReDoc documentation](/redoc)"
     )
     app_kwargs = {
-        "title": "LightRAG Server API",
+        "title": "RagEngine API",
         "description": swagger_description,
         "version": __api_version__,
         "openapi_url": "/openapi.json",  # Explicitly set OpenAPI schema URL
@@ -1435,8 +1436,16 @@ def create_app(args):
     # Custom Swagger UI endpoint for offline support
     @app.get("/docs", include_in_schema=False)
     async def custom_swagger_ui_html():
-        """Custom Swagger UI HTML with local static files"""
-        return get_swagger_ui_html(
+        """Custom Swagger UI HTML with local static files and dark overrides.
+
+        The stock CSS is light-first and shows a glaring white strip around
+        the Authorize bar when the docs are rendered inside the RagEngine
+        WebUI's dark iframe shell. We ship a second stylesheet that patches
+        only the mismatched surfaces and pull it in via a manual <link>
+        after the default one. Using HTMLResponse directly keeps us off
+        FastAPI's single-CSS helper.
+        """
+        base = get_swagger_ui_html(
             openapi_url=app.openapi_url,
             title=app.title + " - Swagger UI",
             oauth2_redirect_url="/docs/oauth2-redirect",
@@ -1445,6 +1454,21 @@ def create_app(args):
             swagger_favicon_url="/static/swagger-ui/favicon-32x32.png",
             swagger_ui_parameters=app.swagger_ui_parameters,
         )
+        # base.body is the FastAPI-generated template; inject our dark
+        # stylesheet right after the default one so specificity order
+        # is correct.
+        base_link = (
+            '<link type="text/css" rel="stylesheet" '
+            'href="/static/swagger-ui/swagger-ui.css">'
+        )
+        extra_link = (
+            '<link type="text/css" rel="stylesheet" '
+            'href="/static/swagger-ui/swagger-ui-dark.css">'
+        )
+        patched = base.body.decode("utf-8").replace(
+            base_link, base_link + extra_link, 1
+        )
+        return HTMLResponse(content=patched)
 
     @app.get("/docs/oauth2-redirect", include_in_schema=False)
     async def swagger_ui_redirect():

@@ -6,20 +6,18 @@ import {
   FileStackIcon,
   NetworkIcon,
   Settings2Icon,
-  ShieldCheckIcon,
   SparklesIcon,
 } from 'lucide-react'
 
 import { appRoutes } from '@/app/routes'
 import { resolveKnowledgeBaseId, resolveWorkspaceId } from '@/app/routeHelpers'
-import { getKnowledgeBase, type KnowledgeBaseRecord } from '@/api/lightrag'
-import { useAuthStore } from '@/stores/state'
 import {
-  hasPermission,
-  resolveEffectiveRole,
-  roleDescriptionKeys,
-  summarizeRoleCapabilityKeys,
-} from '@/lib/permissions'
+  getDocumentStatusCounts,
+  getKnowledgeBase,
+  type KnowledgeBaseRecord,
+} from '@/api/lightrag'
+import { useAuthStore } from '@/stores/state'
+import { hasPermission, resolveEffectiveRole } from '@/lib/permissions'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/Alert'
 import Badge from '@/components/ui/Badge'
 import Button from '@/components/ui/Button'
@@ -38,6 +36,8 @@ export default function KnowledgeBaseOverviewPage() {
   const [knowledgeBase, setKnowledgeBase] = useState<KnowledgeBaseRecord | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // null = not loaded yet, number = known total (sum over status buckets)
+  const [documentCount, setDocumentCount] = useState<number | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -73,12 +73,38 @@ export default function KnowledgeBaseOverviewPage() {
     }
   }, [currentKnowledgeBaseId, currentWorkspaceId, t])
 
+  // Doc count runs independently from the KB metadata fetch so a 5xx
+  // on one doesn't block the other. We also scope the request to this
+  // KB explicitly — the user may be viewing a KB that isn't the active
+  // one in the global store (e.g. opened via a direct link).
+  useEffect(() => {
+    let cancelled = false
+    setDocumentCount(null)
+    getDocumentStatusCounts(currentKnowledgeBaseId)
+      .then((response) => {
+        if (cancelled) return
+        const total = Object.values(response.status_counts || {}).reduce(
+          (sum, n) => sum + (typeof n === 'number' ? n : 0),
+          0
+        )
+        setDocumentCount(total)
+      })
+      .catch(() => {
+        // Leave as null on failure — the stat cell falls back to a
+        // dash so the page doesn't look broken when counts are
+        // temporarily unavailable.
+        if (!cancelled) setDocumentCount(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [currentKnowledgeBaseId, currentWorkspaceId])
+
   const canOpenDocuments = hasPermission(effectiveRole, 'kb:view')
   const canOpenRetrieval = hasPermission(effectiveRole, 'kb:query')
   const canOpenGraph = hasPermission(effectiveRole, 'kb:view')
   const canOpenApi = hasPermission(effectiveRole, 'kb:query')
   const canOpenSettings = hasPermission(effectiveRole, 'kb:manage_settings')
-  const capabilitySummary = summarizeRoleCapabilityKeys(effectiveRole)
 
   const configOverrideCount = Object.keys(knowledgeBase?.config_override || {}).length
   const createdAt = knowledgeBase?.created_at
@@ -146,8 +172,18 @@ export default function KnowledgeBaseOverviewPage() {
   // Small inline stats strip — replaces the old two-column grid of
   // "stat cards" which duplicated every value that's already in the
   // header (name, workspace, KB id, role).
+  const documentCountLabel =
+    documentCount === null
+      ? t('platformShell.common.loadingCount')
+      : String(documentCount)
   const stats: { label: string; value: string }[] = [
     { label: t('platformShell.common.status'), value: statusLabel },
+    {
+      label: t('platformShell.kbOverview.documentCount', {
+        defaultValue: '文档数',
+      }),
+      value: documentCountLabel,
+    },
     { label: t('platformShell.kbSettings.createdAt'), value: createdAt },
     {
       label: t('platformShell.kbOverview.configOverrides'),
@@ -193,36 +229,8 @@ export default function KnowledgeBaseOverviewPage() {
         </div>
       </header>
 
-      {/* Access ribbon */}
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border/60 bg-muted/20 px-6 py-2 text-sm">
-        <div className="flex min-w-0 items-center gap-2">
-          <ShieldCheckIcon
-            className="size-4 shrink-0 text-emerald-600 dark:text-emerald-400"
-            aria-hidden="true"
-          />
-          <span className="font-medium text-foreground">
-            {t('platformShell.kbOverview.scopeAndAccess')}
-          </span>
-          <span className="text-muted-foreground">·</span>
-          <span className="truncate text-muted-foreground">
-            {t(roleDescriptionKeys[effectiveRole])}
-          </span>
-        </div>
-        <div className="ml-auto flex flex-wrap items-center gap-1.5">
-          {capabilitySummary.map((capabilityKey) => (
-            <Badge
-              key={capabilityKey}
-              variant="outline"
-              className="rounded-full bg-background/70 px-2.5 py-0.5 text-[11px]"
-            >
-              {t(capabilityKey)}
-            </Badge>
-          ))}
-        </div>
-      </div>
-
-      {/* Inline stats row — status / created / overrides */}
-      <div className="grid grid-cols-3 gap-px border-b border-border/60 bg-border/60 text-sm">
+      {/* Inline stats row — status / docs / created / overrides */}
+      <div className="grid grid-cols-2 gap-px border-b border-border/60 bg-border/60 text-sm sm:grid-cols-4">
         {stats.map((item) => (
           <div key={item.label} className="bg-background px-6 py-3">
             <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">

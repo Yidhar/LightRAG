@@ -313,6 +313,7 @@ export type DocStatusResponse = {
   error_msg?: string
   metadata?: Record<string, any>
   file_path: string
+  knowledge_base_id?: string | null
 }
 
 export type DocsStatusesResponse = {
@@ -332,6 +333,7 @@ export type DocumentsRequest = {
   page_size: number
   sort_field: 'created_at' | 'updated_at' | 'id' | 'file_path'
   sort_direction: 'asc' | 'desc'
+  all_kbs?: boolean
 }
 
 export type PaginationInfo = {
@@ -1496,6 +1498,48 @@ export const getCurrentUser = async (): Promise<CurrentUserResponse> => {
   return response.data
 }
 
+export type RetrievalHistoryResponse = {
+  workspace_id: string
+  kb_id: string
+  history: unknown[]
+  updated_at: string | null
+}
+
+export const getRetrievalHistory = async (
+  workspaceId: string,
+  kbId: string
+): Promise<RetrievalHistoryResponse> => {
+  const response = await axiosInstance.get<RetrievalHistoryResponse>(
+    '/auth/me/retrieval-history',
+    { params: { workspace_id: workspaceId, kb_id: kbId } }
+  )
+  return response.data
+}
+
+export const putRetrievalHistory = async (
+  workspaceId: string,
+  kbId: string,
+  history: unknown[]
+): Promise<RetrievalHistoryResponse> => {
+  const response = await axiosInstance.put<RetrievalHistoryResponse>(
+    '/auth/me/retrieval-history',
+    { history },
+    { params: { workspace_id: workspaceId, kb_id: kbId } }
+  )
+  return response.data
+}
+
+export const clearRetrievalHistory = async (
+  workspaceId: string,
+  kbId: string
+): Promise<{ status: string }> => {
+  const response = await axiosInstance.delete<{ status: string }>(
+    '/auth/me/retrieval-history',
+    { params: { workspace_id: workspaceId, kb_id: kbId } }
+  )
+  return response.data
+}
+
 export const moveDocument = async (
   docId: string,
   targetKbId: string
@@ -1878,10 +1922,31 @@ export const getDocumentsPaginatedWithTimeout = (
 }
 
 /**
- * Get counts of documents by status
- * @returns Promise with status counts response
+ * Get counts of documents by status.
+ *
+ * By default the axios interceptor injects the *active* workspace/KB
+ * headers from the Zustand store. Pages that need to read counts for a
+ * KB other than the active one (e.g. the KB overview card) can pass an
+ * explicit ``kbId`` override — we stamp ``X-KB-Id`` on that single
+ * request without mutating global state.
  */
-export const getDocumentStatusCounts = async (): Promise<StatusCountsResponse> => {
-  const response = await axiosInstance.get('/documents/status_counts')
+export const getDocumentStatusCounts = async (
+  kbId?: string,
+  allKbs?: boolean
+): Promise<StatusCountsResponse> => {
+  const headers: Record<string, string> = {}
+  // ``all_kbs`` fans the count out across every KB in the current
+  // workspace — the explicit ``X-KB-Id`` override would pin it back to
+  // a single shard, so the two modes are mutually exclusive.
+  if (allKbs) {
+    const response = await axiosInstance.get('/documents/status_counts', {
+      params: { all_kbs: true },
+    })
+    return response.data
+  }
+  if (kbId) {
+    headers['X-KB-Id'] = kbId
+  }
+  const response = await axiosInstance.get('/documents/status_counts', { headers })
   return response.data
 }

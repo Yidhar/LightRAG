@@ -2,11 +2,20 @@ import Textarea from '@/components/ui/Textarea'
 import Input from '@/components/ui/Input'
 import Button from '@/components/ui/Button'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useParams } from 'react-router-dom'
 import { throttle } from '@/lib/utils'
-import { queryText, queryTextStream, queryData } from '@/api/lightrag'
+import {
+  clearRetrievalHistory,
+  getRetrievalHistory,
+  putRetrievalHistory,
+  queryData,
+  queryText,
+  queryTextStream,
+} from '@/api/lightrag'
 import { errorMessage } from '@/lib/utils'
 import { useSettingsStore } from '@/stores/settings'
 import { useDebounce } from '@/hooks/useDebounce'
+import { resolveKnowledgeBaseId, resolveWorkspaceId } from '@/app/routeHelpers'
 import { ChatMessage, MessageWithError } from '@/components/retrieval/ChatMessage'
 import { EraserIcon, SendIcon, CopyIcon, ScanSearchIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -106,6 +115,17 @@ export default function RetrievalTesting() {
   const currentTab = useSettingsStore.use.currentTab()
   const querySettings = useSettingsStore.use.querySettings()
   const isRetrievalTabActive = currentTab === 'retrieval'
+
+  const routeParams = useParams()
+  const currentWorkspaceId = resolveWorkspaceId(routeParams.workspaceId)
+  const currentKnowledgeBaseId = resolveKnowledgeBaseId(routeParams.kbId)
+
+  // Backend history is authoritative once it's loaded — until then we
+  // keep the localStorage seed so the first paint after reload never
+  // flashes empty. A mismatched seed (env-auth, network failure, other
+  // workspace) is also left alone so the UI stays usable offline.
+  const remoteHistoryLoadedRef = useRef<string | null>(null)
+  const skipNextSyncRef = useRef(true)
 
   const [messages, setMessages] = useState<MessageWithError[]>(() => {
     try {
@@ -694,7 +714,73 @@ export default function RetrievalTesting() {
   const clearMessages = useCallback(() => {
     setMessages([])
     useSettingsStore.getState().setRetrievalHistory([])
-  }, [setMessages])
+    skipNextSyncRef.current = true
+    clearRetrievalHistory(currentWorkspaceId, currentKnowledgeBaseId).catch((err) => {
+      console.debug('[retrieval] clearRetrievalHistory failed, ignoring:', err)
+    })
+  }, [setMessages, currentWorkspaceId, currentKnowledgeBaseId])
+
+  // Fetch server-side history on mount and whenever the workspace / KB
+  // context changes. Falls back silently to the existing local state
+  // on failure (env-auth accounts, offline, 401 before login, etc.).
+  useEffect(() => {
+    let cancelled = false
+    const contextKey = `${currentWorkspaceId}::${currentKnowledgeBaseId}`
+    remoteHistoryLoadedRef.current = null
+    skipNextSyncRef.current = true
+    getRetrievalHistory(currentWorkspaceId, currentKnowledgeBaseId)
+      .then((result) => {
+        if (cancelled) return
+        const fetched = Array.isArray(result.history) ? result.history : []
+        const normalized: MessageWithError[] = fetched.map((raw, index) => {
+          const msg = (raw || {}) as MessageWithError
+          return {
+            ...msg,
+            id: msg.id || `remote-${Date.now()}-${index}`,
+            mermaidRendered: msg.mermaidRendered ?? true,
+            latexRendered: msg.latexRendered ?? true,
+          }
+        })
+        skipNextSyncRef.current = true
+        setMessages(normalized)
+        useSettingsStore.getState().setRetrievalHistory(normalized)
+        remoteHistoryLoadedRef.current = contextKey
+      })
+      .catch((err) => {
+        if (cancelled) return
+        // Silent fallback — the local-store seed from initial state is
+        // still on screen and remains writable. Only log for operators.
+        console.debug('[retrieval] getRetrievalHistory failed, using local fallback:', err)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [currentWorkspaceId, currentKnowledgeBaseId])
+
+  // Debounced push to the backend. Stream-mid updates fire every token
+  // so debouncing keeps the DB quiet; the final post-stream state is
+  // the important one.
+  const debouncedMessagesForSync = useDebounce(messages, 800)
+  useEffect(() => {
+    if (skipNextSyncRef.current) {
+      skipNextSyncRef.current = false
+      return
+    }
+    const contextKey = `${currentWorkspaceId}::${currentKnowledgeBaseId}`
+    if (remoteHistoryLoadedRef.current !== contextKey) {
+      // Backend fetch failed (env-auth / 501 / network). Skip pushing
+      // so we don't clobber whatever the server has with a local-only
+      // snapshot taken before we knew the server's state.
+      return
+    }
+    putRetrievalHistory(
+      currentWorkspaceId,
+      currentKnowledgeBaseId,
+      debouncedMessagesForSync
+    ).catch((err) => {
+      console.debug('[retrieval] putRetrievalHistory failed, ignoring:', err)
+    })
+  }, [debouncedMessagesForSync, currentWorkspaceId, currentKnowledgeBaseId])
 
   // Handle copying message content with robust clipboard support
   const handleCopyMessage = useCallback(async (message: MessageWithError) => {

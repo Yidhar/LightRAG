@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { FileStackIcon, ShieldCheckIcon, SparklesIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -61,6 +61,9 @@ export default function DocumentsPage() {
   const canViewKnowledgeBase = hasPermission(effectiveRole, 'kb:view')
   const capabilitySummary = summarizeRoleCapabilityKeys(effectiveRole)
   const activeKbId = useKBStore((s) => s.activeKbId) ?? defaultKnowledgeBaseId
+  // When true, the documents surface aggregates across every KB in the
+  // current workspace — KBTabs paints "全部知识库" as the active option.
+  const [allKbsMode, setAllKbsMode] = useState(false)
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
@@ -122,7 +125,15 @@ export default function DocumentsPage() {
         </div>
       </div>
 
-      {canViewKnowledgeBase && <KBTabs workspaceId={currentWorkspaceId} />}
+      {canViewKnowledgeBase && (
+        <KBTabs
+          workspaceId={currentWorkspaceId}
+          allowAllOption
+          allKbsSelected={allKbsMode}
+          onPickAll={() => setAllKbsMode(true)}
+          onChange={() => setAllKbsMode(false)}
+        />
+      )}
 
       {!canViewKnowledgeBase && (
         <Alert className="mx-6 mt-4 border-border/70 bg-muted/20">
@@ -138,8 +149,13 @@ export default function DocumentsPage() {
           <Suspense fallback={<DocumentsSurfaceLoading />}>
             {/* Key the manager on activeKbId so switching tabs forces a
                 fresh mount (and a fresh fetch with the new X-KB-Id
-                header injected by the axios interceptor). */}
-            <DocumentManager key={activeKbId} />
+                header injected by the axios interceptor). In allKbsMode
+                we key on the sentinel so the remount resets state when
+                flipping into / out of the aggregated view. */}
+            <DocumentManager
+              key={allKbsMode ? '__all_kbs__' : activeKbId}
+              allKbsMode={allKbsMode}
+            />
           </Suspense>
         </div>
       ) : (

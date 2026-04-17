@@ -61,6 +61,8 @@ export default defineConfig(({ mode }) => {
     '/login',
     '/auth-status',
     '/auth',
+    '/workspaces',
+    '/kb',
     '/static'
   ]
   const configuredProxyEndpoints = (env.VITE_API_ENDPOINTS || '')

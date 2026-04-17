@@ -279,7 +279,12 @@ type RefreshRequest =
     requestVersion: number;
   };
 
-export default function DocumentManager() {
+interface DocumentManagerProps {
+  /** When true, fetch + render docs across every KB in the current workspace. */
+  allKbsMode?: boolean
+}
+
+export default function DocumentManager({ allKbsMode = false }: DocumentManagerProps = {}) {
   // Track component mount status
   const isMountedRef = useRef(true);
   const { workspaceId, kbId } = useParams()
@@ -876,8 +881,9 @@ export default function DocumentManager() {
     page,
     page_size: query.pageSize,
     sort_field: query.sortField,
-    sort_direction: query.sortDirection
-  }), [])
+    sort_direction: query.sortDirection,
+    ...(allKbsMode ? { all_kbs: true } : {})
+  }), [allKbsMode])
 
   // Utility function to update component state
   const updateComponentState = useCallback((response: any) => {
@@ -1793,23 +1799,41 @@ export default function DocumentManager() {
 
           {isSelectionMode ? (
             <DeleteDocumentsDialog
-              disabled={!canDeleteDocuments}
-              disabledReason={t('documentPanel.documentManager.accessMessages.deleteDisabled')}
+              disabled={!canDeleteDocuments || allKbsMode}
+              disabledReason={
+                allKbsMode
+                  ? t('platformShell.documents.allKbs.deleteDisabled', {
+                      defaultValue: '切换到具体知识库后可删除',
+                    })
+                  : t('documentPanel.documentManager.accessMessages.deleteDisabled')
+              }
               selectedDocIds={activeSelectedDocIds}
               onDocumentsDeleted={handleDocumentsDeleted}
             />
           ) : (
             <ClearDocumentsDialog
-              disabled={!canDeleteDocuments}
-              disabledReason={t('documentPanel.documentManager.accessMessages.deleteDisabled')}
+              disabled={!canDeleteDocuments || allKbsMode}
+              disabledReason={
+                allKbsMode
+                  ? t('platformShell.documents.allKbs.clearDisabled', {
+                      defaultValue: '切换到具体知识库后可清空',
+                    })
+                  : t('documentPanel.documentManager.accessMessages.deleteDisabled')
+              }
               canClearCache={canManageSettings}
               onDocumentsCleared={handleDocumentsCleared}
             />
           )}
 
           <UploadDocumentsDialog
-            disabled={!canUploadDocuments}
-            disabledReason={t('documentPanel.documentManager.accessMessages.uploadDisabled')}
+            disabled={!canUploadDocuments || allKbsMode}
+            disabledReason={
+              allKbsMode
+                ? t('platformShell.documents.allKbs.uploadDisabled', {
+                    defaultValue: '请选择一个具体的知识库后再上传',
+                  })
+                : t('documentPanel.documentManager.accessMessages.uploadDisabled')
+            }
             workspaceId={currentWorkspaceId}
             onDocumentsUploaded={handleUploadedDocuments}
           />

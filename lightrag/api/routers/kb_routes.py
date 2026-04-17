@@ -83,6 +83,25 @@ class KnowledgeBaseDeleteResponse(BaseModel):
     kb_id: str
 
 
+class LinkKbRequest(BaseModel):
+    kb_id: str = Field(min_length=1)
+
+
+class LinkKbResponse(BaseModel):
+    status: Literal["linked", "already_linked"]
+    message: str
+    workspace_id: str
+    kb_id: str
+
+
+class UnlinkKbResponse(BaseModel):
+    status: Literal["unlinked"]
+    message: str
+    workspace_id: str
+    kb_id: str
+    remaining_links: int
+
+
 def _to_response(kb: KnowledgeBase) -> KnowledgeBaseResponse:
     return KnowledgeBaseResponse(
         id=kb.id,
@@ -433,15 +452,6 @@ def create_kb_routes(api_key: Optional[str] = None) -> APIRouter:
             total_count=len(response_items),
         )
 
-    class LinkKbRequest(BaseModel):
-        kb_id: str = Field(min_length=1)
-
-    class LinkKbResponse(BaseModel):
-        status: Literal["linked", "already_linked"]
-        message: str
-        workspace_id: str
-        kb_id: str
-
     @router.post(
         "/workspaces/{workspace_id}/kb/link",
         response_model=LinkKbResponse,
@@ -451,7 +461,7 @@ def create_kb_routes(api_key: Optional[str] = None) -> APIRouter:
         request: Request,
         workspace_id: str,
         payload: LinkKbRequest,
-    ) -> "LinkKbResponse":  # noqa: F821
+    ) -> LinkKbResponse:
         """Attach an existing global KB to this workspace.
 
         After the link is created the workspace's KB list includes
@@ -506,13 +516,6 @@ def create_kb_routes(api_key: Optional[str] = None) -> APIRouter:
             kb_id=target_kb_id,
         )
 
-    class UnlinkKbResponse(BaseModel):
-        status: Literal["unlinked"]
-        message: str
-        workspace_id: str
-        kb_id: str
-        remaining_links: int
-
     @router.delete(
         "/workspaces/{workspace_id}/kb/{kb_id}/link",
         response_model=UnlinkKbResponse,
@@ -522,7 +525,7 @@ def create_kb_routes(api_key: Optional[str] = None) -> APIRouter:
         request: Request,
         workspace_id: str,
         kb_id: str,
-    ) -> "UnlinkKbResponse":  # noqa: F821
+    ) -> UnlinkKbResponse:
         """Remove the link between this workspace and ``kb_id`` without
         deleting the KB. The KB stays alive in the global pool and
         other workspaces that still link it keep working.

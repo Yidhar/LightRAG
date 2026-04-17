@@ -24,7 +24,17 @@ interface KBTabsProps {
   onChange?: (kbId: string) => void
   /** Parent can pass a handler for opening a KB-create dialog. */
   onCreate?: () => void
+  /** Show a synthetic "All KBs in workspace" option at the top. */
+  allowAllOption?: boolean
+  /** Parent-driven flag indicating the all-KBs sentinel is active. */
+  allKbsSelected?: boolean
+  /** Fired when the sentinel option is picked — parent owns the flag. */
+  onPickAll?: () => void
 }
+
+// Sentinel value used in the Select for the aggregate option. Kept out of
+// the KB store so a real KB id never collides with it.
+const ALL_KBS_SENTINEL = '__all_kbs__'
 
 /**
  * KB picker: dropdown Select (previously a horizontal pills row).
@@ -36,7 +46,14 @@ interface KBTabsProps {
  * workspaces with many KBs stay scannable, and to match the user's
  * request: "直接提供下拉表单来选取配置的知识库".
  */
-export default function KBTabs({ workspaceId, onChange, onCreate }: KBTabsProps) {
+export default function KBTabs({
+  workspaceId,
+  onChange,
+  onCreate,
+  allowAllOption = false,
+  allKbsSelected = false,
+  onPickAll,
+}: KBTabsProps) {
   const { t } = useTranslation()
   const [searchParams, setSearchParams] = useSearchParams()
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseRecord[]>([])
@@ -122,10 +139,16 @@ export default function KBTabs({ workspaceId, onChange, onCreate }: KBTabsProps)
   }, [activeKbId, setActiveKb])
 
   const handlePick = (kbId: string) => {
+    if (kbId === ALL_KBS_SENTINEL) {
+      if (onPickAll) onPickAll()
+      return
+    }
     setActiveKb(kbId)
     writeKbQuery(kbId)
     if (onChange) onChange(kbId)
   }
+
+  const selectValue = allKbsSelected ? ALL_KBS_SENTINEL : activeKbId
 
   if (loadError) {
     return (
@@ -158,11 +181,23 @@ export default function KBTabs({ workspaceId, onChange, onCreate }: KBTabsProps)
           })}
         </span>
       ) : (
-        <Select value={activeKbId} onValueChange={handlePick}>
+        <Select value={selectValue} onValueChange={handlePick}>
           <SelectTrigger id="kb-picker" className="h-8 w-[260px] rounded-lg">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
+            {allowAllOption && (
+              <SelectItem value={ALL_KBS_SENTINEL}>
+                <div className="flex items-center gap-2">
+                  <BookOpenTextIcon className="size-3.5" aria-hidden="true" />
+                  <span className="truncate">
+                    {t('platformShell.documents.kbTabs.allKbs', {
+                      defaultValue: '全部知识库',
+                    })}
+                  </span>
+                </div>
+              </SelectItem>
+            )}
             {knowledgeBases.map((kb) => (
               <SelectItem key={kb.id} value={kb.id}>
                 <div className="flex items-center gap-2">

@@ -739,6 +739,10 @@ class DocStatusResponse(BaseModel):
         default=None, description="Additional metadata about the document"
     )
     file_path: str = Field(description="Path to the document file")
+    knowledge_base_id: Optional[str] = Field(
+        default=None,
+        description="KB id that owns this row (populated only on cross-KB aggregated responses)",
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -892,6 +896,10 @@ class DocumentsRequest(BaseModel):
     )
     sort_direction: Literal["asc", "desc"] = Field(
         default="desc", description="Sort direction"
+    )
+    all_kbs: bool = Field(
+        default=False,
+        description="Aggregate docs across every KB linked to the current workspace",
     )
 
     model_config = ConfigDict(
@@ -5941,6 +5949,138 @@ def create_document_routes(
             doc_id=doc_id,
         )
 
+    async def _get_documents_paginated_all_kbs(
+        raw_request: Request,
+        request: DocumentsRequest,
+    ) -> PaginatedDocsResponse:
+        """Aggregated path: fan out the paginated fetch across every KB in
+        the current workspace, merge the rows, re-sort, and slice the
+        requested page. Status counts are summed across shards.
+        """
+        from lightrag.api.federation import collect_workspace_kb_ids
+
+        state = raw_request.app.state
+        rag_factory = getattr(state, "rag_factory", None)
+        if rag_factory is None:
+            raise HTTPException(
+                status_code=500,
+                detail="KB isolation enabled but rag_factory is not configured",
+            )
+
+        context = get_request_context(raw_request)
+        workspace_id = context.workspace_id or getattr(
+            state, "default_workspace_id", "default"
+        )
+        kb_ids = collect_workspace_kb_ids(state, workspace_id)
+
+        if not kb_ids:
+            return PaginatedDocsResponse(
+                documents=[],
+                pagination=PaginationInfo(
+                    page=request.page,
+                    page_size=request.page_size,
+                    total_count=0,
+                    total_pages=0,
+                    has_next=False,
+                    has_prev=False,
+                ),
+                status_counts={},
+            )
+
+        semaphore = asyncio.Semaphore(4)
+
+        async def _fetch_one(kb_id: str):
+            async with semaphore:
+                try:
+                    rag = await rag_factory.get(workspace_id, kb_id)
+                    docs_result, counts = await asyncio.gather(
+                        rag.doc_status.get_docs_paginated(
+                            status_filter=request.status_filter,
+                            page=1,
+                            page_size=10000,
+                            sort_field=request.sort_field,
+                            sort_direction=request.sort_direction,
+                        ),
+                        rag.doc_status.get_all_status_counts(),
+                    )
+                    return kb_id, docs_result, counts
+                except Exception as exc:
+                    logger.warning(
+                        "[documents/paginated][all_kbs] shard failed workspace=%s kb=%s: %s",
+                        workspace_id,
+                        kb_id,
+                        exc,
+                    )
+                    return kb_id, None, None
+
+        shard_results = await asyncio.gather(*(_fetch_one(kb) for kb in kb_ids))
+
+        merged_counts: Dict[str, int] = {}
+        # (kb_id, doc_id, DocProcessingStatus)
+        merged_rows: List[tuple] = []
+        for kb_id, docs_result, counts in shard_results:
+            if counts:
+                for key, value in counts.items():
+                    if isinstance(value, int):
+                        merged_counts[key] = merged_counts.get(key, 0) + value
+            if docs_result:
+                docs_with_ids, _total = docs_result
+                for doc_id, doc in docs_with_ids:
+                    merged_rows.append((kb_id, doc_id, doc))
+
+        sort_field = request.sort_field
+        reverse_sort = request.sort_direction.lower() == "desc"
+
+        def _sort_key(row):
+            _, doc_id, doc = row
+            if sort_field == "id":
+                return doc_id or ""
+            if sort_field == "file_path":
+                return get_pinyin_sort_key(getattr(doc, "file_path", "") or "")
+            return getattr(doc, sort_field, "") or ""
+
+        merged_rows.sort(key=_sort_key, reverse=reverse_sort)
+
+        total_count = len(merged_rows)
+        page = request.page
+        page_size = request.page_size
+        start = (page - 1) * page_size
+        end = start + page_size
+        page_rows = merged_rows[start:end]
+
+        doc_responses: List[DocStatusResponse] = []
+        for kb_id, doc_id, doc in page_rows:
+            doc_responses.append(
+                DocStatusResponse(
+                    id=doc_id,
+                    content_summary=doc.content_summary,
+                    content_length=doc.content_length,
+                    status=doc.status,
+                    created_at=format_datetime(doc.created_at),
+                    updated_at=format_datetime(doc.updated_at),
+                    track_id=doc.track_id,
+                    chunks_count=doc.chunks_count,
+                    error_msg=doc.error_msg,
+                    metadata=doc.metadata,
+                    file_path=normalize_file_path(doc.file_path),
+                    knowledge_base_id=kb_id,
+                )
+            )
+
+        total_pages = (total_count + page_size - 1) // page_size if page_size else 0
+        return PaginatedDocsResponse(
+            documents=doc_responses,
+            pagination=PaginationInfo(
+                page=page,
+                page_size=page_size,
+                total_count=total_count,
+                total_pages=total_pages,
+                has_next=page < total_pages,
+                has_prev=page > 1,
+            ),
+            status_counts=merged_counts,
+        )
+
     @router.post(
         "/paginated",
         response_model=PaginatedDocsResponse,
@@ -5948,7 +6088,7 @@ def create_document_routes(
     )
     async def get_documents_paginated(
         request: DocumentsRequest,
-        active_rag: LightRAG = Depends(resolve_route_rag),
+        raw_request: Request,
     ) -> PaginatedDocsResponse:
         """
         Get documents with pagination support.
@@ -5969,7 +6109,11 @@ def create_document_routes(
         Raises:
             HTTPException: If an error occurs while retrieving documents (500).
         """
-        rag = _resolve_active_rag(active_rag)
+        state = raw_request.app.state
+        if request.all_kbs and getattr(state, "enable_kb_isolation", False):
+            return await _get_documents_paginated_all_kbs(raw_request, request)
+
+        rag = _resolve_active_rag(await resolve_route_rag(raw_request))
         trace_id = uuid4().hex[:8]
         request_start = time.perf_counter()
         status_filter_value = (
@@ -6128,7 +6272,8 @@ def create_document_routes(
         dependencies=[Depends(document_view_permission)],
     )
     async def get_document_status_counts(
-        active_rag: LightRAG = Depends(resolve_route_rag),
+        raw_request: Request,
+        all_kbs: bool = False,
     ) -> StatusCountsResponse:
         """
         Get counts of documents by status.
@@ -6136,17 +6281,69 @@ def create_document_routes(
         This endpoint retrieves the count of documents in each processing status
         (PENDING, PROCESSING, PROCESSED, FAILED) for all documents in the system.
 
+        When ``all_kbs=true`` and KB isolation is enabled, counts are summed
+        across every KB linked to the current workspace.
+
         Returns:
             StatusCountsResponse: A response object containing status counts
 
         Raises:
             HTTPException: If an error occurs while retrieving status counts (500).
         """
-        rag = _resolve_active_rag(active_rag)
+        state = raw_request.app.state
         try:
+            if all_kbs and getattr(state, "enable_kb_isolation", False):
+                from lightrag.api.federation import collect_workspace_kb_ids
+
+                rag_factory = getattr(state, "rag_factory", None)
+                if rag_factory is None:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="KB isolation enabled but rag_factory is not configured",
+                    )
+
+                context = get_request_context(raw_request)
+                workspace_id = context.workspace_id or getattr(
+                    state, "default_workspace_id", "default"
+                )
+                kb_ids = collect_workspace_kb_ids(state, workspace_id)
+                if not kb_ids:
+                    return StatusCountsResponse(status_counts={})
+
+                semaphore = asyncio.Semaphore(4)
+
+                async def _fetch_counts(kb_id: str):
+                    async with semaphore:
+                        try:
+                            shard_rag = await rag_factory.get(workspace_id, kb_id)
+                            return await shard_rag.doc_status.get_all_status_counts()
+                        except Exception as exc:
+                            logger.warning(
+                                "[documents/status_counts][all_kbs] shard failed workspace=%s kb=%s: %s",
+                                workspace_id,
+                                kb_id,
+                                exc,
+                            )
+                            return None
+
+                shard_counts = await asyncio.gather(
+                    *(_fetch_counts(kb) for kb in kb_ids)
+                )
+                merged: Dict[str, int] = {}
+                for counts in shard_counts:
+                    if not counts:
+                        continue
+                    for key, value in counts.items():
+                        if isinstance(value, int):
+                            merged[key] = merged.get(key, 0) + value
+                return StatusCountsResponse(status_counts=merged)
+
+            rag = _resolve_active_rag(await resolve_route_rag(raw_request))
             status_counts = await rag.doc_status.get_all_status_counts()
             return StatusCountsResponse(status_counts=status_counts)
 
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Error getting document status counts: {str(e)}")
             logger.error(traceback.format_exc())

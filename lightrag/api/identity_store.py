@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import secrets
 import sqlite3
 from dataclasses import asdict, dataclass
@@ -93,12 +94,28 @@ CREATE TABLE IF NOT EXISTS {WORKSPACE_TABLE_NAME} (
 )
 """.strip()
 
+RETRIEVAL_HISTORY_TABLE_NAME = "user_retrieval_history"
+
+_RETRIEVAL_HISTORY_MAX_ENTRIES = 200
+
+_CREATE_RETRIEVAL_HISTORY_SQL = f"""
+CREATE TABLE IF NOT EXISTS {RETRIEVAL_HISTORY_TABLE_NAME} (
+    user_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    kb_id TEXT NOT NULL,
+    history_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, workspace_id, kb_id)
+)
+""".strip()
+
 _CREATE_STATEMENTS = (
     _CREATE_USERS_SQL,
     _CREATE_WORKSPACE_MEMBERSHIPS_SQL,
     _CREATE_KB_MEMBERSHIPS_SQL,
     _CREATE_REFRESH_TOKENS_SQL,
     _CREATE_WORKSPACES_SQL,
+    _CREATE_RETRIEVAL_HISTORY_SQL,
 )
 
 
@@ -2206,3 +2223,192 @@ async def delete_workspace(workspace_id: str) -> bool:
         return await asyncio.to_thread(_sqlite_delete_workspace)
 
     raise RuntimeError(f"Unsupported DB backend for workspace delete: {backend}")
+
+
+# ---------------------------------------------------------------------------
+# Retrieval (chat) history persistence
+#
+# One JSON blob per (user, workspace, kb). The blob is whatever the WebUI
+# Message shape happens to be — we do not interpret it here beyond capping
+# the entry count so a runaway conversation cannot fill the DB.
+# ---------------------------------------------------------------------------
+
+
+def _cap_retrieval_entries(history: list[dict]) -> list[dict]:
+    if len(history) > _RETRIEVAL_HISTORY_MAX_ENTRIES:
+        return history[-_RETRIEVAL_HISTORY_MAX_ENTRIES:]
+    return history
+
+
+async def get_retrieval_history(
+    user_id: str,
+    workspace_id: str,
+    kb_id: str,
+) -> tuple[list[dict], str | None] | None:
+    """Return ``(history, updated_at)`` for the row, or ``None`` when absent."""
+    backend = _require_db_backend()
+    sql = f"""
+    SELECT history_json, updated_at
+    FROM {RETRIEVAL_HISTORY_TABLE_NAME}
+    WHERE user_id = :user_id
+      AND workspace_id = :workspace_id
+      AND kb_id = :kb_id
+    LIMIT 1
+    """
+
+    if backend == "sqlalchemy":
+        from sqlalchemy import text
+
+        engine = get_engine()
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text(sql),
+                    {
+                        "user_id": user_id,
+                        "workspace_id": workspace_id,
+                        "kb_id": kb_id,
+                    },
+                )
+            ).mappings().first()
+        if row is None:
+            return None
+        try:
+            decoded = json.loads(row["history_json"])
+        except (TypeError, ValueError):
+            return [], row["updated_at"]
+        if not isinstance(decoded, list):
+            return [], row["updated_at"]
+        return decoded, row["updated_at"]
+
+    if backend == "sqlite3":
+        sqlite_path = get_sqlite_path()
+        row = await asyncio.to_thread(
+            _sqlite_fetch_one,
+            sqlite_path,
+            sql.replace(":user_id", "?")
+            .replace(":workspace_id", "?")
+            .replace(":kb_id", "?"),
+            (user_id, workspace_id, kb_id),
+        )
+        if row is None:
+            return None
+        try:
+            decoded = json.loads(row["history_json"])
+        except (TypeError, ValueError):
+            return [], row["updated_at"]
+        if not isinstance(decoded, list):
+            return [], row["updated_at"]
+        return decoded, row["updated_at"]
+
+    raise RuntimeError(
+        f"Unsupported DB backend for retrieval history lookup: {backend}"
+    )
+
+
+async def set_retrieval_history(
+    user_id: str,
+    workspace_id: str,
+    kb_id: str,
+    history: list[dict],
+) -> str:
+    """Upsert the retrieval history blob. Returns the stored ``updated_at``."""
+    backend = _require_db_backend()
+    capped = _cap_retrieval_entries(history)
+    history_json = json.dumps(capped, ensure_ascii=False)
+    now = datetime.utcnow().isoformat()
+
+    if backend == "sqlalchemy":
+        from sqlalchemy import text
+
+        engine = get_engine()
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {RETRIEVAL_HISTORY_TABLE_NAME} (
+                        user_id, workspace_id, kb_id, history_json, updated_at
+                    ) VALUES (
+                        :user_id, :workspace_id, :kb_id, :history_json, :updated_at
+                    )
+                    ON CONFLICT(user_id, workspace_id, kb_id) DO UPDATE SET
+                        history_json=excluded.history_json,
+                        updated_at=excluded.updated_at
+                    """
+                ),
+                {
+                    "user_id": user_id,
+                    "workspace_id": workspace_id,
+                    "kb_id": kb_id,
+                    "history_json": history_json,
+                    "updated_at": now,
+                },
+            )
+        return now
+
+    if backend == "sqlite3":
+        sqlite_path = get_sqlite_path()
+        await asyncio.to_thread(
+            _sqlite_execute,
+            sqlite_path,
+            f"""
+            INSERT INTO {RETRIEVAL_HISTORY_TABLE_NAME} (
+                user_id, workspace_id, kb_id, history_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, workspace_id, kb_id) DO UPDATE SET
+                history_json=excluded.history_json,
+                updated_at=excluded.updated_at
+            """,
+            (user_id, workspace_id, kb_id, history_json, now),
+        )
+        return now
+
+    raise RuntimeError(
+        f"Unsupported DB backend for retrieval history upsert: {backend}"
+    )
+
+
+async def clear_retrieval_history(
+    user_id: str,
+    workspace_id: str,
+    kb_id: str,
+) -> bool:
+    """Delete the row for the composite key. Returns True when a row was removed."""
+    backend = _require_db_backend()
+    sql = f"""
+    DELETE FROM {RETRIEVAL_HISTORY_TABLE_NAME}
+    WHERE user_id = :user_id
+      AND workspace_id = :workspace_id
+      AND kb_id = :kb_id
+    """
+
+    if backend == "sqlalchemy":
+        from sqlalchemy import text
+
+        engine = get_engine()
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                text(sql),
+                {
+                    "user_id": user_id,
+                    "workspace_id": workspace_id,
+                    "kb_id": kb_id,
+                },
+            )
+        return int(result.rowcount or 0) > 0
+
+    if backend == "sqlite3":
+        sqlite_path = get_sqlite_path()
+        deleted = await asyncio.to_thread(
+            _sqlite_execute,
+            sqlite_path,
+            sql.replace(":user_id", "?")
+            .replace(":workspace_id", "?")
+            .replace(":kb_id", "?"),
+            (user_id, workspace_id, kb_id),
+        )
+        return deleted > 0
+
+    raise RuntimeError(
+        f"Unsupported DB backend for retrieval history delete: {backend}"
+    )

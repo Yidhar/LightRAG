@@ -7,9 +7,10 @@ swaps the local provider for a remote identity source.
 
 from __future__ import annotations
 
+import json
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, Field
 
@@ -20,9 +21,11 @@ from uuid import uuid4 as _auth_uuid4
 
 from lightrag.api.identity_store import (
     RefreshTokenValidationError,
+    clear_retrieval_history,
     create_user,
     create_workspace,
     get_membership_claims,
+    get_retrieval_history,
     get_user_by_id,
     get_user_by_username,
     get_workspace,
@@ -30,6 +33,7 @@ from lightrag.api.identity_store import (
     list_users,
     revoke_refresh_token,
     rotate_refresh_token,
+    set_retrieval_history,
     upsert_workspace_membership,
 )
 from lightrag.api.permissions import Action, PermissionContext, require_permission
@@ -113,6 +117,24 @@ class LocalUserMutationResponse(BaseModel):
     status: str
     message: str
     user: LocalUserSummary
+
+
+class RetrievalHistoryResponse(BaseModel):
+    workspace_id: str
+    kb_id: str
+    history: list
+    updated_at: str | None = None
+
+
+class RetrievalHistoryWriteRequest(BaseModel):
+    history: list
+
+
+class RetrievalHistoryClearResponse(BaseModel):
+    status: str
+
+
+_RETRIEVAL_HISTORY_MAX_BYTES = 1_000_000
 
 
 def _refresh_cookie_kwargs(request: Request, max_age_seconds: int) -> dict:
@@ -748,5 +770,107 @@ def create_auth_routes() -> APIRouter:
             message="Local user password rotated successfully.",
             user=_serialize_user(user, memberships),
         )
+
+    def _resolve_history_user_id(token_info: dict) -> str:
+        user_id = token_info.get("user_id")
+        if not user_id:
+            # Env-seeded accounts have no stable id we can key by — they
+            # lose cross-browser persistence and fall back to localStorage
+            # on the frontend.
+            raise HTTPException(
+                status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                detail="Retrieval history persistence requires a DB-backed account.",
+            )
+        return user_id
+
+    @router.get(
+        "/auth/me/retrieval-history",
+        response_model=RetrievalHistoryResponse,
+        summary="Return the retrieval (chat) history for a workspace/KB",
+    )
+    async def read_retrieval_history(
+        workspace_id: str = Query(..., min_length=1),
+        kb_id: str = Query(..., min_length=1),
+        token_info: dict = Depends(_require_authenticated_token),
+    ):
+        user_id = _resolve_history_user_id(token_info)
+        result = await get_retrieval_history(user_id, workspace_id, kb_id)
+        if result is None:
+            return RetrievalHistoryResponse(
+                workspace_id=workspace_id,
+                kb_id=kb_id,
+                history=[],
+                updated_at=None,
+            )
+        history, updated_at = result
+        return RetrievalHistoryResponse(
+            workspace_id=workspace_id,
+            kb_id=kb_id,
+            history=history,
+            updated_at=updated_at,
+        )
+
+    @router.put(
+        "/auth/me/retrieval-history",
+        response_model=RetrievalHistoryResponse,
+        summary="Replace the stored retrieval history for a workspace/KB",
+    )
+    async def write_retrieval_history(
+        payload: RetrievalHistoryWriteRequest,
+        workspace_id: str = Query(..., min_length=1),
+        kb_id: str = Query(..., min_length=1),
+        token_info: dict = Depends(_require_authenticated_token),
+    ):
+        user_id = _resolve_history_user_id(token_info)
+        if not isinstance(payload.history, list):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="`history` must be a JSON array.",
+            )
+        encoded_size = len(json.dumps(payload.history).encode("utf-8"))
+        if encoded_size > _RETRIEVAL_HISTORY_MAX_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=(
+                    f"Retrieval history payload is {encoded_size} bytes; "
+                    f"the limit is {_RETRIEVAL_HISTORY_MAX_BYTES} bytes."
+                ),
+            )
+        updated_at = await set_retrieval_history(
+            user_id,
+            workspace_id,
+            kb_id,
+            payload.history,
+        )
+        # Re-read so the response echoes the possibly-capped stored value.
+        stored = await get_retrieval_history(user_id, workspace_id, kb_id)
+        if stored is None:
+            return RetrievalHistoryResponse(
+                workspace_id=workspace_id,
+                kb_id=kb_id,
+                history=[],
+                updated_at=updated_at,
+            )
+        history, stored_updated_at = stored
+        return RetrievalHistoryResponse(
+            workspace_id=workspace_id,
+            kb_id=kb_id,
+            history=history,
+            updated_at=stored_updated_at or updated_at,
+        )
+
+    @router.delete(
+        "/auth/me/retrieval-history",
+        response_model=RetrievalHistoryClearResponse,
+        summary="Clear the stored retrieval history for a workspace/KB",
+    )
+    async def delete_retrieval_history(
+        workspace_id: str = Query(..., min_length=1),
+        kb_id: str = Query(..., min_length=1),
+        token_info: dict = Depends(_require_authenticated_token),
+    ):
+        user_id = _resolve_history_user_id(token_info)
+        await clear_retrieval_history(user_id, workspace_id, kb_id)
+        return RetrievalHistoryClearResponse(status="cleared")
 
     return router
