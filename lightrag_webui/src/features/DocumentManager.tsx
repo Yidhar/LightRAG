@@ -23,6 +23,7 @@ import PaginationControls from '@/components/ui/PaginationControls'
 import {
   scanNewDocuments,
   rebuildDocumentMultimodal,
+  cancelPipeline,
   DocActionResponse,
   getDocumentsPaginatedWithTimeout,
   DocsStatusesResponse,
@@ -37,7 +38,7 @@ import { useAuthStore, useBackendState } from '@/stores/state'
 import { resolveKnowledgeBaseId, resolveWorkspaceId } from '@/app/routeHelpers'
 import { hasPermission, resolveEffectiveRole } from '@/lib/permissions'
 
-import { RefreshCwIcon, ActivityIcon, ArrowUpIcon, ArrowDownIcon, RotateCcwIcon, CheckSquareIcon, XIcon, AlertTriangle, Info, ImageIcon, SparklesIcon } from 'lucide-react'
+import { RefreshCwIcon, ActivityIcon, ArrowUpIcon, ArrowDownIcon, RotateCcwIcon, CheckSquareIcon, XIcon, AlertTriangle, Info, ImageIcon, SparklesIcon, CircleStopIcon } from 'lucide-react'
 import PipelineStatusDialog from '@/components/documents/PipelineStatusDialog'
 
 type StatusFilter = DocStatus | 'all';
@@ -1227,6 +1228,24 @@ export default function DocumentManager() {
     }, 15000)
   }, [currentTab, health, startPollingInterval, statusCounts])
 
+  const handleStopPipeline = useCallback(async () => {
+    if (!canManageSettings) {
+      return
+    }
+    try {
+      const result = await cancelPipeline()
+      if (result.status === 'cancellation_requested') {
+        toast.success(t('documentPanel.pipelineStatus.cancelSuccess'))
+        // Reset health + refresh shortly after so the busy flag clears in the UI
+        useBackendState.getState().resetHealthCheckTimerDelayed(1000)
+      } else if (result.status === 'not_busy') {
+        toast.info(t('documentPanel.pipelineStatus.cancelNotBusy'))
+      }
+    } catch (err) {
+      toast.error(t('documentPanel.pipelineStatus.cancelFailed', { error: errorMessage(err) }))
+    }
+  }, [canManageSettings, t])
+
   const scanDocuments = useCallback(async () => {
     if (!canUploadDocuments) {
       toast.error(t('documentPanel.documentManager.errors.scanDisabled'))
@@ -1672,6 +1691,22 @@ export default function DocumentManager() {
             <ActivityIcon className="h-4 w-4" />
             {t('documentPanel.documentManager.pipelineStatusButton')}
           </Button>
+
+          {pipelineBusy && canManageSettings && (
+            <Button
+              variant="outline"
+              onClick={handleStopPipeline}
+              side="bottom"
+              tooltip={t('documentPanel.pipelineStatus.cancelTooltip', {
+                defaultValue: 'Stop the active pipeline so processing documents can be deleted or resumed'
+              })}
+              size="sm"
+              className="rounded-full border-red-500/40 text-red-600 hover:border-red-500/60 hover:bg-red-500/[0.06] dark:text-red-300"
+            >
+              <CircleStopIcon className="h-4 w-4" />
+              {t('documentPanel.pipelineStatus.cancelButton', { defaultValue: '停止流水线' })}
+            </Button>
+          )}
 
           {isSelectionMode && (
             <Button

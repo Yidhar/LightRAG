@@ -12,7 +12,7 @@ import {
 import Input from '@/components/ui/Input'
 import { toast } from 'sonner'
 import { errorMessage } from '@/lib/utils'
-import { deleteDocuments } from '@/api/lightrag'
+import { deleteDocuments, cancelPipeline } from '@/api/lightrag'
 
 import { TrashIcon, AlertTriangleIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -64,17 +64,73 @@ export default function DeleteDocumentsDialog({
     }
   }, [open])
 
+  const runDelete = useCallback(async () => {
+    return await deleteDocuments(selectedDocIds, deleteFile, deleteLLMCache)
+  }, [selectedDocIds, deleteFile, deleteLLMCache])
+
+  const handleStopAndRetryDelete = useCallback(async () => {
+    try {
+      const cancelResult = await cancelPipeline()
+      if (cancelResult.status === 'cancellation_requested') {
+        toast.success(t('documentPanel.pipelineStatus.cancelSuccess'))
+      } else if (cancelResult.status === 'not_busy') {
+        toast.info(t('documentPanel.pipelineStatus.cancelNotBusy'))
+      }
+    } catch (err) {
+      toast.error(
+        t('documentPanel.pipelineStatus.cancelFailed', { error: errorMessage(err) })
+      )
+      return
+    }
+
+    // Give the backend a moment to release the busy lock.
+    setIsDeleting(true)
+    setTimeout(async () => {
+      try {
+        const retry = await runDelete()
+        if (retry.status === 'deletion_started') {
+          toast.success(
+            t('documentPanel.deleteDocuments.success', { count: selectedDocIds.length })
+          )
+          if (onDocumentsDeleted) {
+            onDocumentsDeleted().catch(console.error)
+          }
+          setOpen(false)
+        } else {
+          toast.error(
+            t('documentPanel.deleteDocuments.failed', {
+              message: retry.message ?? retry.status,
+            })
+          )
+        }
+      } catch (err) {
+        toast.error(
+          t('documentPanel.deleteDocuments.error', { error: errorMessage(err) })
+        )
+      } finally {
+        setIsDeleting(false)
+      }
+    }, 1500)
+  }, [runDelete, onDocumentsDeleted, selectedDocIds.length, t])
+
   const handleDelete = useCallback(async () => {
     if (disabled || !isConfirmEnabled || selectedDocIds.length === 0) return
 
     setIsDeleting(true)
     try {
-      const result = await deleteDocuments(selectedDocIds, deleteFile, deleteLLMCache)
+      const result = await runDelete()
 
       if (result.status === 'deletion_started') {
         toast.success(t('documentPanel.deleteDocuments.success', { count: selectedDocIds.length }))
       } else if (result.status === 'busy') {
-        toast.error(t('documentPanel.deleteDocuments.busy'))
+        toast.error(t('documentPanel.deleteDocuments.busy'), {
+          action: {
+            label: t('documentPanel.pipelineStatus.cancelButton', { defaultValue: '停止流水线' }),
+            onClick: () => {
+              void handleStopAndRetryDelete()
+            },
+          },
+        })
         setConfirmText('')
         setIsDeleting(false)
         return
@@ -103,7 +159,16 @@ export default function DeleteDocumentsDialog({
     } finally {
       setIsDeleting(false)
     }
-  }, [disabled, isConfirmEnabled, selectedDocIds, deleteFile, deleteLLMCache, setOpen, t, onDocumentsDeleted])
+  }, [
+    disabled,
+    isConfirmEnabled,
+    selectedDocIds,
+    runDelete,
+    handleStopAndRetryDelete,
+    setOpen,
+    t,
+    onDocumentsDeleted,
+  ])
 
   const trigger = (
     <span className="inline-flex" title={disabled ? disabledReason : undefined}>
