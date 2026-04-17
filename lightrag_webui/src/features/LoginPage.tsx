@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '@/stores/state'
 import { useSettingsStore } from '@/stores/settings'
-import { getAuthStatus, loginToServer } from '@/api/lightrag'
+import { bootstrapAdmin, getAuthStatus, loginToServer } from '@/api/lightrag'
 import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
 import Input from '@/components/ui/Input'
@@ -27,6 +27,10 @@ const LoginPage = () => {
   const [rememberUsername, setRememberUsername] = useState(true)
   const [usernameError, setUsernameError] = useState('')
   const [passwordError, setPasswordError] = useState('')
+  // Bootstrap mode: shown when the backend reports auth_configured=false
+  // but the DB-backed user directory is ready. Guest fallbacks have been
+  // removed, so the UI must offer a path to create the first admin.
+  const [needsBootstrap, setNeedsBootstrap] = useState(false)
 
   const authCheckRef = useRef(false)
   const requestedReturnTo = searchParams.get('returnTo') || '/'
@@ -62,7 +66,11 @@ const LoginPage = () => {
           setCustomTitle(status.webui_title || null, status.webui_description || null)
         }
 
-        if (!status.auth_configured && status.message) {
+        const bootstrapReady =
+          !status.auth_configured && Boolean(status.supports_user_management)
+        setNeedsBootstrap(bootstrapReady)
+
+        if (!status.auth_configured && !bootstrapReady && status.message) {
           toast.error(status.message)
         }
       } catch (error) {
@@ -102,6 +110,51 @@ const LoginPage = () => {
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
     if (!validateForm()) return
+
+    if (needsBootstrap) {
+      if (password.length < 8) {
+        setPasswordError(
+          t('login.passwordMinLength', { defaultValue: '密码至少 8 位' })
+        )
+        toast.error(t('login.errorEmptyFields'))
+        return
+      }
+      try {
+        setLoading(true)
+        const bootstrapResponse = await bootstrapAdmin(username.trim(), password)
+
+        if (rememberUsername) {
+          localStorage.setItem(REMEMBERED_USERNAME_STORAGE_KEY, username.trim())
+        }
+        localStorage.setItem('LIGHTRAG-PREVIOUS-USER', username.trim())
+
+        // Re-read status to refresh versions / custom title after bootstrap.
+        const fresh = await getAuthStatus().catch(() => null)
+        login(
+          bootstrapResponse.access_token,
+          fresh?.core_version ?? null,
+          fresh?.api_version ?? null,
+          fresh?.webui_title ?? null,
+          fresh?.webui_description ?? null
+        )
+
+        toast.success(
+          t('login.bootstrapSuccess', {
+            defaultValue: '管理员账号已创建，欢迎进入工作区。',
+          })
+        )
+        navigate(returnTo)
+      } catch (err: any) {
+        const detail =
+          err?.response?.data?.detail ||
+          err?.message ||
+          t('login.bootstrapFailed', { defaultValue: '创建管理员失败' })
+        toast.error(detail)
+      } finally {
+        setLoading(false)
+      }
+      return
+    }
 
     try {
       setLoading(true)
@@ -243,6 +296,23 @@ const LoginPage = () => {
 
             <div className="mb-8 h-px bg-slate-200 dark:bg-slate-800" />
 
+            {needsBootstrap && (
+              <div
+                className="mb-6 rounded-2xl border border-emerald-400/40 bg-emerald-500/[0.08] px-4 py-3 text-sm leading-6 text-emerald-800 dark:border-emerald-400/30 dark:text-emerald-200"
+                role="status"
+              >
+                <p className="font-semibold">
+                  {t('login.bootstrapTitle', { defaultValue: '首次使用：创建管理员账号' })}
+                </p>
+                <p className="mt-1 text-[13px] text-emerald-700 dark:text-emerald-300/90">
+                  {t('login.bootstrapDescription', {
+                    defaultValue:
+                      '本部署还没有任何账号。输入想用的用户名和密码（至少 8 位），提交后将作为 Owner 创建并自动登录。',
+                  })}
+                </p>
+              </div>
+            )}
+
             <form onSubmit={handleSubmit} className="space-y-5">
               <div className="flex flex-col gap-2">
                 <label htmlFor="username-input" className="text-sm font-semibold text-slate-700 dark:text-slate-200">
@@ -322,7 +392,11 @@ const LoginPage = () => {
                 className="mt-2 h-12 w-full rounded-2xl border-0 bg-emerald-600 text-base font-semibold text-white shadow-[0_10px_20px_rgba(5,150,105,0.22)] transition-all duration-200 hover:bg-emerald-500 hover:shadow-[0_14px_24px_rgba(5,150,105,0.28)] active:scale-[0.98]"
                 disabled={loading}
               >
-                {loading ? t('login.loggingIn') : t('login.continueToWorkspace')}
+                {loading
+                  ? t('login.loggingIn')
+                  : needsBootstrap
+                    ? t('login.bootstrapSubmit', { defaultValue: '创建管理员并进入' })
+                    : t('login.continueToWorkspace')}
               </Button>
             </form>
           </div>

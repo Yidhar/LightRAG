@@ -834,6 +834,25 @@ export const listKnowledgeBases = async (
   return response.data
 }
 
+export type BootstrapAdminResponse = {
+  access_token: string
+  token_type: string
+  refresh_token?: string
+  auth_mode?: string
+  bootstrap?: boolean
+}
+
+export const bootstrapAdmin = async (
+  username: string,
+  password: string
+): Promise<BootstrapAdminResponse> => {
+  const response = await axiosInstance.post('/auth/bootstrap-admin', {
+    username,
+    password,
+  })
+  return response.data
+}
+
 // ---------------------------------------------------------------------------
 // Audit log API (PR-AUDIT-3)
 // ---------------------------------------------------------------------------

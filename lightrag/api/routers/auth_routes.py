@@ -17,12 +17,15 @@ from lightrag.api.auth import auth_handler
 from lightrag.api.auth_provider import get_auth_provider
 from lightrag.api.identity_store import (
     RefreshTokenValidationError,
+    create_user,
     get_membership_claims,
     get_user_by_id,
     get_user_by_username,
     issue_refresh_token,
+    list_users,
     revoke_refresh_token,
     rotate_refresh_token,
+    upsert_workspace_membership,
 )
 from lightrag.api.permissions import Action, PermissionContext, require_permission
 from lightrag.utils import logger
@@ -33,6 +36,11 @@ oauth2_scheme = OAuth2PasswordBearer(
     auto_error=False,
     description="OAuth2 Password Authentication",
 )
+
+
+class BootstrapAdminRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=8, max_length=256)
 
 
 class RefreshTokenRequest(BaseModel):
@@ -306,6 +314,77 @@ async def _list_user_summaries(request: Request) -> list[LocalUserSummary]:
 
 def create_auth_routes() -> APIRouter:
     router = APIRouter(tags=["auth"])
+
+    @router.post(
+        "/auth/bootstrap-admin",
+        summary="Bootstrap the first administrator account",
+        description=(
+            "Creates the first platform administrator when no local accounts "
+            "exist yet, replacing the removed guest-login fallback. The caller "
+            "picks a username + password (min 8 chars); the endpoint creates a "
+            "DB-backed user with an owner membership on the default workspace "
+            "and immediately returns access / refresh tokens. Idempotent only "
+            "in the sense that it refuses (409) once any account exists."
+        ),
+    )
+    async def bootstrap_admin(
+        request: Request,
+        response: Response,
+        payload: BootstrapAdminRequest,
+    ):
+        if not getattr(request.app.state, "use_db_auth", False):
+            raise HTTPException(
+                status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                detail="Bootstrap requires USE_DB_AUTH=true",
+            )
+        if not getattr(request.app.state, "db_ready", False):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="DB-backed auth is not ready",
+            )
+
+        existing_users = await list_users()
+        if existing_users:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="An administrator account already exists. Use /auth/users to add more.",
+            )
+
+        user = await create_user(
+            username=payload.username,
+            password=payload.password,
+            source="local",
+            is_active=True,
+        )
+
+        default_workspace_id = getattr(
+            request.app.state, "default_workspace_id", "default"
+        )
+        await upsert_workspace_membership(
+            user.user_id,
+            default_workspace_id,
+            "owner",
+            source="bootstrap_admin",
+        )
+        memberships = await get_membership_claims(user.user_id)
+
+        # role='user' maps to 'owner' via LEGACY_ROLE_FALLBACK, matching the
+        # env-account semantics for the first seeded admin.
+        tokens = await issue_login_tokens(
+            request,
+            response,
+            username=user.username,
+            user_id=user.user_id,
+            role="user",
+            memberships=memberships,
+            metadata={
+                "auth_mode": "enabled",
+                "auth_provider": "local",
+                "account_source": "local",
+                "bootstrap": True,
+            },
+        )
+        return {**tokens, "auth_mode": "local", "bootstrap": True}
 
     @router.post(
         "/auth/refresh",
