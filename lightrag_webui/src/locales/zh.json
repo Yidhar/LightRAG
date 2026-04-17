@@ -879,7 +879,7 @@
       "loadingKnowledgeBases": "正在加载知识库...",
       "defaultBadge": "默认",
       "noDescription": "暂未填写描述。打开此知识库即可管理文档、检索与图谱视图。",
-      "empty": "当前没有返回任何知识库注册项。请继续使用默认知识库，直到注册表管理功能启用。",
+      "empty": "还没有知识库 — 点击右上角「新建知识库」创建第一个。",
       "deleteKb": "删除知识库",
       "dialog": {
         "createTitle": "创建知识库",

@@ -43,6 +43,12 @@ interface AuthState {
   setVersion: (coreVersion: string | null, apiVersion: string | null) => void;
   setCustomTitle: (webuiTitle: string | null, webuiDescription: string | null) => void;
   setTokenRenewal: (renewalTime: number, expiresAt: number) => void; // Track token renewal
+  // Locally grant a membership claim without rotating the JWT.
+  // Used after actions that create a new membership (e.g. POST /workspaces
+  // auto-grants owner on the new workspace) — the backend has the real
+  // claim in its DB, we just patch the frontend's JWT-derived copy so
+  // UI gating unlocks immediately instead of on next login.
+  grantMembershipClaim: (claim: MembershipClaim) => void;
 }
 
 const useBackendStateStoreBase = create<BackendState>()((set, get) => ({
@@ -354,6 +360,25 @@ export const useAuthStore = create<AuthState>(set => {
         coreVersion: coreVersion,
         apiVersion: apiVersion
       });
+    },
+
+    grantMembershipClaim: (claim) => {
+      // Idempotent: skip if we already have an identical (workspace_id,
+      // kb_id) pair in the claims list. Otherwise append.
+      const normalizedClaim: MembershipClaim = {
+        workspace_id: claim.workspace_id,
+        kb_id: claim.kb_id ?? null,
+        role: claim.role,
+      };
+      const existing = initAuthState().memberships;
+      const current = (useAuthStore.getState().memberships || existing);
+      const alreadyPresent = current.some(
+        (c) =>
+          c.workspace_id === normalizedClaim.workspace_id &&
+          (c.kb_id || null) === (normalizedClaim.kb_id || null)
+      );
+      if (alreadyPresent) return;
+      set({ memberships: [...current, normalizedClaim] });
     },
 
     setCustomTitle: (webuiTitle, webuiDescription) => {

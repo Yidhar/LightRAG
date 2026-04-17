@@ -252,7 +252,7 @@ function KnowledgeBaseFormDialog({
 
 export default function WorkspaceListPage() {
   const { t } = useTranslation()
-  const { role, memberships } = useAuthStore()
+  const { role, memberships, grantMembershipClaim } = useAuthStore()
   const params = useParams()
 
   const [workspaces, setWorkspaces] = useState<WorkspaceRecord[]>([])
@@ -413,6 +413,16 @@ export default function WorkspaceListPage() {
       const created = await createWorkspace({
         name: trimmedName,
         description: wsCreateForm.description.trim() || null,
+      })
+      // Backend auto-grants owner membership on POST /workspaces but
+      // the JWT's memberships claim was frozen at login time. Patch
+      // the local auth store so the "+新建知识库" button and the
+      // danger-zone delete show up on the brand-new workspace tab
+      // without forcing a re-login.
+      grantMembershipClaim({
+        workspace_id: created.id,
+        kb_id: null,
+        role: 'owner',
       })
       toast.success(
         t('platformShell.workspaceDirectory.workspaceForm.createSuccess', {
@@ -917,11 +927,25 @@ export default function WorkspaceListPage() {
                   </Table>
                 </div>
               ) : (
-                <div className="rounded-xl border border-dashed border-border/70 px-4 py-8 text-center text-sm text-muted-foreground">
-                  {t('platformShell.workspaceDirectory.empty', {
-                    defaultValue:
-                      '还没有知识库 — 点击"新建知识库"创建第一个。',
-                  })}
+                <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-border/70 px-4 py-10 text-center text-sm text-muted-foreground">
+                  <span>
+                    {t('platformShell.workspaceDirectory.empty', {
+                      defaultValue:
+                        '还没有知识库 — 点击右上角「新建知识库」创建第一个。',
+                    })}
+                  </span>
+                  {canManage && (
+                    // Second call-to-action on the empty state itself so
+                    // brand-new workspaces surface the create action
+                    // without forcing the user's eye to scan up to the
+                    // section header. Same handler as the header button.
+                    <Button size="sm" onClick={openKbCreateDialog}>
+                      <PlusIcon className="size-4" />
+                      {t('platformShell.workspaceDirectory.createKb', {
+                        defaultValue: '新建知识库',
+                      })}
+                    </Button>
+                  )}
                 </div>
               )}
             </section>
