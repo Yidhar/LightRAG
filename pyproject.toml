@@ -152,6 +152,13 @@ observability = [
     "langfuse>=3.8.1",
 ]
 
+ldap = [
+    # Remote auth provider: LDAP / Active Directory. Pure-python, no
+    # system libldap dependency. See docs/Configuration.md → Remote auth
+    # providers. Install with:  uv sync --extra ldap
+    "ldap3>=2.9.1",
+]
+
 [project.scripts]
 lightrag-server = "lightrag.api.lightrag_server:main"
 lightrag-gunicorn = "lightrag.api.run_with_gunicorn:main"

@@ -34,7 +34,7 @@ def sanitize_context_identifier(
 
 def install_platform_state(app: Any, args: Any) -> None:
     """Attach feature-flag and default-context placeholders onto app.state."""
-    from lightrag.api.auth_provider import LocalAuthProvider
+    from lightrag.api.auth_provider import AuthProvider, LocalAuthProvider
 
     app.state.default_workspace_id = sanitize_context_identifier(
         getattr(args, "default_workspace_id", None),
@@ -70,7 +70,33 @@ def install_platform_state(app: Any, args: Any) -> None:
     app.state.default_rag = None
     app.state.kb_registry = None
     app.state.rag_factory = None
-    app.state.auth_provider = LocalAuthProvider()
+    app.state.auth_provider = _select_auth_provider(args)
+
+
+def _select_auth_provider(args: Any) -> "AuthProvider":  # noqa: F821
+    """Resolve which AuthProvider to install based on LIGHTRAG_AUTH_PROVIDER.
+
+    Unknown names fall back to ``LocalAuthProvider`` with a warning —
+    misconfiguring the selector shouldn't take the server down.
+    """
+    from lightrag.api.auth_provider import LocalAuthProvider
+    from lightrag.utils import logger
+
+    provider_name = str(getattr(args, "auth_provider", "local") or "local").lower()
+
+    if provider_name in {"", "local"}:
+        return LocalAuthProvider()
+
+    if provider_name == "ldap":
+        from lightrag.api.auth_providers.ldap_provider import LDAPAuthProvider
+
+        return LDAPAuthProvider()
+
+    logger.warning(
+        "LIGHTRAG_AUTH_PROVIDER=%r not recognised; falling back to local.",
+        provider_name,
+    )
+    return LocalAuthProvider()
 
 
 def _read_param(request: Request, names: tuple[str, ...]) -> str | None:

@@ -10,6 +10,7 @@ need to override the default.
 
 - [Server tuning](#server-tuning)
 - [Auth & tokens](#auth--tokens)
+- [Remote auth providers](#remote-auth-providers)
 - [LLM providers](#llm-providers)
 - [Embedding providers](#embedding-providers)
 - [Reranker providers](#reranker-providers)
@@ -97,6 +98,102 @@ DEFAULT_WORKSPACE_ID=default
 DEFAULT_KB_ID=default
 KB_SEPARATOR=__
 ```
+
+---
+
+## Remote auth providers
+
+`LIGHTRAG_AUTH_PROVIDER` selects which auth backend verifies
+credentials. Default is `local` — the DB-backed user store the
+bootstrap script sets up. Set to `ldap` to delegate credential
+verification to an LDAP / Active Directory server while keeping every
+other part of the stack (workspaces, KB registry, audit log, federated
+query, the `no_access` isolation sentinel) unchanged.
+
+All remote providers still require `USE_DB_AUTH=true` — workspace
+memberships and refresh tokens live in the local DB regardless of
+where the password check happens.
+
+```dotenv
+LIGHTRAG_AUTH_PROVIDER=local   # or: ldap
+```
+
+### LDAP / Active Directory
+
+Install the optional extra:
+
+```bash
+uv sync --extra ldap
+```
+
+Enable and configure:
+
+```dotenv
+LIGHTRAG_AUTH_PROVIDER=ldap
+
+# Connection
+LDAP_SERVER_URL=ldaps://ldap.example.com:636
+LDAP_USE_START_TLS=false        # true for ldap://<host> with StartTLS
+
+# Service account used to look up user DNs
+LDAP_BIND_DN=cn=lightrag-svc,ou=service,dc=example,dc=com
+LDAP_BIND_PASSWORD=your-service-account-password
+
+# User search
+LDAP_USER_SEARCH_BASE=ou=people,dc=example,dc=com
+LDAP_USER_FILTER=(&(objectClass=inetOrgPerson)(uid={username}))
+LDAP_USER_ATTR_USERNAME=uid
+# For Active Directory, the common pattern is:
+#   LDAP_USER_FILTER=(&(objectClass=user)(sAMAccountName={username}))
+#   LDAP_USER_ATTR_USERNAME=sAMAccountName
+
+# Optional group → role mapping. Left unset ⇒ every LDAP user gets
+# LDAP_DEFAULT_ROLE (viewer unless overridden).
+LDAP_GROUP_SEARCH_BASE=ou=groups,dc=example,dc=com
+LDAP_GROUP_FILTER=(&(objectClass=groupOfNames)(member={user_dn}))
+LDAP_GROUP_ATTR=cn
+LDAP_ROLE_MAPPING=lightrag-admins:admin,lightrag-editors:editor,lightrag-viewers:viewer
+LDAP_DEFAULT_ROLE=viewer
+```
+
+Runtime behaviour:
+
+- **First login** — the user is shadow-created in the local
+  `users` table with `source="ldap"` and gets a personal
+  uuid4-hex workspace where they're `owner` (matches the
+  self-registration flow so every auth path yields the same
+  per-user isolation guarantee).
+- **Subsequent logins** — the LDAP bind still happens every time
+  (LightRAG never stores the LDAP password). Group lookup re-runs,
+  so role bumps in LDAP apply on next sign-in without any sync job.
+- **Password changes** — `/auth/change-password` returns 501. Users
+  rotate passwords through the upstream directory, not LightRAG.
+- **User management** — `/auth/users` CRUD returns 501. Accounts come
+  from LDAP; the Members page becomes a read-only view of who has
+  logged in so far.
+- **Self-registration** — disabled regardless of
+  `LIGHTRAG_ALLOW_SELF_REGISTRATION`. The 注册 tab does not render.
+
+Filter injection is blocked at the edge — user-supplied `{username}`
+values are RFC-4515-escaped before being spliced into
+`LDAP_USER_FILTER`, so the usual `alice)(uid=*)` payloads can't short-
+circuit the search.
+
+### Adding another remote provider
+
+The pattern is a single file + one registration line. Subclass
+`AuthProvider` in `lightrag/api/auth_provider.py`, implement at least
+`get_auth_status` and `authenticate_password`, then register under a
+new name in `_select_auth_provider` inside
+`lightrag/api/dependencies.py`. `LDAPAuthProvider` at
+`lightrag/api/auth_providers/ldap_provider.py` is the canonical
+reference — ~300 lines, stateless aside from parsed env config.
+
+OIDC-style redirect flows need an extra callback route but the
+`AuthenticatedPrincipal` contract is the same: set `role`,
+`user_id`, and optional `memberships` to whatever the upstream
+returns and every downstream surface (token minting, audit emits,
+workspace permissions, the DB shadow-user trick) keeps working.
 
 ---
 

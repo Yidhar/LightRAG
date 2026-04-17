@@ -548,6 +548,14 @@ def parse_args() -> argparse.Namespace:
     args.allow_self_registration = get_env_value(
         "LIGHTRAG_ALLOW_SELF_REGISTRATION", False, bool
     )
+    # Auth provider selector. "local" (default) uses the built-in env /
+    # DB-backed user store. "ldap" swaps in LDAPAuthProvider — see
+    # docs/Configuration.md → "Remote auth providers" for LDAP_* vars.
+    args.auth_provider = (
+        str(get_env_value("LIGHTRAG_AUTH_PROVIDER", "local") or "local")
+        .strip()
+        .lower()
+    )
     # Membership role granted to self-registered users on the default
     # workspace. Constrained to the published role set; anything else
     # falls back to "viewer" so a typo can't silently grant admin access.
