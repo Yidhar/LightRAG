@@ -360,11 +360,33 @@ export type AuthStatusResponse = {
   supports_password_login?: boolean
   supports_refresh_tokens?: boolean
   supports_user_management?: boolean
+  supports_self_registration?: boolean
+  self_registration_role?: string | null
   message?: string
   core_version?: string
   api_version?: string
   webui_title?: string
   webui_description?: string
+}
+
+export type RegisterAccountResponse = {
+  access_token: string
+  token_type: string
+  refresh_token?: string
+  auth_mode?: string
+  self_registered?: boolean
+  personal_workspace_id?: string
+}
+
+export const registerAccount = async (
+  username: string,
+  password: string
+): Promise<RegisterAccountResponse> => {
+  const response = await axiosInstance.post('/auth/register', {
+    username,
+    password,
+  })
+  return response.data
 }
 
 export type PipelineStatusResponse = {

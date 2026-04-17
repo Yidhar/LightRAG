@@ -49,6 +49,8 @@ class AuthStatusResult:
     supports_password_login: bool = True
     supports_refresh_tokens: bool = False
     supports_user_management: bool = False
+    supports_self_registration: bool = False
+    self_registration_role: str | None = None
     message: str | None = None
 
     def to_dict(self) -> dict:
@@ -59,6 +61,8 @@ class AuthStatusResult:
             "supports_password_login": self.supports_password_login,
             "supports_refresh_tokens": self.supports_refresh_tokens,
             "supports_user_management": self.supports_user_management,
+            "supports_self_registration": self.supports_self_registration,
+            "self_registration_role": self.self_registration_role,
             "message": self.message,
         }
 
@@ -194,6 +198,18 @@ class LocalAuthProvider(AuthProvider):
         )
         auth_configured = configured_user_count > 0
 
+        allow_self_register = bool(
+            getattr(request.app.state, "allow_self_registration", False)
+        )
+        # Self-registration is only meaningful when the DB user directory
+        # is live (env-seeded accounts have no writeable user store).
+        supports_self_registration = directory_enabled and allow_self_register
+        self_registration_role = (
+            getattr(request.app.state, "default_registration_role", "viewer")
+            if supports_self_registration
+            else None
+        )
+
         return AuthStatusResult(
             auth_configured=auth_configured,
             auth_mode="local" if auth_configured else "setup_required",
@@ -201,6 +217,8 @@ class LocalAuthProvider(AuthProvider):
             supports_password_login=True,
             supports_refresh_tokens=directory_enabled,
             supports_user_management=directory_enabled,
+            supports_self_registration=supports_self_registration,
+            self_registration_role=self_registration_role,
             message=None
             if auth_configured
             else "No local accounts are configured yet. Seed an administrator account before sign-in.",

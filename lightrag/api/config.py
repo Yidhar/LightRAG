@@ -543,6 +543,21 @@ def parse_args() -> argparse.Namespace:
     args.db_url = get_env_value(
         "DB_URL", "sqlite+aiosqlite:///./lightrag_auth.db"
     )
+    # Self-registration controls. Default OFF so public deployments are
+    # not accidentally open to the world; admins flip it on explicitly.
+    args.allow_self_registration = get_env_value(
+        "LIGHTRAG_ALLOW_SELF_REGISTRATION", False, bool
+    )
+    # Membership role granted to self-registered users on the default
+    # workspace. Constrained to the published role set; anything else
+    # falls back to "viewer" so a typo can't silently grant admin access.
+    _allowed_register_roles = {"viewer", "editor"}
+    _register_role_raw = str(
+        get_env_value("LIGHTRAG_DEFAULT_REGISTRATION_ROLE", "viewer")
+    ).strip().lower()
+    args.default_registration_role = (
+        _register_role_raw if _register_role_raw in _allowed_register_roles else "viewer"
+    )
 
     # Rerank model configuration
     args.rerank_model = get_env_value("RERANK_MODEL", None)

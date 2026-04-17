@@ -48,6 +48,15 @@ def install_platform_state(app: Any, args: Any) -> None:
     )
     app.state.use_db_auth = bool(getattr(args, "use_db_auth", False))
     app.state.enable_kb_isolation = bool(getattr(args, "enable_kb_isolation", False))
+    # Self-registration policy for the local auth provider. Mirrored onto
+    # app.state so AuthProvider.get_auth_status and the /auth/register
+    # handler can check it without re-reading argparse.
+    app.state.allow_self_registration = bool(
+        getattr(args, "allow_self_registration", False)
+    )
+    app.state.default_registration_role = (
+        getattr(args, "default_registration_role", None) or "viewer"
+    )
     app.state.kb_separator = (
         (getattr(args, "kb_separator", None) or "__").strip() or "__"
     )

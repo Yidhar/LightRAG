@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '@/stores/state'
 import { useSettingsStore } from '@/stores/settings'
-import { bootstrapAdmin, getAuthStatus, loginToServer } from '@/api/lightrag'
+import { bootstrapAdmin, getAuthStatus, loginToServer, registerAccount } from '@/api/lightrag'
 import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
 import Input from '@/components/ui/Input'
@@ -31,6 +31,14 @@ const LoginPage = () => {
   // but the DB-backed user directory is ready. Guest fallbacks have been
   // removed, so the UI must offer a path to create the first admin.
   const [needsBootstrap, setNeedsBootstrap] = useState(false)
+  // Self-registration support reported by the backend; when true the
+  // login card exposes a 登录/注册 tab switcher.
+  const [supportsRegistration, setSupportsRegistration] = useState(false)
+  // Active tab; irrelevant when needsBootstrap is true (that flow
+  // always creates the first admin regardless).
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [confirmPasswordError, setConfirmPasswordError] = useState('')
 
   const authCheckRef = useRef(false)
   const requestedReturnTo = searchParams.get('returnTo') || '/'
@@ -69,6 +77,7 @@ const LoginPage = () => {
         const bootstrapReady =
           !status.auth_configured && Boolean(status.supports_user_management)
         setNeedsBootstrap(bootstrapReady)
+        setSupportsRegistration(Boolean(status.supports_self_registration))
 
         if (!status.auth_configured && !bootstrapReady && status.message) {
           toast.error(status.message)
@@ -110,6 +119,59 @@ const LoginPage = () => {
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
     if (!validateForm()) return
+
+    // Register flow (self-registration enabled by backend env flag).
+    if (!needsBootstrap && authMode === 'register') {
+      if (password.length < 8) {
+        setPasswordError(
+          t('login.passwordMinLength', { defaultValue: '密码至少 8 位' })
+        )
+        toast.error(t('login.errorEmptyFields'))
+        return
+      }
+      if (confirmPassword !== password) {
+        setConfirmPasswordError(
+          t('login.passwordMismatch', { defaultValue: '两次输入的密码不一致' })
+        )
+        toast.error(t('login.errorEmptyFields'))
+        return
+      }
+      setConfirmPasswordError('')
+      try {
+        setLoading(true)
+        const registerResponse = await registerAccount(username.trim(), password)
+
+        if (rememberUsername) {
+          localStorage.setItem(REMEMBERED_USERNAME_STORAGE_KEY, username.trim())
+        }
+        localStorage.setItem('LIGHTRAG-PREVIOUS-USER', username.trim())
+
+        const fresh = await getAuthStatus().catch(() => null)
+        login(
+          registerResponse.access_token,
+          fresh?.core_version ?? null,
+          fresh?.api_version ?? null,
+          fresh?.webui_title ?? null,
+          fresh?.webui_description ?? null
+        )
+
+        toast.success(
+          t('login.registerSuccess', {
+            defaultValue: '账号已创建，已自动登录到你的个人工作区。',
+          })
+        )
+        navigate(returnTo)
+      } catch (err: any) {
+        const detail =
+          err?.response?.data?.detail ||
+          err?.message ||
+          t('login.registerFailed', { defaultValue: '注册失败' })
+        toast.error(detail)
+      } finally {
+        setLoading(false)
+      }
+      return
+    }
 
     if (needsBootstrap) {
       if (password.length < 8) {
@@ -313,6 +375,57 @@ const LoginPage = () => {
               </div>
             )}
 
+            {!needsBootstrap && supportsRegistration && (
+              <div
+                className="mb-6 inline-flex w-full rounded-full border border-slate-200 bg-slate-100/60 p-1 text-sm font-medium dark:border-slate-800 dark:bg-slate-900/80"
+                role="tablist"
+                aria-label={t('login.modeTabs', { defaultValue: '登录或注册' })}
+              >
+                {(['login', 'register'] as const).map((tab) => {
+                  const isActive = authMode === tab
+                  return (
+                    <button
+                      key={tab}
+                      type="button"
+                      role="tab"
+                      aria-selected={isActive}
+                      onClick={() => {
+                        setAuthMode(tab)
+                        setPasswordError('')
+                        setConfirmPasswordError('')
+                      }}
+                      className={`flex-1 rounded-full px-4 py-2 transition-colors ${
+                        isActive
+                          ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-950 dark:text-slate-50'
+                          : 'text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
+                      }`}
+                    >
+                      {tab === 'login'
+                        ? t('login.tabLogin', { defaultValue: '登录' })
+                        : t('login.tabRegister', { defaultValue: '注册' })}
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+
+            {!needsBootstrap && supportsRegistration && authMode === 'register' && (
+              <div
+                className="mb-6 rounded-2xl border border-sky-400/40 bg-sky-500/[0.06] px-4 py-3 text-sm leading-6 text-sky-800 dark:border-sky-400/30 dark:text-sky-200"
+                role="status"
+              >
+                <p className="font-semibold">
+                  {t('login.registerTitle', { defaultValue: '注册新账号' })}
+                </p>
+                <p className="mt-1 text-[13px] text-sky-700 dark:text-sky-300/90">
+                  {t('login.registerDescription', {
+                    defaultValue:
+                      '注册后将自动创建一个属于你的个人工作区，你是该工作区的 Owner。其他用户默认看不到你的知识库。',
+                  })}
+                </p>
+              </div>
+            )}
+
             <form onSubmit={handleSubmit} className="space-y-5">
               <div className="flex flex-col gap-2">
                 <label htmlFor="username-input" className="text-sm font-semibold text-slate-700 dark:text-slate-200">
@@ -373,6 +486,40 @@ const LoginPage = () => {
                 )}
               </div>
 
+              {!needsBootstrap && supportsRegistration && authMode === 'register' && (
+                <div className="flex flex-col gap-2">
+                  <label
+                    htmlFor="confirm-password-input"
+                    className="text-sm font-semibold text-slate-700 dark:text-slate-200"
+                  >
+                    {t('login.confirmPassword', { defaultValue: '确认密码' })}
+                  </label>
+                  <Input
+                    id="confirm-password-input"
+                    type={showPassword ? 'text' : 'password'}
+                    placeholder={t('login.confirmPasswordPlaceholder', {
+                      defaultValue: '再次输入密码',
+                    })}
+                    value={confirmPassword}
+                    onChange={(e) => {
+                      setConfirmPassword(e.target.value)
+                      if (confirmPasswordError) setConfirmPasswordError('')
+                    }}
+                    required
+                    className={`h-12 w-full rounded-2xl bg-slate-50 shadow-none focus-visible:ring-2 focus-visible:ring-emerald-500/30 dark:bg-slate-950 ${
+                      confirmPasswordError
+                        ? 'border-red-400 focus-visible:ring-red-500/20 dark:border-red-500/70'
+                        : 'border-slate-300 dark:border-slate-800'
+                    }`}
+                  />
+                  {confirmPasswordError && (
+                    <p className="text-xs text-red-500 dark:text-red-400">
+                      {confirmPasswordError}
+                    </p>
+                  )}
+                </div>
+              )}
+
               <div className="flex items-center justify-between gap-4 rounded-2xl border border-slate-200/80 bg-slate-50/80 px-4 py-3 dark:border-slate-800 dark:bg-slate-900/60">
                 <label htmlFor="remember-username" className="flex cursor-pointer items-center gap-3 text-sm text-slate-600 dark:text-slate-300">
                   <Checkbox
@@ -396,7 +543,9 @@ const LoginPage = () => {
                   ? t('login.loggingIn')
                   : needsBootstrap
                     ? t('login.bootstrapSubmit', { defaultValue: '创建管理员并进入' })
-                    : t('login.continueToWorkspace')}
+                    : authMode === 'register'
+                      ? t('login.registerSubmit', { defaultValue: '注册并进入个人工作区' })
+                      : t('login.continueToWorkspace')}
               </Button>
             </form>
           </div>

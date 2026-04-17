@@ -15,12 +15,16 @@ from pydantic import BaseModel, Field
 
 from lightrag.api.auth import auth_handler
 from lightrag.api.auth_provider import get_auth_provider
+from uuid import uuid4 as _auth_uuid4
+
 from lightrag.api.identity_store import (
     RefreshTokenValidationError,
     create_user,
+    create_workspace,
     get_membership_claims,
     get_user_by_id,
     get_user_by_username,
+    get_workspace,
     issue_refresh_token,
     list_users,
     revoke_refresh_token,
@@ -39,6 +43,11 @@ oauth2_scheme = OAuth2PasswordBearer(
 
 
 class BootstrapAdminRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=8, max_length=256)
+
+
+class RegisterRequest(BaseModel):
     username: str = Field(min_length=1, max_length=128)
     password: str = Field(min_length=8, max_length=256)
 
@@ -385,6 +394,115 @@ def create_auth_routes() -> APIRouter:
             },
         )
         return {**tokens, "auth_mode": "local", "bootstrap": True}
+
+    @router.post(
+        "/auth/register",
+        summary="Self-register a local account when the deployment allows it",
+        description=(
+            "Public endpoint for self-service account creation. Rejected with 403 "
+            "unless ``LIGHTRAG_ALLOW_SELF_REGISTRATION=true`` is set on the server "
+            "and the DB-backed user directory is available. Users created this "
+            "way receive the configured ``LIGHTRAG_DEFAULT_REGISTRATION_ROLE`` "
+            "(``viewer`` by default) on the default workspace — administrators "
+            "may later promote them via /auth/users or the members page."
+        ),
+    )
+    async def register_account(
+        request: Request,
+        response: Response,
+        payload: RegisterRequest,
+    ):
+        if not getattr(request.app.state, "use_db_auth", False):
+            raise HTTPException(
+                status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                detail="Self-registration requires USE_DB_AUTH=true",
+            )
+        if not getattr(request.app.state, "db_ready", False):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="DB-backed auth is not ready",
+            )
+        if not getattr(request.app.state, "allow_self_registration", False):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "Self-registration is disabled on this deployment. "
+                    "Ask an administrator to invite you or enable "
+                    "LIGHTRAG_ALLOW_SELF_REGISTRATION."
+                ),
+            )
+
+        existing = await get_user_by_username(payload.username)
+        if existing is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Username already taken. Choose a different one or sign in.",
+            )
+
+        user = await create_user(
+            username=payload.username,
+            password=payload.password,
+            source="local",
+            is_active=True,
+        )
+
+        # Per-user isolation: provision a personal workspace and make the
+        # new account its owner. No one else sees or joins this workspace
+        # by default — each self-registered user gets their own bucket.
+        #
+        # The id is an opaque uuid4 hex (user-hostile to type but won't
+        # leak the username into storage namespaces or URLs). The display
+        # name defaults to "<username>'s workspace".
+        for _ in range(5):
+            candidate = _auth_uuid4().hex
+            if await get_workspace(candidate) is None:
+                personal_workspace_id = candidate
+                break
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="Unable to allocate a personal workspace id after repeated retries",
+            )
+
+        await create_workspace(
+            workspace_id=personal_workspace_id,
+            name=f"{user.username}'s workspace",
+            description="Personal workspace created on self-registration.",
+            owner_user_id=user.user_id,
+        )
+        await upsert_workspace_membership(
+            user.user_id,
+            personal_workspace_id,
+            "owner",
+            source="self_register",
+        )
+        memberships = await get_membership_claims(user.user_id)
+
+        # Token role="user" → LEGACY_ROLE_FALLBACK resolves to owner, but
+        # that fallback only applies when a membership lookup misses. Since
+        # the user DOES have an owner membership on this workspace, the
+        # membership-scoped role takes precedence.
+        tokens = await issue_login_tokens(
+            request,
+            response,
+            username=user.username,
+            user_id=user.user_id,
+            role="user",
+            memberships=memberships,
+            metadata={
+                "auth_mode": "enabled",
+                "auth_provider": "local",
+                "account_source": "local",
+                "self_registered": True,
+                "personal_workspace_id": personal_workspace_id,
+            },
+        )
+        return {
+            **tokens,
+            "auth_mode": "local",
+            "self_registered": True,
+            "personal_workspace_id": personal_workspace_id,
+        }
 
     @router.post(
         "/auth/refresh",
