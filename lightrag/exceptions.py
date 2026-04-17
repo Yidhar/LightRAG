@@ -109,6 +109,25 @@ class PipelineCancelledException(Exception):
         self.message = message
 
 
+class DocumentCancelledException(PipelineCancelledException):
+    """
+    Raised inside the per-document processing path when an operator flips
+    ``doc_status.metadata.cancel_requested`` on a single document that is
+    currently being processed.
+
+    Inherits ``PipelineCancelledException`` so the existing user-cancel
+    handling in ``process_document`` (write doc_status=FAILED, log a
+    "User cancelled" message) catches it automatically. The *difference*
+    from its parent is scope: this exception terminates only the one
+    document's task and does NOT propagate to the outer ``gather`` that
+    would otherwise cancel every sibling doc task.
+    """
+
+    def __init__(self, doc_id: str, message: str | None = None):
+        self.doc_id = doc_id
+        super().__init__(message or f"User cancelled document {doc_id}")
+
+
 class ChunkTokenLimitExceededError(ValueError):
     """Raised when a chunk exceeds the configured token limit."""
 

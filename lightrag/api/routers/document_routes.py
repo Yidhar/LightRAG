@@ -5182,6 +5182,176 @@ def create_document_routes(
             logger.error(traceback.format_exc())
             raise HTTPException(status_code=500, detail=error_msg)
 
+    class CancelDocResponse(BaseModel):
+        """Response for ``POST /documents/{doc_id}/cancel``."""
+
+        status: Literal[
+            "cancelled",
+            "cancel_requested",
+            "already_final",
+            "not_found",
+        ] = Field(description="Outcome of the cancellation request.")
+        message: str = Field(description="Human-readable explanation.")
+        doc_id: str = Field(description="Document id that was targeted.")
+        previous_status: str | None = Field(
+            default=None,
+            description=(
+                "Status the doc held before this call. Useful for auditing "
+                "which path the server chose (direct flip vs. deferred)."
+            ),
+        )
+
+    @router.post(
+        "/{doc_id}/cancel",
+        response_model=CancelDocResponse,
+        dependencies=[Depends(document_delete_permission)],
+        summary="Cancel a single document's processing without stopping the pipeline.",
+    )
+    async def cancel_document(
+        doc_id: str,
+        active_rag: LightRAG = Depends(resolve_route_rag),
+    ) -> "CancelDocResponse":  # noqa: F821 — forward ref in same function
+        """
+        Per-document cancel endpoint.
+
+        The server picks one of three outcomes based on the current
+        ``doc_status``:
+
+        - ``cancelled`` (synchronous flip): the doc is in ``pending`` or
+          ``preprocessed``, i.e. not yet picked up by the pipeline worker.
+          We directly mark it FAILED with
+          ``error_msg="cancelled by user"`` and return.
+
+        - ``cancel_requested`` (deferred): the doc is ``processing``. We
+          write ``metadata.cancel_requested = True`` on its doc_status.
+          The pipeline checks this flag at natural checkpoints (after
+          chunking, before entity extraction, before merge) and raises
+          ``DocumentCancelledException`` on the next check, which flips
+          the doc to FAILED without touching any sibling doc task.
+
+        - ``already_final`` (409): the doc is already ``processed`` or
+          ``failed``. Nothing to cancel.
+
+        - ``not_found`` (404): no such doc in this workspace's doc_status.
+        """
+        rag = _resolve_active_rag(active_rag)
+
+        record = None
+        try:
+            record = await rag.doc_status.get_by_id(doc_id)
+        except Exception as exc:
+            logger.error(
+                "Failed to read doc_status for cancel request %s: %s", doc_id, exc
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to inspect document {doc_id}: {exc}",
+            )
+
+        if not record:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Document '{doc_id}' was not found in this workspace.",
+            )
+
+        previous_status = str(record.get("status") or "").lower() or None
+
+        # Normalize expected final statuses.
+        final_statuses = {
+            DocStatus.PROCESSED.value,
+            DocStatus.FAILED.value,
+        }
+        if previous_status in final_statuses:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Document '{doc_id}' is already in a final state "
+                    f"('{previous_status}'); nothing to cancel."
+                ),
+            )
+
+        now = datetime.now(timezone.utc).isoformat()
+        existing_metadata = dict(record.get("metadata") or {})
+        shared_kwargs = {
+            "content_summary": record.get("content_summary", ""),
+            "content_length": record.get("content_length", 0),
+            "created_at": record.get("created_at", now),
+            "updated_at": now,
+            "file_path": record.get("file_path", ""),
+            "track_id": record.get("track_id"),
+            "chunks_count": record.get("chunks_count"),
+            "chunks_list": record.get("chunks_list") or [],
+        }
+
+        processing_status = DocStatus.PROCESSING.value
+        # PROCESSING case: set the flag; pipeline will flip status to FAILED
+        # at its next checkpoint.
+        if previous_status == processing_status:
+            existing_metadata["cancel_requested"] = True
+            existing_metadata["cancel_requested_at"] = now
+            try:
+                await rag.doc_status.upsert(
+                    {
+                        doc_id: {
+                            **shared_kwargs,
+                            "status": DocStatus.PROCESSING,
+                            "metadata": existing_metadata,
+                        }
+                    }
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to mark doc %s for deferred cancellation: %s",
+                    doc_id,
+                    exc,
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to request cancellation for document {doc_id}: {exc}",
+                )
+            return CancelDocResponse(
+                status="cancel_requested",
+                message=(
+                    f"Cancellation requested for document '{doc_id}'. "
+                    "The pipeline will finalise the document as failed at the next "
+                    "processing checkpoint."
+                ),
+                doc_id=doc_id,
+                previous_status=previous_status,
+            )
+
+        # PENDING / PREPROCESSED / etc: no worker is racing with us, so we
+        # can flip the status directly. Include metadata.cancel_requested
+        # for observability (audit log / UI shows "cancelled by user").
+        existing_metadata.setdefault("cancel_requested", True)
+        existing_metadata["cancel_requested_at"] = now
+        try:
+            await rag.doc_status.upsert(
+                {
+                    doc_id: {
+                        **shared_kwargs,
+                        "status": DocStatus.FAILED,
+                        "error_msg": "cancelled by user",
+                        "metadata": existing_metadata,
+                    }
+                }
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to cancel pending document %s: %s", doc_id, exc
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to cancel document {doc_id}: {exc}",
+            )
+
+        return CancelDocResponse(
+            status="cancelled",
+            message=f"Document '{doc_id}' cancelled before processing started.",
+            doc_id=doc_id,
+            previous_status=previous_status,
+        )
+
     @router.post(
         "/clear_cache",
         response_model=ClearCacheResponse,

@@ -1402,6 +1402,27 @@ export const clearCache = async (): Promise<{
   return response.data
 }
 
+export type CancelDocumentResponse = {
+  status: 'cancelled' | 'cancel_requested' | 'already_final' | 'not_found'
+  message: string
+  doc_id: string
+  previous_status: string | null
+}
+
+/**
+ * Per-document cancel. Backend picks between synchronous FAILED flip
+ * (for pending docs) and a deferred cancel flag the pipeline checks at
+ * its next processing checkpoint (for docs currently processing).
+ */
+export const cancelDocument = async (
+  docId: string
+): Promise<CancelDocumentResponse> => {
+  const response = await axiosInstance.post(
+    `/documents/${encodeURIComponent(docId)}/cancel`
+  )
+  return response.data
+}
+
 export const deleteDocuments = async (
   docIds: string[],
   deleteFile: boolean = false,

@@ -24,6 +24,7 @@ import {
   scanNewDocuments,
   rebuildDocumentMultimodal,
   cancelPipeline,
+  cancelDocument,
   DocActionResponse,
   getDocumentsPaginatedWithTimeout,
   DocsStatusesResponse,
@@ -1228,6 +1229,44 @@ export default function DocumentManager() {
     }, 15000)
   }, [currentTab, health, startPollingInterval, statusCounts])
 
+  const handleCancelDocument = useCallback(
+    async (docId: string) => {
+      if (!canDeleteDocuments) return
+      try {
+        const result = await cancelDocument(docId)
+        if (result.status === 'cancelled') {
+          toast.success(
+            t('documentPanel.documentManager.cancelSuccess', {
+              defaultValue: '已取消文档 {{id}}',
+              id: docId,
+            })
+          )
+        } else if (result.status === 'cancel_requested') {
+          toast.info(
+            t('documentPanel.documentManager.cancelRequested', {
+              defaultValue: '已请求取消，流水线将在下一个检查点终止该文档。',
+            })
+          )
+        } else {
+          toast.info(result.message)
+        }
+        // Refresh list shortly after so the user sees the status flip.
+        setTimeout(() => {
+          void handleIntelligentRefresh(undefined, false)
+        }, 500)
+      } catch (err: any) {
+        const detail = err?.response?.data?.detail || errorMessage(err)
+        toast.error(
+          t('documentPanel.documentManager.cancelFailed', {
+            defaultValue: '取消失败：{{error}}',
+            error: detail,
+          })
+        )
+      }
+    },
+    [canDeleteDocuments, t, handleIntelligentRefresh]
+  )
+
   const handleStopPipeline = useCallback(async () => {
     if (!canManageSettings) {
       return
@@ -1977,6 +2016,33 @@ export default function DocumentManager() {
                                   {doc.error_msg && <pre>{doc.error_msg}</pre>}
                                 </div>
                               )}
+
+                              {canDeleteDocuments &&
+                                (doc.status === 'processing' ||
+                                  doc.status === 'pending' ||
+                                  doc.status === 'preprocessed') && (
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    side="bottom"
+                                    tooltip={t(
+                                      'documentPanel.documentManager.cancelDocumentTooltip',
+                                      {
+                                        defaultValue:
+                                          doc.status === 'processing'
+                                            ? '请求取消此文档（下一个检查点生效）'
+                                            : '取消此文档',
+                                      }
+                                    )}
+                                    className="ml-1 h-6 w-6 shrink-0 rounded-full text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      void handleCancelDocument(doc.id)
+                                    }}
+                                  >
+                                    <XIcon className="h-3.5 w-3.5" />
+                                  </Button>
+                                )}
                             </div>
                           </TableCell>
                           <TableCell>{doc.content_length ?? '-'}</TableCell>

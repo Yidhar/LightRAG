@@ -25,7 +25,10 @@ from typing import (
     Union,
 )
 from lightrag.prompt import PROMPTS
-from lightrag.exceptions import PipelineCancelledException
+from lightrag.exceptions import (
+    DocumentCancelledException,
+    PipelineCancelledException,
+)
 from lightrag.constants import (
     DEFAULT_MAX_GLEANING,
     DEFAULT_FORCE_LLM_SUMMARY_ON_MERGE,
@@ -4125,6 +4128,14 @@ class LightRAG:
                                 if pipeline_status.get("cancellation_requested", False):
                                     raise PipelineCancelledException("User cancelled")
 
+                            # Per-doc cancel check (see _check_doc_cancelled).
+                            # Operators can flip metadata.cancel_requested via the
+                            # POST /documents/{id}/cancel endpoint while this doc
+                            # is in flight; catching it here terminates only this
+                            # task and leaves every sibling doc untouched.
+                            if await self._check_doc_cancelled(doc_id):
+                                raise DocumentCancelledException(doc_id)
+
                             # Process document in two stages
                             # Stage 1: Process text chunks and docs (parallel execution)
                             doc_status_task = asyncio.create_task(
@@ -4269,6 +4280,13 @@ class LightRAG:
                                         raise PipelineCancelledException(
                                             "User cancelled"
                                         )
+
+                                # Per-doc cancel check before the graph-merge
+                                # stage. Matches the check before entity
+                                # extraction so a user cancel lands within one
+                                # LLM round trip either way.
+                                if await self._check_doc_cancelled(doc_id):
+                                    raise DocumentCancelledException(doc_id)
 
                                 # Use chunk_results from entity_relation_task
                                 await merge_nodes_and_edges(
@@ -4452,6 +4470,25 @@ class LightRAG:
                 )
                 pipeline_status["latest_message"] = log_message
                 pipeline_status["history_messages"].append(log_message)
+
+    async def _check_doc_cancelled(self, doc_id: str) -> bool:
+        """
+        Return True when an operator has flipped
+        ``doc_status.metadata.cancel_requested = True`` on this document.
+
+        The pipeline calls this at natural checkpoints (after chunking,
+        before entity extraction, before graph merge). A True return
+        signals the caller to raise ``DocumentCancelledException`` so
+        this single document is terminated without affecting siblings.
+        """
+        try:
+            record = await self.doc_status.get_by_id(doc_id)
+        except Exception:
+            return False
+        if not record:
+            return False
+        metadata = record.get("metadata") or {}
+        return bool(metadata.get("cancel_requested"))
 
     async def _process_extract_entities(
         self, chunk: dict[str, Any], pipeline_status=None, pipeline_status_lock=None
