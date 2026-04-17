@@ -732,6 +732,82 @@ export const deleteKnowledgeBaseMember = async (
   return response.data
 }
 
+// ---------------------------------------------------------------------------
+// Workspace metadata CRUD (Phase W1)
+// ---------------------------------------------------------------------------
+
+export type WorkspaceRecord = {
+  id: string
+  name: string
+  description: string | null
+  owner_user_id: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type WorkspaceListResponse = {
+  items: WorkspaceRecord[]
+  total_count: number
+}
+
+export type WorkspaceCreateRequest = {
+  id?: string
+  name: string
+  description?: string | null
+}
+
+export type WorkspaceUpdateRequest = {
+  name?: string
+  description?: string | null
+}
+
+export type WorkspaceDeleteResponse = {
+  status: 'deleted'
+  message: string
+  id: string
+}
+
+export const listWorkspaces = async (): Promise<WorkspaceListResponse> => {
+  const response = await axiosInstance.get('/workspaces')
+  return response.data
+}
+
+export const getWorkspace = async (
+  workspaceId: string
+): Promise<WorkspaceRecord> => {
+  const response = await axiosInstance.get(
+    `/workspaces/${encodeURIComponent(workspaceId)}`
+  )
+  return response.data
+}
+
+export const createWorkspace = async (
+  payload: WorkspaceCreateRequest
+): Promise<WorkspaceRecord> => {
+  const response = await axiosInstance.post('/workspaces', payload)
+  return response.data
+}
+
+export const updateWorkspace = async (
+  workspaceId: string,
+  payload: WorkspaceUpdateRequest
+): Promise<WorkspaceRecord> => {
+  const response = await axiosInstance.patch(
+    `/workspaces/${encodeURIComponent(workspaceId)}`,
+    payload
+  )
+  return response.data
+}
+
+export const deleteWorkspace = async (
+  workspaceId: string
+): Promise<WorkspaceDeleteResponse> => {
+  const response = await axiosInstance.delete(
+    `/workspaces/${encodeURIComponent(workspaceId)}`
+  )
+  return response.data
+}
+
 export const listKnowledgeBases = async (
   workspaceId: string
 ): Promise<KnowledgeBaseListResponse> => {

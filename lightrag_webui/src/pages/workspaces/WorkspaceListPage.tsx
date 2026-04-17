@@ -13,10 +13,14 @@ import { toast } from 'sonner'
 import { appRoutes, defaultKnowledgeBaseId, defaultWorkspaceId } from '@/app/routes'
 import {
   createKnowledgeBase,
+  createWorkspace,
   deleteKnowledgeBase,
+  deleteWorkspace,
   listKnowledgeBases,
+  listWorkspaces,
   type KnowledgeBaseCreateRequest,
   type KnowledgeBaseRecord,
+  type WorkspaceRecord,
   updateKnowledgeBase,
 } from '@/api/lightrag'
 import { useAuthStore } from '@/stores/state'
@@ -277,6 +281,17 @@ export default function WorkspaceListPage() {
   const [deleteTarget, setDeleteTarget] = useState<KnowledgeBaseRecord | null>(null)
   const [submitting, setSubmitting] = useState(false)
 
+  // Workspace-level state (Phase W1b wires this to /workspaces API).
+  const [workspaces, setWorkspaces] = useState<WorkspaceRecord[]>([])
+  const [workspacesLoading, setWorkspacesLoading] = useState(true)
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null)
+  const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false)
+  const [workspaceForm, setWorkspaceForm] = useState<{ id: string; name: string; description: string }>(
+    { id: '', name: '', description: '' }
+  )
+  const [workspaceDeleteTarget, setWorkspaceDeleteTarget] = useState<WorkspaceRecord | null>(null)
+  const [workspaceSubmitting, setWorkspaceSubmitting] = useState(false)
+
   const loadKnowledgeBases = useCallback(async () => {
     try {
       setLoading(true)
@@ -294,6 +309,78 @@ export default function WorkspaceListPage() {
   useEffect(() => {
     void loadKnowledgeBases()
   }, [loadKnowledgeBases])
+
+  const loadWorkspaces = useCallback(async () => {
+    try {
+      setWorkspacesLoading(true)
+      setWorkspaceError(null)
+      const response = await listWorkspaces()
+      setWorkspaces(response.items)
+    } catch (loadError) {
+      setWorkspaceError(errorMessage(loadError))
+      setWorkspaces([])
+    } finally {
+      setWorkspacesLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadWorkspaces()
+  }, [loadWorkspaces])
+
+  const openWorkspaceCreateDialog = () => {
+    setWorkspaceForm({ id: '', name: '', description: '' })
+    setWorkspaceDialogOpen(true)
+  }
+
+  const handleWorkspaceSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const trimmedName = workspaceForm.name.trim()
+    if (!trimmedName) {
+      toast.error(t('platformShell.workspaceDirectory.workspaceForm.nameRequired', { defaultValue: '请填写工作区名称' }))
+      return
+    }
+    try {
+      setWorkspaceSubmitting(true)
+      const created = await createWorkspace({
+        id: workspaceForm.id.trim() || undefined,
+        name: trimmedName,
+        description: workspaceForm.description.trim() || null,
+      })
+      toast.success(
+        t('platformShell.workspaceDirectory.workspaceForm.createSuccess', {
+          defaultValue: 'Workspace "{{name}}" created',
+          name: created.name,
+        })
+      )
+      setWorkspaceDialogOpen(false)
+      await loadWorkspaces()
+    } catch (submitError) {
+      toast.error(errorMessage(submitError))
+    } finally {
+      setWorkspaceSubmitting(false)
+    }
+  }
+
+  const handleDeleteWorkspace = async () => {
+    if (!workspaceDeleteTarget) return
+    try {
+      setWorkspaceSubmitting(true)
+      await deleteWorkspace(workspaceDeleteTarget.id)
+      toast.success(
+        t('platformShell.workspaceDirectory.workspaceForm.deleteSuccess', {
+          defaultValue: 'Workspace "{{name}}" deleted',
+          name: workspaceDeleteTarget.name,
+        })
+      )
+      setWorkspaceDeleteTarget(null)
+      await loadWorkspaces()
+    } catch (deleteError) {
+      toast.error(errorMessage(deleteError))
+    } finally {
+      setWorkspaceSubmitting(false)
+    }
+  }
 
   const workspaceLinks = [
     {
@@ -483,6 +570,99 @@ export default function WorkspaceListPage() {
             <CardHeader className="gap-4 sm:flex-row sm:items-center sm:justify-between">
               <div className="space-y-2">
                 <CardTitle className="flex items-center gap-2">
+                  <FolderKanbanIcon className="size-4 text-emerald-600 dark:text-emerald-400" />
+                  {t('platformShell.workspaceDirectory.workspacesDirectory', {
+                    defaultValue: 'Workspaces',
+                  })}
+                </CardTitle>
+                <CardDescription>
+                  {t('platformShell.workspaceDirectory.workspacesDirectoryDescription', {
+                    defaultValue: 'Create, rename, or delete workspaces. Each workspace groups its own knowledge bases and members.',
+                  })}
+                </CardDescription>
+              </div>
+              <Button onClick={openWorkspaceCreateDialog}>
+                <PlusIcon className="size-4" />
+                {t('platformShell.workspaceDirectory.createWorkspace', { defaultValue: '新建工作区' })}
+              </Button>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {workspaceError && (
+                <Alert className="border-border/70 bg-muted/20">
+                  <AlertTitle>
+                    {t('platformShell.workspaceDirectory.compatibilityMode')}
+                  </AlertTitle>
+                  <AlertDescription>{workspaceError}</AlertDescription>
+                </Alert>
+              )}
+
+              {workspacesLoading ? (
+                <div className="rounded-2xl border border-dashed border-border/70 px-4 py-6 text-sm text-muted-foreground">
+                  {t('platformShell.workspaceDirectory.loadingWorkspaces', { defaultValue: '加载工作区…' })}
+                </div>
+              ) : workspaces.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-border/70 px-4 py-6 text-sm text-muted-foreground">
+                  {t('platformShell.workspaceDirectory.emptyWorkspaces', {
+                    defaultValue: '还没有工作区 — 点击上方按钮创建第一个。',
+                  })}
+                </div>
+              ) : (
+                <div className="grid gap-3 xl:grid-cols-2 2xl:grid-cols-3">
+                  {workspaces.map((workspace) => (
+                    <div
+                      key={workspace.id}
+                      className="flex flex-col gap-3 rounded-xl border border-border/70 bg-background/80 px-4 py-3"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-semibold text-foreground">
+                            {workspace.name}
+                          </p>
+                          <p className="mt-0.5 text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
+                            {workspace.id}
+                          </p>
+                        </div>
+                        {workspace.id === defaultWorkspaceId && (
+                          <Badge variant="outline" className="rounded-full px-2 py-0.5 text-[10px]">
+                            {t('platformShell.workspaceDirectory.defaultBadge')}
+                          </Badge>
+                        )}
+                      </div>
+                      {workspace.description && (
+                        <p className="line-clamp-2 text-xs leading-5 text-muted-foreground">
+                          {workspace.description}
+                        </p>
+                      )}
+                      <div className="flex flex-wrap gap-2">
+                        <Button size="sm" variant="outline" asChild>
+                          <Link to={appRoutes.kbOverview(workspace.id, defaultKnowledgeBaseId)}>
+                            {t('platformShell.common.open', { defaultValue: '打开' })}
+                          </Link>
+                        </Button>
+                        {workspace.id !== defaultWorkspaceId && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="border-destructive/30 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                            onClick={() => setWorkspaceDeleteTarget(workspace)}
+                          >
+                            {t('platformShell.common.delete')}
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </section>
+
+        <section>
+          <Card className="border-border/70">
+            <CardHeader className="gap-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="space-y-2">
+                <CardTitle className="flex items-center gap-2">
                   <LayoutGridIcon className="size-4 text-emerald-600 dark:text-emerald-400" />
                   {t('platformShell.workspaceDirectory.knowledgeBaseDirectory')}
                 </CardTitle>
@@ -612,6 +792,122 @@ export default function WorkspaceListPage() {
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               {submitting ? t('platformShell.common.deleting') : t('platformShell.workspaceDirectory.deleteKb')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Workspace create dialog (Phase W1b) */}
+      <Dialog open={workspaceDialogOpen} onOpenChange={setWorkspaceDialogOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>
+              {t('platformShell.workspaceDirectory.workspaceForm.title', { defaultValue: '新建工作区' })}
+            </DialogTitle>
+            <DialogDescription>
+              {t('platformShell.workspaceDirectory.workspaceForm.description', {
+                defaultValue: '工作区分隔知识库与成员。创建后你会自动成为该工作区的 Owner。',
+              })}
+            </DialogDescription>
+          </DialogHeader>
+          <form className="space-y-4" onSubmit={handleWorkspaceSubmit}>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">
+                {t('platformShell.workspaceDirectory.workspaceForm.nameLabel', { defaultValue: '名称' })}
+              </label>
+              <Input
+                required
+                value={workspaceForm.name}
+                onChange={(event) =>
+                  setWorkspaceForm((prev) => ({ ...prev, name: event.target.value }))
+                }
+                placeholder={t('platformShell.workspaceDirectory.workspaceForm.namePlaceholder', {
+                  defaultValue: '例如：Marketing Research',
+                })}
+                disabled={workspaceSubmitting}
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">
+                {t('platformShell.workspaceDirectory.workspaceForm.idLabel', { defaultValue: 'ID（可选）' })}
+              </label>
+              <Input
+                value={workspaceForm.id}
+                onChange={(event) =>
+                  setWorkspaceForm((prev) => ({ ...prev, id: event.target.value }))
+                }
+                placeholder={t('platformShell.workspaceDirectory.workspaceForm.idPlaceholder', {
+                  defaultValue: '留空则从名称生成',
+                })}
+                disabled={workspaceSubmitting}
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">
+                {t('platformShell.workspaceDirectory.workspaceForm.descriptionLabel', { defaultValue: '描述' })}
+              </label>
+              <Textarea
+                value={workspaceForm.description}
+                onChange={(event) =>
+                  setWorkspaceForm((prev) => ({ ...prev, description: event.target.value }))
+                }
+                rows={3}
+                disabled={workspaceSubmitting}
+              />
+            </div>
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setWorkspaceDialogOpen(false)}
+                disabled={workspaceSubmitting}
+              >
+                {t('common.cancel')}
+              </Button>
+              <Button type="submit" disabled={workspaceSubmitting}>
+                {workspaceSubmitting
+                  ? t('platformShell.common.saving', { defaultValue: '保存中…' })
+                  : t('platformShell.workspaceDirectory.workspaceForm.submit', { defaultValue: '创建' })}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Workspace delete confirm (Phase W1b) */}
+      <AlertDialog
+        open={Boolean(workspaceDeleteTarget)}
+        onOpenChange={(open) => !open && setWorkspaceDeleteTarget(null)}
+      >
+        <AlertDialogContent className="rounded-[1.5rem] border-border/70">
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {t('platformShell.workspaceDirectory.workspaceForm.deleteTitle', {
+                defaultValue: '删除工作区',
+              })}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {workspaceDeleteTarget
+                ? t('platformShell.workspaceDirectory.workspaceForm.deleteConfirm', {
+                  defaultValue:
+                    '删除工作区 "{{name}}" 将一并移除其成员和知识库授权。此操作不可撤销。',
+                  name: workspaceDeleteTarget.name,
+                })
+                : ''}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={workspaceSubmitting}>
+              {t('common.cancel')}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleDeleteWorkspace}
+              disabled={workspaceSubmitting}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {workspaceSubmitting
+                ? t('platformShell.common.deleting')
+                : t('platformShell.common.delete')}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
