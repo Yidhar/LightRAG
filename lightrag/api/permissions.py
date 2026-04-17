@@ -20,6 +20,10 @@ class Action:
     WORKSPACE_UPDATE = "workspace:update"
     WORKSPACE_INVITE_MEMBER = "workspace:invite_member"
     WORKSPACE_DELETE = "workspace:delete"
+    # Creating a workspace is a global action (not tied to an existing
+    # membership), so it is gated at the route level on an authenticated
+    # identity rather than through ROLE_PERMISSIONS.
+    WORKSPACE_CREATE = "workspace:create"
     KB_VIEW = "kb:view"
     KB_QUERY = "kb:query"
     KB_UPLOAD_DOCUMENT = "kb:upload_document"

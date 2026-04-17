@@ -25,6 +25,7 @@ from lightrag.api.models import (
     REFRESH_TOKEN_TABLE_NAME,
     USER_TABLE_NAME,
     WORKSPACE_MEMBER_TABLE_NAME,
+    WORKSPACE_TABLE_NAME,
 )
 from lightrag.utils import logger
 
@@ -81,11 +82,23 @@ CREATE TABLE IF NOT EXISTS {REFRESH_TOKEN_TABLE_NAME} (
 )
 """.strip()
 
+_CREATE_WORKSPACES_SQL = f"""
+CREATE TABLE IF NOT EXISTS {WORKSPACE_TABLE_NAME} (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NULL,
+    owner_user_id TEXT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)
+""".strip()
+
 _CREATE_STATEMENTS = (
     _CREATE_USERS_SQL,
     _CREATE_WORKSPACE_MEMBERSHIPS_SQL,
     _CREATE_KB_MEMBERSHIPS_SQL,
     _CREATE_REFRESH_TOKENS_SQL,
+    _CREATE_WORKSPACES_SQL,
 )
 
 
@@ -1810,3 +1823,321 @@ async def revoke_refresh_tokens_for_user(user_id: str) -> int:
         return await asyncio.to_thread(_sqlite_revoke_refresh_tokens_for_user)
 
     raise RuntimeError(f"Unsupported DB backend for refresh-token revocation: {backend}")
+
+
+# ---------------------------------------------------------------------------
+# Workspace metadata CRUD (Phase W1)
+#
+# Until W1 landed, workspaces only existed as opaque string identifiers. The
+# ``workspaces`` table gives them first-class metadata (name, description,
+# owner) so the UI can list, create, rename, and delete them without having
+# to scrape workspace_memberships for distinct ids.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class WorkspaceRecord:
+    id: str
+    name: str
+    description: str | None
+    owner_user_id: str | None
+    created_at: str
+    updated_at: str
+
+
+def _build_workspace_record(row) -> WorkspaceRecord | None:
+    if row is None:
+        return None
+    return WorkspaceRecord(
+        id=row["id"],
+        name=row["name"],
+        description=row["description"] if row["description"] is not None else None,
+        owner_user_id=row["owner_user_id"] if row["owner_user_id"] is not None else None,
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+async def get_workspace(workspace_id: str) -> WorkspaceRecord | None:
+    backend = _require_db_backend()
+    sql = f"""
+    SELECT id, name, description, owner_user_id, created_at, updated_at
+    FROM {WORKSPACE_TABLE_NAME}
+    WHERE id = :id
+    LIMIT 1
+    """
+
+    if backend == "sqlalchemy":
+        from sqlalchemy import text
+
+        engine = get_engine()
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(text(sql), {"id": workspace_id})
+            ).mappings().first()
+        return _build_workspace_record(row)
+
+    if backend == "sqlite3":
+        sqlite_path = get_sqlite_path()
+        row = await asyncio.to_thread(
+            _sqlite_fetch_one,
+            sqlite_path,
+            sql.replace(":id", "?"),
+            (workspace_id,),
+        )
+        return _build_workspace_record(row)
+
+    raise RuntimeError(f"Unsupported DB backend for workspace lookup: {backend}")
+
+
+async def list_workspaces() -> list[WorkspaceRecord]:
+    """Return every workspace record, newest first."""
+    backend = _require_db_backend()
+    sql = f"""
+    SELECT id, name, description, owner_user_id, created_at, updated_at
+    FROM {WORKSPACE_TABLE_NAME}
+    ORDER BY created_at ASC
+    """
+
+    if backend == "sqlalchemy":
+        from sqlalchemy import text
+
+        engine = get_engine()
+        async with engine.connect() as conn:
+            rows = (await conn.execute(text(sql))).mappings().all()
+        return [record for record in (_build_workspace_record(r) for r in rows) if record]
+
+    if backend == "sqlite3":
+        sqlite_path = get_sqlite_path()
+        rows = await asyncio.to_thread(_sqlite_fetch_all, sqlite_path, sql, ())
+        return [record for record in (_build_workspace_record(r) for r in rows) if record]
+
+    raise RuntimeError(f"Unsupported DB backend for workspace listing: {backend}")
+
+
+async def list_workspaces_for_user(user_id: str) -> list[WorkspaceRecord]:
+    """
+    Return workspaces the given user has a membership in.
+    Ordered by created_at ascending so the default workspace appears first.
+    """
+    backend = _require_db_backend()
+    sql = f"""
+    SELECT w.id, w.name, w.description, w.owner_user_id, w.created_at, w.updated_at
+    FROM {WORKSPACE_TABLE_NAME} AS w
+    INNER JOIN {WORKSPACE_MEMBER_TABLE_NAME} AS m ON m.workspace_id = w.id
+    WHERE m.user_id = :user_id
+    GROUP BY w.id, w.name, w.description, w.owner_user_id, w.created_at, w.updated_at
+    ORDER BY w.created_at ASC
+    """
+
+    if backend == "sqlalchemy":
+        from sqlalchemy import text
+
+        engine = get_engine()
+        async with engine.connect() as conn:
+            rows = (
+                await conn.execute(text(sql), {"user_id": user_id})
+            ).mappings().all()
+        return [record for record in (_build_workspace_record(r) for r in rows) if record]
+
+    if backend == "sqlite3":
+        sqlite_path = get_sqlite_path()
+        rows = await asyncio.to_thread(
+            _sqlite_fetch_all,
+            sqlite_path,
+            sql.replace(":user_id", "?"),
+            (user_id,),
+        )
+        return [record for record in (_build_workspace_record(r) for r in rows) if record]
+
+    raise RuntimeError(f"Unsupported DB backend for workspace user listing: {backend}")
+
+
+async def create_workspace(
+    workspace_id: str,
+    name: str,
+    *,
+    description: str | None = None,
+    owner_user_id: str | None = None,
+) -> WorkspaceRecord:
+    """
+    Insert a workspace row. Raises if the id already exists.
+
+    Caller is responsible for sanitising ``workspace_id`` (see
+    ``lightrag.api.config.sanitize_platform_identifier``) so that it works
+    as a storage namespace prefix.
+    """
+    backend = _require_db_backend()
+    now = datetime.now(timezone.utc).isoformat()
+    sql = f"""
+    INSERT INTO {WORKSPACE_TABLE_NAME}
+    (id, name, description, owner_user_id, created_at, updated_at)
+    VALUES (:id, :name, :description, :owner_user_id, :created_at, :updated_at)
+    """
+    params = {
+        "id": workspace_id,
+        "name": name,
+        "description": description,
+        "owner_user_id": owner_user_id,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    if backend == "sqlalchemy":
+        from sqlalchemy import text
+
+        engine = get_engine()
+        async with engine.begin() as conn:
+            await conn.execute(text(sql), params)
+
+    elif backend == "sqlite3":
+        sqlite_path = get_sqlite_path()
+        await asyncio.to_thread(
+            _sqlite_execute,
+            sqlite_path,
+            sql.replace(":id", "?")
+            .replace(":name", "?")
+            .replace(":description", "?")
+            .replace(":owner_user_id", "?")
+            .replace(":created_at", "?")
+            .replace(":updated_at", "?"),
+            (
+                workspace_id,
+                name,
+                description,
+                owner_user_id,
+                now,
+                now,
+            ),
+        )
+    else:
+        raise RuntimeError(f"Unsupported DB backend for workspace create: {backend}")
+
+    return WorkspaceRecord(
+        id=workspace_id,
+        name=name,
+        description=description,
+        owner_user_id=owner_user_id,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+async def update_workspace(
+    workspace_id: str,
+    *,
+    name: str | None = None,
+    description: str | None = None,
+) -> WorkspaceRecord | None:
+    """
+    Update a subset of workspace fields. Returns the refreshed record or
+    None when the workspace does not exist.
+    """
+    existing = await get_workspace(workspace_id)
+    if existing is None:
+        return None
+
+    next_name = name if name is not None else existing.name
+    next_description = description if description is not None else existing.description
+    now = datetime.now(timezone.utc).isoformat()
+
+    backend = _require_db_backend()
+    sql = f"""
+    UPDATE {WORKSPACE_TABLE_NAME}
+    SET name = :name, description = :description, updated_at = :updated_at
+    WHERE id = :id
+    """
+    params = {
+        "id": workspace_id,
+        "name": next_name,
+        "description": next_description,
+        "updated_at": now,
+    }
+
+    if backend == "sqlalchemy":
+        from sqlalchemy import text
+
+        engine = get_engine()
+        async with engine.begin() as conn:
+            await conn.execute(text(sql), params)
+
+    elif backend == "sqlite3":
+        sqlite_path = get_sqlite_path()
+        await asyncio.to_thread(
+            _sqlite_execute,
+            sqlite_path,
+            sql.replace(":name", "?")
+            .replace(":description", "?")
+            .replace(":updated_at", "?")
+            .replace(":id", "?"),
+            (next_name, next_description, now, workspace_id),
+        )
+    else:
+        raise RuntimeError(f"Unsupported DB backend for workspace update: {backend}")
+
+    return WorkspaceRecord(
+        id=workspace_id,
+        name=next_name,
+        description=next_description,
+        owner_user_id=existing.owner_user_id,
+        created_at=existing.created_at,
+        updated_at=now,
+    )
+
+
+async def delete_workspace(workspace_id: str) -> bool:
+    """
+    Delete the workspace row plus every workspace membership and KB
+    membership that references it. Returns True if a workspace row was
+    removed.
+    """
+    backend = _require_db_backend()
+
+    if backend == "sqlalchemy":
+        from sqlalchemy import text
+
+        engine = get_engine()
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    f"DELETE FROM {WORKSPACE_MEMBER_TABLE_NAME} "
+                    "WHERE workspace_id = :workspace_id"
+                ),
+                {"workspace_id": workspace_id},
+            )
+            await conn.execute(
+                text(
+                    f"DELETE FROM {KB_MEMBER_TABLE_NAME} "
+                    "WHERE workspace_id = :workspace_id"
+                ),
+                {"workspace_id": workspace_id},
+            )
+            result = await conn.execute(
+                text(f"DELETE FROM {WORKSPACE_TABLE_NAME} WHERE id = :id"),
+                {"id": workspace_id},
+            )
+            return int(result.rowcount or 0) > 0
+
+    if backend == "sqlite3":
+        sqlite_path = get_sqlite_path()
+
+        def _sqlite_delete_workspace() -> bool:
+            with sqlite3.connect(sqlite_path) as conn:
+                conn.execute(
+                    f"DELETE FROM {WORKSPACE_MEMBER_TABLE_NAME} WHERE workspace_id = ?",
+                    (workspace_id,),
+                )
+                conn.execute(
+                    f"DELETE FROM {KB_MEMBER_TABLE_NAME} WHERE workspace_id = ?",
+                    (workspace_id,),
+                )
+                cursor = conn.execute(
+                    f"DELETE FROM {WORKSPACE_TABLE_NAME} WHERE id = ?",
+                    (workspace_id,),
+                )
+                conn.commit()
+                return int(cursor.rowcount or 0) > 0
+
+        return await asyncio.to_thread(_sqlite_delete_workspace)
+
+    raise RuntimeError(f"Unsupported DB backend for workspace delete: {backend}")

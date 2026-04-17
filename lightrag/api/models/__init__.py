@@ -19,6 +19,7 @@ from lightrag.api.models.membership import (
 )
 from lightrag.api.models.kb import KnowledgeBase
 from lightrag.api.models.user import USER_TABLE_NAME, UserRow
+from lightrag.api.models.workspace import WORKSPACE_TABLE_NAME, WorkspaceRow
 
 Base = get_declarative_base()
 
@@ -50,9 +51,11 @@ __all__ = [
     "WORKSPACE_MEMBER_TABLE_NAME",
     "KB_MEMBER_TABLE_NAME",
     "REFRESH_TOKEN_TABLE_NAME",
+    "WORKSPACE_TABLE_NAME",
     "UserRow",
     "WorkspaceMemberRow",
     "KBMemberRow",
     "RefreshTokenRow",
+    "WorkspaceRow",
     "KnowledgeBase",
 ]
