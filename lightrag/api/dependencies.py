@@ -214,13 +214,25 @@ def get_current_kb(request: Request) -> str | None:
 
 
 def compose_runtime_workspace(state: State, workspace_id: str, kb_id: str) -> str:
+    """Storage namespace for ``(workspace_id, kb_id)``.
+
+    Since the v2 registry pivot, KBs are *global* — one KB has one
+    storage footprint regardless of which workspaces reference it. We
+    keep the two-arg signature for source compat with every existing
+    caller but ignore ``workspace_id``; the namespace is just ``kb_id``.
+
+    Callers that truly needed the old ``{workspace}__{kb}`` shape are
+    the ones doing per-workspace pre-v2 storage probing — they're
+    gone from the main pipeline by now. The lifespan migration step
+    renames old on-disk directories so historical deployments don't
+    lose data.
+    """
+    _ = workspace_id  # intentionally unused
     rag_factory = getattr(state, "rag_factory", None)
     compose = getattr(rag_factory, "compose_workspace", None)
     if callable(compose):
         return compose(workspace_id, kb_id)
-
-    kb_separator = getattr(state, "kb_separator", "__") or "__"
-    return f"{workspace_id}{kb_separator}{kb_id}"
+    return str(kb_id)
 
 
 async def get_current_rag(request: Request):

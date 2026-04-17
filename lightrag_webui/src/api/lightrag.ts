@@ -865,11 +865,54 @@ export const listKnowledgeBases = async (
   return response.data
 }
 
+export const listAllKnowledgeBases = async (): Promise<KnowledgeBaseListResponse> => {
+  // Global KB pool — every KB registered anywhere. Used by the
+  // "link existing KB" picker on the workspace management page.
+  const response = await axiosInstance.get('/kb')
+  return response.data
+}
+
 export const listKnowledgeBaseCategories = async (
   workspaceId: string
 ): Promise<KnowledgeBaseCategoriesResponse> => {
   const response = await axiosInstance.get(
     `/workspaces/${encodeURIComponent(workspaceId)}/kb/categories`
+  )
+  return response.data
+}
+
+export type LinkKbResponse = {
+  status: 'linked' | 'already_linked'
+  message: string
+  workspace_id: string
+  kb_id: string
+}
+
+export const linkKnowledgeBaseToWorkspace = async (
+  workspaceId: string,
+  kbId: string
+): Promise<LinkKbResponse> => {
+  const response = await axiosInstance.post(
+    `/workspaces/${encodeURIComponent(workspaceId)}/kb/link`,
+    { kb_id: kbId }
+  )
+  return response.data
+}
+
+export type UnlinkKbResponse = {
+  status: 'unlinked'
+  message: string
+  workspace_id: string
+  kb_id: string
+  remaining_links: number
+}
+
+export const unlinkKnowledgeBaseFromWorkspace = async (
+  workspaceId: string,
+  kbId: string
+): Promise<UnlinkKbResponse> => {
+  const response = await axiosInstance.delete(
+    `/workspaces/${encodeURIComponent(workspaceId)}/kb/${encodeURIComponent(kbId)}/link`
   )
   return response.data
 }

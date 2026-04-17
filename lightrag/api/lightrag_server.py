@@ -162,6 +162,63 @@ class LLMConfigCache:
                 self.gemini_embedding_options = {}
 
 
+def _migrate_kb_storage_layout(
+    *, working_dir: str, kb_separator: str = "__"
+) -> None:
+    """Rename pre-v2 ``{workspace}__{kb}`` storage dirs to ``{kb}`` only.
+
+    The v2 KB registry stopped using the workspace id as part of the
+    storage namespace — KBs are global, and one KB has one footprint
+    regardless of how many workspaces link it. For a deployment that
+    was running on the v1 layout before an upgrade, the on-disk
+    ``rag_storage/`` still has directories like ``rag_storage/default__logs/``.
+    This helper walks the storage root once at startup and renames
+    them to ``rag_storage/logs/``.
+
+    Rules:
+    - Only rename when the target directory does NOT already exist;
+      a collision usually means the server was restarted on an
+      already-migrated layout and we should leave things alone.
+    - kb_registry.json is migrated independently by
+      ``_migrate_state_v1_to_v2``; if that migration renamed a KB to
+      ``<kb>__<short-hash>`` due to a collision, the old directory
+      is NOT auto-renamed here — the operator must reconcile manually
+      so data doesn't get lost.
+    """
+    storage_root = Path(working_dir)
+    if not storage_root.is_dir():
+        return
+
+    for entry in storage_root.iterdir():
+        if not entry.is_dir():
+            continue
+        name = entry.name
+        if kb_separator not in name:
+            continue
+        # Split on the first separator; ``workspace__kb_with__underscores``
+        # is valid, so we only peel off the leftmost workspace prefix.
+        _workspace_part, _, kb_part = name.partition(kb_separator)
+        if not kb_part:
+            continue
+        target = storage_root / kb_part
+        if target.exists():
+            # Target is either the migrated result from a previous run
+            # or a coincidentally-same-named dir we shouldn't touch.
+            continue
+        try:
+            entry.rename(target)
+            logger.info(
+                "Migrated KB storage layout: %s -> %s", entry, target
+            )
+        except OSError as exc:
+            logger.warning(
+                "Failed to migrate KB storage dir %s -> %s: %s",
+                entry,
+                target,
+                exc,
+            )
+
+
 def check_frontend_build():
     """Check if frontend is built and optionally check if source is up-to-date
 
@@ -357,9 +414,11 @@ def create_app(args):
     default_kb_id = getattr(args, "default_kb_id", None) or "default"
     default_runtime_workspace = args.workspace
     if args.enable_kb_isolation:
-        default_runtime_workspace = (
-            f"{default_workspace_id}{kb_separator}{default_kb_id}"
-        )
+        # Post-v2 registry pivot: KBs are global, so the storage
+        # namespace is just the KB id — no more ``{workspace}__{kb}``
+        # composition. Matches what ``RagFactory.compose_workspace``
+        # returns for the rest of the runtime.
+        default_runtime_workspace = default_kb_id
         if getattr(args, "workers", 1) > 1:
             logger.warning(
                 "KB isolation is enabled while workers=%s. The current KB registry is file-backed and "
@@ -1308,14 +1367,24 @@ def create_app(args):
 
     rag_factory = None
     if args.enable_kb_isolation:
+        # Migrate any legacy ``{workspace}__{kb}`` storage directories
+        # left behind by a pre-v2 deployment to the new ``{kb}``-only
+        # layout. Safe to run on every start — it only renames when
+        # the new target path doesn't already exist. Runs BEFORE the
+        # RagFactory spins up so the first ``get()`` call finds the
+        # data in the right place.
+        _migrate_kb_storage_layout(
+            working_dir=args.working_dir,
+            kb_separator=kb_separator,
+        )
 
         async def build_isolated_rag(
-            workspace_id: str,
             kb_id: str,
-            combined_workspace: str,
             knowledge_base,
         ) -> LightRAG:
-            isolated_rag = build_rag_instance(combined_workspace)
+            # Storage namespace is just ``kb_id`` — one KB, one
+            # footprint, shared across every workspace that links it.
+            isolated_rag = build_rag_instance(kb_id)
             await initialize_rag_runtime(isolated_rag)
             return isolated_rag
 

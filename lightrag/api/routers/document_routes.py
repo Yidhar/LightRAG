@@ -5466,13 +5466,19 @@ def create_document_routes(
                 detail="Source and target knowledge bases are the same.",
             )
 
-        # Verify target KB exists in the registry so we don't silently
-        # create a ghost namespace by typoing the id.
+        # Verify target KB is linked to the source workspace (the same
+        # workspace boundary the request context is scoped to). A move
+        # that would cross workspaces should go through the link/
+        # unlink endpoints first rather than happening implicitly.
         registry = getattr(request.app.state, "kb_registry", None)
         if registry is not None and registry.get_kb(source_workspace, target_kb) is None:
             raise HTTPException(
                 status_code=404,
-                detail=f"Target knowledge base '{target_kb}' not found in workspace '{source_workspace}'.",
+                detail=(
+                    f"Target knowledge base '{target_kb}' is not linked to "
+                    f"workspace '{source_workspace}'. Link it first via "
+                    f"POST /workspaces/{source_workspace}/kb/link."
+                ),
             )
 
         source_rag = _resolve_active_rag(active_rag)

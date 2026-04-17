@@ -267,9 +267,14 @@ def create_kb_routes(api_key: Optional[str] = None) -> APIRouter:
         context = get_request_context(request)
         resolved_workspace_id = context.workspace_id or workspace_id
         resolved_kb_id = context.kb_id or kb_id
+
+        # Gate: the KB must be linked to the requesting workspace so
+        # workspace A can't rename a KB that only belongs to B.
+        if registry.get_kb(resolved_workspace_id, resolved_kb_id) is None:
+            raise HTTPException(status_code=404, detail="Knowledge base not found")
+
         try:
             kb = registry.update_kb(
-                resolved_workspace_id,
                 resolved_kb_id,
                 name=payload.name,
                 description=payload.description,
@@ -319,6 +324,17 @@ def create_kb_routes(api_key: Optional[str] = None) -> APIRouter:
         workspace_id: str,
         kb_id: str,
     ) -> KnowledgeBaseDeleteResponse:
+        """Delete semantics after the v2 pivot:
+
+        * If the KB is linked to more than one workspace, this endpoint
+          only *unlinks* from the current workspace — the KB stays alive
+          for the other workspaces that still reference it.
+        * If the current workspace is the last holder, the KB is
+          deleted globally (link removed + global record removed +
+          runtime evicted + doc-manager cache purged). Storage on disk
+          is intentionally left in place as a safety net; operators
+          can clean ``rag_storage/<kb_id>/`` manually.
+        """
         registry = _require_kb_registry(request)
         context = get_request_context(request)
         resolved_workspace_id = context.workspace_id or workspace_id
@@ -333,24 +349,42 @@ def create_kb_routes(api_key: Optional[str] = None) -> APIRouter:
                 ),
             )
 
-        kb = registry.get_kb(resolved_workspace_id, resolved_kb_id)
-        if kb is None:
+        if registry.get_kb(resolved_workspace_id, resolved_kb_id) is None:
             raise HTTPException(status_code=404, detail="Knowledge base not found")
 
-        deleted = registry.delete_kb(resolved_workspace_id, resolved_kb_id)
-        if not deleted:
-            raise HTTPException(status_code=404, detail="Knowledge base not found")
+        other_workspaces = [
+            ws
+            for ws in registry.list_workspaces_linking_kb(resolved_kb_id)
+            if ws != resolved_workspace_id
+        ]
+        unlink_only = bool(other_workspaces)
 
-        await _evict_kb_runtime_if_present(
-            request,
-            workspace_id=resolved_workspace_id,
-            kb_id=resolved_kb_id,
-        )
-        _cleanup_doc_manager_cache(
-            request,
-            workspace_id=resolved_workspace_id,
-            kb_id=resolved_kb_id,
-        )
+        if unlink_only:
+            # Shared KB — just drop the link from this workspace. The
+            # data + runtime stay alive for the other linkers.
+            registry.unlink_kb_from_workspace(resolved_workspace_id, resolved_kb_id)
+            message = (
+                f"Knowledge base '{resolved_kb_id}' unlinked from workspace "
+                f"'{resolved_workspace_id}'. Still referenced by "
+                f"{len(other_workspaces)} other workspace(s); data untouched."
+            )
+        else:
+            # Last holder — delete globally.
+            registry.delete_kb(resolved_kb_id)
+            await _evict_kb_runtime_if_present(
+                request,
+                workspace_id=resolved_workspace_id,
+                kb_id=resolved_kb_id,
+            )
+            _cleanup_doc_manager_cache(
+                request,
+                workspace_id=resolved_workspace_id,
+                kb_id=resolved_kb_id,
+            )
+            message = (
+                f"Knowledge base '{resolved_kb_id}' removed. Storage under "
+                f"rag_storage/{resolved_kb_id}/ was left in place for safety."
+            )
 
         await emit_audit_event(
             request,
@@ -360,19 +394,180 @@ def create_kb_routes(api_key: Optional[str] = None) -> APIRouter:
             outcome="success",
             status_code=status.HTTP_200_OK,
             metadata={
-                "operation": "delete",
+                "operation": "unlink" if unlink_only else "delete",
                 "workspace_id": resolved_workspace_id,
+                "remaining_links": len(other_workspaces),
             },
         )
 
         return KnowledgeBaseDeleteResponse(
             status="deleted",
+            message=message,
+            workspace_id=resolved_workspace_id,
+            kb_id=resolved_kb_id,
+        )
+
+    # ------------------------------------------------------------------
+    # New top-level + link/unlink endpoints (v2 sharing model)
+    # ------------------------------------------------------------------
+
+    @router.get(
+        "/kb",
+        response_model=KnowledgeBaseListResponse,
+        dependencies=[Depends(workspace_view_permission)],
+    )
+    async def list_all_knowledge_bases(
+        request: Request,
+    ) -> KnowledgeBaseListResponse:
+        """Every KB in the global pool, regardless of workspace linkage.
+
+        Used by the "link existing KB" picker in the workspace
+        management UI: it shows every KB the user could conceivably
+        link into a workspace they own.
+        """
+        registry = _require_kb_registry(request)
+        items = registry.list_all_kbs()
+        response_items = [_to_response(item) for item in items]
+        return KnowledgeBaseListResponse(
+            items=response_items,
+            total_count=len(response_items),
+        )
+
+    class LinkKbRequest(BaseModel):
+        kb_id: str = Field(min_length=1)
+
+    class LinkKbResponse(BaseModel):
+        status: Literal["linked", "already_linked"]
+        message: str
+        workspace_id: str
+        kb_id: str
+
+    @router.post(
+        "/workspaces/{workspace_id}/kb/link",
+        response_model=LinkKbResponse,
+        dependencies=[Depends(workspace_update_permission)],
+    )
+    async def link_existing_knowledge_base(
+        request: Request,
+        workspace_id: str,
+        payload: LinkKbRequest,
+    ) -> "LinkKbResponse":  # noqa: F821
+        """Attach an existing global KB to this workspace.
+
+        After the link is created the workspace's KB list includes
+        the newly-linked KB. Idempotent — re-linking returns
+        ``already_linked`` without error.
+        """
+        registry = _require_kb_registry(request)
+        context = get_request_context(request)
+        resolved_workspace_id = context.workspace_id or workspace_id
+        target_kb_id = payload.kb_id.strip()
+        if not target_kb_id:
+            raise HTTPException(status_code=400, detail="kb_id must not be empty")
+
+        if registry.get_kb(None, target_kb_id) is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Knowledge base '{target_kb_id}' does not exist.",
+            )
+
+        try:
+            newly_linked = registry.link_kb_to_workspace(
+                resolved_workspace_id, target_kb_id
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        await emit_audit_event(
+            request,
+            action="workspace:update",
+            resource_type="kb",
+            resource_id=target_kb_id,
+            outcome="success",
+            status_code=status.HTTP_200_OK,
+            metadata={
+                "operation": "link",
+                "workspace_id": resolved_workspace_id,
+            },
+        )
+
+        return LinkKbResponse(
+            status="linked" if newly_linked else "already_linked",
             message=(
-                f"Knowledge base '{resolved_kb_id}' was removed from workspace '{resolved_workspace_id}'. "
-                "Existing storage data was left in place."
+                f"Knowledge base '{target_kb_id}' linked to workspace "
+                f"'{resolved_workspace_id}'."
+                if newly_linked
+                else (
+                    f"Knowledge base '{target_kb_id}' is already linked to "
+                    f"workspace '{resolved_workspace_id}'."
+                )
+            ),
+            workspace_id=resolved_workspace_id,
+            kb_id=target_kb_id,
+        )
+
+    class UnlinkKbResponse(BaseModel):
+        status: Literal["unlinked"]
+        message: str
+        workspace_id: str
+        kb_id: str
+        remaining_links: int
+
+    @router.delete(
+        "/workspaces/{workspace_id}/kb/{kb_id}/link",
+        response_model=UnlinkKbResponse,
+        dependencies=[Depends(workspace_update_permission)],
+    )
+    async def unlink_knowledge_base(
+        request: Request,
+        workspace_id: str,
+        kb_id: str,
+    ) -> "UnlinkKbResponse":  # noqa: F821
+        """Remove the link between this workspace and ``kb_id`` without
+        deleting the KB. The KB stays alive in the global pool and
+        other workspaces that still link it keep working.
+        """
+        registry = _require_kb_registry(request)
+        context = get_request_context(request)
+        resolved_workspace_id = context.workspace_id or workspace_id
+        resolved_kb_id = context.kb_id or kb_id
+
+        if not registry.unlink_kb_from_workspace(
+            resolved_workspace_id, resolved_kb_id
+        ):
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Knowledge base '{resolved_kb_id}' is not linked to "
+                    f"workspace '{resolved_workspace_id}'."
+                ),
+            )
+
+        remaining = len(registry.list_workspaces_linking_kb(resolved_kb_id))
+        await emit_audit_event(
+            request,
+            action="workspace:update",
+            resource_type="kb",
+            resource_id=resolved_kb_id,
+            outcome="success",
+            status_code=status.HTTP_200_OK,
+            metadata={
+                "operation": "unlink",
+                "workspace_id": resolved_workspace_id,
+                "remaining_links": remaining,
+            },
+        )
+
+        return UnlinkKbResponse(
+            status="unlinked",
+            message=(
+                f"Knowledge base '{resolved_kb_id}' unlinked from workspace "
+                f"'{resolved_workspace_id}'. Still referenced by {remaining} "
+                f"workspace(s)."
             ),
             workspace_id=resolved_workspace_id,
             kb_id=resolved_kb_id,
+            remaining_links=remaining,
         )
 
     return router

@@ -4,6 +4,7 @@ import {
   BookOpenTextIcon,
   BriefcaseBusinessIcon,
   FolderKanbanIcon,
+  Link2Icon,
   PlusIcon,
   Trash2Icon,
 } from 'lucide-react'
@@ -59,6 +60,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/Table'
+import LinkKnowledgeBaseDialog from '@/components/workspaces/LinkKnowledgeBaseDialog'
 
 // ---------------------------------------------------------------------------
 // Workspace management — one page, everything.
@@ -295,6 +297,11 @@ export default function WorkspaceListPage() {
   const [kbDeleteTarget, setKbDeleteTarget] = useState<KnowledgeBaseRecord | null>(
     null
   )
+
+  // "Link existing KB" dialog — lets users attach a KB that lives
+  // in another workspace (or the global pool) into this workspace.
+  // KBs are shared: linking doesn't duplicate data.
+  const [linkDialogOpen, setLinkDialogOpen] = useState(false)
 
   const loadWorkspaces = useCallback(async () => {
     try {
@@ -801,16 +808,24 @@ export default function WorkspaceListPage() {
                   </Badge>
                 )}
                 {canManage && (
-                  <Button
-                    size="sm"
-                    className="ml-auto"
-                    onClick={openKbCreateDialog}
-                  >
-                    <PlusIcon className="size-4" />
-                    {t('platformShell.workspaceDirectory.createKb', {
-                      defaultValue: '新建知识库',
-                    })}
-                  </Button>
+                  <div className="ml-auto flex flex-wrap items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setLinkDialogOpen(true)}
+                    >
+                      <Link2Icon className="size-4" />
+                      {t('platformShell.workspaceDirectory.linkKb', {
+                        defaultValue: '链接已有知识库',
+                      })}
+                    </Button>
+                    <Button size="sm" onClick={openKbCreateDialog}>
+                      <PlusIcon className="size-4" />
+                      {t('platformShell.workspaceDirectory.createKb', {
+                        defaultValue: '新建知识库',
+                      })}
+                    </Button>
+                  </div>
                 )}
               </div>
 
@@ -931,20 +946,33 @@ export default function WorkspaceListPage() {
                   <span>
                     {t('platformShell.workspaceDirectory.empty', {
                       defaultValue:
-                        '还没有知识库 — 点击右上角「新建知识库」创建第一个。',
+                        '还没有知识库 — 点击右上角「新建知识库」创建第一个，或从其他工作区链接一个已有知识库。',
                     })}
                   </span>
                   {canManage && (
                     // Second call-to-action on the empty state itself so
-                    // brand-new workspaces surface the create action
-                    // without forcing the user's eye to scan up to the
-                    // section header. Same handler as the header button.
-                    <Button size="sm" onClick={openKbCreateDialog}>
-                      <PlusIcon className="size-4" />
-                      {t('platformShell.workspaceDirectory.createKb', {
-                        defaultValue: '新建知识库',
-                      })}
-                    </Button>
+                    // brand-new workspaces surface the create + link
+                    // actions without forcing the user's eye to scan up
+                    // to the section header. Same handlers as the
+                    // header buttons.
+                    <div className="flex flex-wrap items-center justify-center gap-2">
+                      <Button size="sm" onClick={openKbCreateDialog}>
+                        <PlusIcon className="size-4" />
+                        {t('platformShell.workspaceDirectory.createKb', {
+                          defaultValue: '新建知识库',
+                        })}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setLinkDialogOpen(true)}
+                      >
+                        <Link2Icon className="size-4" />
+                        {t('platformShell.workspaceDirectory.linkKb', {
+                          defaultValue: '链接已有知识库',
+                        })}
+                      </Button>
+                    </div>
                   )}
                 </div>
               )}
@@ -1023,6 +1051,27 @@ export default function WorkspaceListPage() {
         onOpenChange={setKbDialogOpen}
         onSubmit={handleKnowledgeBaseSubmit}
       />
+
+      {selectedId && (
+        <LinkKnowledgeBaseDialog
+          open={linkDialogOpen}
+          onOpenChange={setLinkDialogOpen}
+          workspaceId={selectedId}
+          alreadyLinkedIds={knowledgeBases.map((kb) => kb.id)}
+          onLinked={() => {
+            setLinkDialogOpen(false)
+            void loadKnowledgeBases()
+            // Other pages (DocumentsPage KBTabs) hear this event and
+            // refresh their own KB selectors, so the newly-linked KB
+            // appears everywhere without a manual reload.
+            window.dispatchEvent(
+              new CustomEvent('lightrag:kb-updated', {
+                detail: { workspaceId: selectedId },
+              })
+            )
+          }}
+        />
+      )}
 
       <AlertDialog
         open={Boolean(kbDeleteTarget)}

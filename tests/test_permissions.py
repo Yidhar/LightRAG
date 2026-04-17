@@ -422,9 +422,14 @@ def test_document_upload_route_resolves_request_scoped_runtime_and_doc_manager(
         def __init__(self):
             self.calls = []
 
+        def compose_workspace(self, _workspace_id, kb_id):
+            # Mirror the real RagFactory.compose_workspace: post-v2 the
+            # storage namespace is just the KB id (KBs are global).
+            return str(kb_id)
+
         async def get(self, workspace_id, kb_id):
             self.calls.append((workspace_id, kb_id))
-            return FakeUploadRag(f"{workspace_id}__{kb_id}")
+            return FakeUploadRag(str(kb_id))
 
     rag_factory = FakeRagFactory()
     app.state.rag_factory = rag_factory
@@ -450,16 +455,20 @@ def test_document_upload_route_resolves_request_scoped_runtime_and_doc_manager(
     assert response.status_code == 200
     assert response.json()["track_id"] == "upload-track"
     assert rag_factory.calls == [("team_alpha", "finance_primary")]
+    # Post-v2 pivot: storage namespace is just ``kb_id``. Both the rag
+    # runtime's workspace attribute and the input-dir path follow
+    # that shape because KBs are global — one KB has one footprint
+    # regardless of how many workspaces link it.
     assert captured == [
         (
-            "team_alpha__finance_primary",
-            tmp_path / "inputs" / "team_alpha__finance_primary" / "sample.txt",
+            "finance_primary",
+            tmp_path / "inputs" / "finance_primary" / "sample.txt",
             "upload-track",
             True,
         )
     ]
     assert (
-        tmp_path / "inputs" / "team_alpha__finance_primary" / "sample.txt"
+        tmp_path / "inputs" / "finance_primary" / "sample.txt"
     ).read_bytes() == b"hello world"
 
 

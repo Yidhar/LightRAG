@@ -38,48 +38,30 @@ from lightrag.utils import logger
 
 
 def collect_workspace_kb_ids(state: Any, workspace_id: str) -> list[str]:
-    """Return every KB id registered for ``workspace_id``.
+    """Return every KB id linked to ``workspace_id``.
 
-    Empty result means the caller should not federate — either the
-    registry is missing, the workspace has no KB record (legacy shape),
-    or there is only one KB so federation degenerates to a plain call.
+    Reads from the v2 link table on ``kb_registry``: a KB shows up here
+    iff the workspace has a row in ``workspace_kb_links``. Shared KBs
+    (same KB linked to multiple workspaces) are returned once per
+    workspace that links them, exactly as the user expects for the
+    "workspace owns a reference, not the data" model.
     """
     registry = getattr(state, "kb_registry", None)
     if registry is None:
         return []
 
-    lister = getattr(registry, "list", None) or getattr(registry, "list_for_workspace", None)
-    if not callable(lister):
-        return []
-
+    # list_kbs returns KnowledgeBase dataclasses in link order.
     try:
-        raw = lister(workspace_id)
-    except TypeError:
-        # Older registry signature accepted no arguments.
-        raw = lister()
+        records = registry.list_kbs(workspace_id)
     except Exception:  # pragma: no cover — defensive
         logger.exception("Failed to enumerate KBs for workspace %s", workspace_id)
         return []
 
     ids: list[str] = []
-    for entry in raw or []:
-        # Registry entries come in a few shapes depending on how they
-        # were persisted: dicts from the JSON registry, ORM rows, or
-        # bare ``KnowledgeBase`` dataclasses. Handle the usual ones.
-        candidate: Any
-        if isinstance(entry, dict):
-            if entry.get("workspace_id") and entry["workspace_id"] != workspace_id:
-                continue
-            candidate = entry.get("kb_id") or entry.get("id")
-        else:
-            entry_workspace = getattr(entry, "workspace_id", None)
-            if entry_workspace and entry_workspace != workspace_id:
-                continue
-            candidate = getattr(entry, "kb_id", None) or getattr(entry, "id", None)
-
+    for record in records or []:
+        candidate = getattr(record, "id", None)
         if candidate and candidate not in ids:
-            ids.append(candidate)
-
+            ids.append(str(candidate))
     return ids
 
 
