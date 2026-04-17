@@ -404,7 +404,11 @@ def create_app(args):
 
                 try:
                     await init_db(args.db_url)
-                    seed_summary = await bootstrap_identity_store(args.auth_accounts)
+                    seed_summary = await bootstrap_identity_store(
+                        args.auth_accounts,
+                        default_workspace_id=app.state.default_workspace_id,
+                        default_workspace_name="Default workspace",
+                    )
                     app.state.db_ready = True
                     app.state.identity_schema_ready = True
                     app.state.env_account_seed_summary = seed_summary.to_dict()

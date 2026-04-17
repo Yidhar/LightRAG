@@ -313,8 +313,20 @@ async def seed_env_accounts(auth_accounts: str | None) -> EnvAccountSeedSummary:
     raise RuntimeError(f"Unsupported DB backend for env-account seeding: {backend}")
 
 
-async def bootstrap_identity_store(auth_accounts: str | None) -> EnvAccountSeedSummary:
-    """Create identity tables and upsert env accounts in one safe startup step."""
+async def bootstrap_identity_store(
+    auth_accounts: str | None,
+    *,
+    default_workspace_id: str | None = None,
+    default_workspace_name: str | None = None,
+) -> EnvAccountSeedSummary:
+    """Create identity tables, upsert env accounts, and seed the default
+    workspace row in one safe startup step.
+
+    ``default_workspace_id`` defaults to None, meaning skip the seed —
+    only the server's lifespan passes a concrete value (the value of
+    ``app.state.default_workspace_id``). Keeping the seed optional means
+    callers that just want the schema (scripts, tests) don't pay for it.
+    """
     await initialize_identity_schema()
     summary = await seed_env_accounts(auth_accounts)
     logger.info(
@@ -323,7 +335,60 @@ async def bootstrap_identity_store(auth_accounts: str | None) -> EnvAccountSeedS
         summary.inserted_count,
         summary.updated_count,
     )
+
+    if default_workspace_id:
+        seeded = await ensure_workspace(
+            default_workspace_id,
+            name=default_workspace_name or default_workspace_id.capitalize(),
+            description=(
+                "Default workspace. Users with membership here can query across "
+                "every knowledge base it owns."
+            ),
+        )
+        if seeded:
+            logger.info(
+                "Seeded default workspace %r so GET /workspaces never returns "
+                "an empty list on a fresh install.",
+                default_workspace_id,
+            )
+
     return summary
+
+
+async def ensure_workspace(
+    workspace_id: str,
+    *,
+    name: str,
+    description: str | None = None,
+    owner_user_id: str | None = None,
+) -> bool:
+    """Idempotently insert a workspace row. Returns True when a new row
+    was created, False when the workspace already existed.
+
+    Uses a check-then-insert pattern under the expectation that startup
+    is single-threaded. If two processes race (e.g. gunicorn workers),
+    the INSERT raises and we swallow it — the subsequent read sees the
+    row either way.
+    """
+    existing = await get_workspace(workspace_id)
+    if existing is not None:
+        return False
+
+    try:
+        await create_workspace(
+            workspace_id=workspace_id,
+            name=name,
+            description=description,
+            owner_user_id=owner_user_id,
+        )
+    except Exception as exc:  # pragma: no cover — race window only
+        logger.debug(
+            "ensure_workspace(%r) ignored insert error (likely a race): %s",
+            workspace_id,
+            exc,
+        )
+        return False
+    return True
 
 
 def _utcnow() -> datetime:

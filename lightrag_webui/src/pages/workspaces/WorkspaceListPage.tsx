@@ -56,10 +56,20 @@ import {
 import Input from '@/components/ui/Input'
 import Textarea from '@/components/ui/Textarea'
 
-const defaultConfigOverrideText = '{\n  \n}'
-
 // ---------------------------------------------------------------------------
-// Knowledge-base form dialog (unchanged behavior, kept as-is)
+// Knowledge-base form dialog
+//
+// User-facing fields only: display name (required), description, category.
+//
+// Intentionally dropped:
+//   - KB id input. The backend auto-generates ``kb_<uuid4[:8]>`` when
+//     the payload omits ``kb_id``; users should not be typing internal
+//     identifiers.
+//   - status input. Lifecycle state is a backend concern ("active" by
+//     default); surfacing it as a free-text field just confused users
+//     who didn't know what to type.
+//   - config_override JSON textarea. Operators who truly need to pin
+//     KB-level overrides can PATCH /workspaces/{ws}/kb/{kb} directly.
 // ---------------------------------------------------------------------------
 
 interface KnowledgeBaseFormDialogProps {
@@ -88,59 +98,37 @@ function KnowledgeBaseFormDialogContent({
   onCancel: () => void
 }) {
   const { t } = useTranslation()
-  const [kbId, setKbId] = useState(mode === 'edit' ? knowledgeBase?.id || '' : '')
   const [name, setName] = useState(mode === 'edit' ? knowledgeBase?.name || '' : '')
   const [description, setDescription] = useState(
     mode === 'edit' ? knowledgeBase?.description || '' : ''
   )
-  const [status, setStatus] = useState(
-    mode === 'edit' ? knowledgeBase?.status || 'active' : 'active'
-  )
   const [category, setCategory] = useState(
     mode === 'edit' ? knowledgeBase?.category || '' : ''
-  )
-  const [configOverrideText, setConfigOverrideText] = useState(
-    mode === 'edit'
-      ? JSON.stringify(knowledgeBase?.config_override || {}, null, 2) ||
-          defaultConfigOverrideText
-      : defaultConfigOverrideText
   )
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    let configOverride: Record<string, any> = {}
-    const trimmedConfig = configOverrideText.trim()
-    if (trimmedConfig) {
-      try {
-        const parsed = JSON.parse(trimmedConfig)
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-          toast.error(t('platformShell.workspaceDirectory.configOverrideObject'))
-          return
-        }
-        configOverride = parsed as Record<string, any>
-      } catch (parseError) {
-        toast.error(
-          t('platformShell.workspaceDirectory.invalidJsonConfigOverride', {
-            error: errorMessage(parseError),
-          })
-        )
-        return
-      }
+    const trimmedName = name.trim()
+    if (!trimmedName) {
+      toast.error(
+        t('platformShell.workspaceDirectory.kbForm.nameRequired', {
+          defaultValue: '请填写知识库名称',
+        })
+      )
+      return
     }
     await onSubmit({
-      kb_id: kbId.trim() || undefined,
-      name: name.trim() || undefined,
+      // kb_id omitted → backend generates kb_<uuid4[:8]> (see kb_registry)
+      name: trimmedName,
       description: description.trim(),
-      status: status.trim() || 'active',
-      config_override: configOverride,
-      // Send trimmed category; backend treats "" as "uncategorised" which
-      // is exactly what we want when the user leaves the field blank.
+      // Send trimmed category; backend treats "" as "uncategorised"
+      // which is exactly what we want when the user leaves the field blank.
       category: category.trim(),
     })
   }
 
   return (
-    <DialogContent className="rounded-2xl border-border/70 sm:max-w-xl">
+    <DialogContent className="rounded-2xl border-border/70 sm:max-w-lg">
       <DialogHeader>
         <DialogTitle>
           {mode === 'create'
@@ -155,62 +143,35 @@ function KnowledgeBaseFormDialogContent({
       </DialogHeader>
 
       <form onSubmit={handleSubmit} className="space-y-4">
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div className="space-y-2">
-            <label htmlFor="kb-id" className="text-sm font-medium text-foreground">
-              {t('platformShell.workspaceDirectory.kbId')}
-            </label>
-            <Input
-              id="kb-id"
-              value={kbId}
-              onChange={(event) => setKbId(event.target.value)}
-              placeholder={t('platformShell.workspaceDirectory.kbIdPlaceholder')}
-              disabled={mode === 'edit' || submitting}
-              className="h-10 rounded-xl border-border/70"
-            />
-          </div>
-          <div className="space-y-2">
-            <label htmlFor="kb-name" className="text-sm font-medium text-foreground">
-              {t('platformShell.workspaceDirectory.displayName')}
-            </label>
-            <Input
-              id="kb-name"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder={t('platformShell.workspaceDirectory.displayNamePlaceholder')}
-              disabled={submitting}
-              className="h-10 rounded-xl border-border/70"
-            />
-          </div>
+        <div className="space-y-2">
+          <label htmlFor="kb-name" className="text-sm font-medium text-foreground">
+            {t('platformShell.workspaceDirectory.displayName')}
+          </label>
+          <Input
+            id="kb-name"
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            placeholder={t('platformShell.workspaceDirectory.displayNamePlaceholder')}
+            disabled={submitting}
+            autoFocus
+            required
+            className="h-10 rounded-xl border-border/70"
+          />
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-[1fr_180px]">
-          <div className="space-y-2">
-            <label htmlFor="kb-description" className="text-sm font-medium text-foreground">
-              {t('platformShell.workspaceDirectory.descriptionLabel')}
-            </label>
-            <Textarea
-              id="kb-description"
-              value={description}
-              onChange={(event) => setDescription(event.target.value)}
-              placeholder={t('platformShell.workspaceDirectory.descriptionPlaceholder')}
-              disabled={submitting}
-              className="min-h-[80px] rounded-xl border-border/70"
-            />
-          </div>
-          <div className="space-y-2">
-            <label htmlFor="kb-status" className="text-sm font-medium text-foreground">
-              {t('platformShell.common.status')}
-            </label>
-            <Input
-              id="kb-status"
-              value={status}
-              onChange={(event) => setStatus(event.target.value)}
-              placeholder={t('platformShell.workspaceDirectory.statusPlaceholder')}
-              disabled={submitting}
-              className="h-10 rounded-xl border-border/70"
-            />
-          </div>
+        <div className="space-y-2">
+          <label htmlFor="kb-description" className="text-sm font-medium text-foreground">
+            {t('platformShell.workspaceDirectory.descriptionLabel')}
+          </label>
+          <Textarea
+            id="kb-description"
+            value={description}
+            onChange={(event) => setDescription(event.target.value)}
+            placeholder={t('platformShell.workspaceDirectory.descriptionPlaceholder')}
+            disabled={submitting}
+            rows={3}
+            className="rounded-xl border-border/70"
+          />
         </div>
 
         <div className="space-y-2">
@@ -244,20 +205,6 @@ function KnowledgeBaseFormDialogContent({
                 '用于在工作区知识库列表按组展示；输入已有分类可复用，新分类会自动加入候选。',
             })}
           </p>
-        </div>
-
-        <div className="space-y-2">
-          <label htmlFor="kb-config-override" className="text-sm font-medium text-foreground">
-            {t('platformShell.workspaceDirectory.configOverride')}
-          </label>
-          <Textarea
-            id="kb-config-override"
-            value={configOverrideText}
-            onChange={(event) => setConfigOverrideText(event.target.value)}
-            spellCheck={false}
-            disabled={submitting}
-            className="min-h-[120px] rounded-xl border-border/70 font-mono text-xs leading-6"
-          />
         </div>
 
         <DialogFooter className="gap-2 sm:gap-2">
@@ -508,11 +455,13 @@ export default function WorkspaceListPage() {
         const response = await createKnowledgeBase(currentWorkspaceId, payload)
         toast.success(response.message)
       } else if (selectedKnowledgeBase) {
+        // status + config_override are intentionally omitted — the
+        // simplified dialog doesn't expose them, so the PATCH body
+        // only carries the fields the user actually edited. Backend
+        // treats missing fields as "no change".
         const response = await updateKnowledgeBase(currentWorkspaceId, selectedKnowledgeBase.id, {
           name: payload.name,
           description: payload.description,
-          status: payload.status,
-          config_override: payload.config_override,
           // Forward as-is; "" (blank) clears the tag back to uncategorised,
           // any other string sets/renames it.
           category: payload.category,
