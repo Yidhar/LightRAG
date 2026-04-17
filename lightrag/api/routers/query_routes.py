@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from lightrag.base import QueryParam
 from lightrag.api.dependencies import get_current_rag
+from lightrag.api.federation import federated_aquery_llm
 from lightrag.api.permissions import Action, require_permission
 from lightrag.utils import logger
 from pydantic import BaseModel, Field, field_validator
@@ -334,6 +335,7 @@ def create_query_routes(
     )
     async def query_text(
         request: QueryRequest,
+        http_request: Request,
         active_rag: Any = Depends(resolve_route_rag),
     ):
         """
@@ -421,8 +423,13 @@ def create_query_routes(
             # Force stream=False for /query endpoint regardless of include_references setting
             param.stream = False
 
-            # Unified approach: always use aquery_llm for both cases
-            result = await active_rag.aquery_llm(request.query, param=param)
+            # Phase D: federate when the caller targeted the default KB but
+            # the workspace actually owns multiple KBs. Falls back to the
+            # single-rag path for single-KB workspaces and when isolation
+            # is off.
+            result = await federated_aquery_llm(http_request, request.query, param)
+            if result is None:
+                result = await active_rag.aquery_llm(request.query, param=param)
 
             # Extract LLM response and references from unified result
             llm_response = result.get("llm_response", {})
