@@ -26,11 +26,17 @@ class KnowledgeBaseResponse(BaseModel):
     created_at: str
     config_override: dict[str, Any]
     status: str
+    category: str = ""
 
 
 class KnowledgeBaseListResponse(BaseModel):
     items: list[KnowledgeBaseResponse]
     total_count: int
+
+
+class KnowledgeBaseCategoriesResponse(BaseModel):
+    workspace_id: str
+    categories: list[str]
 
 
 class KnowledgeBaseCreateRequest(BaseModel):
@@ -39,6 +45,7 @@ class KnowledgeBaseCreateRequest(BaseModel):
     description: str = ""
     config_override: dict[str, Any] = Field(default_factory=dict)
     status: str = "active"
+    category: str = ""
 
 
 class KnowledgeBaseUpdateRequest(BaseModel):
@@ -46,6 +53,9 @@ class KnowledgeBaseUpdateRequest(BaseModel):
     description: str | None = None
     config_override: dict[str, Any] | None = None
     status: str | None = Field(default=None, min_length=1)
+    # None = leave unchanged, "" = clear back to "uncategorised",
+    # any other string = set / rename the tag.
+    category: str | None = None
 
     @model_validator(mode="after")
     def validate_has_updates(self):
@@ -54,6 +64,7 @@ class KnowledgeBaseUpdateRequest(BaseModel):
             and self.description is None
             and self.config_override is None
             and self.status is None
+            and self.category is None
         ):
             raise ValueError("Provide at least one field to update.")
         return self
@@ -81,6 +92,7 @@ def _to_response(kb: KnowledgeBase) -> KnowledgeBaseResponse:
         created_at=kb.created_at,
         config_override=dict(kb.config_override),
         status=kb.status,
+        category=kb.category,
     )
 
 
@@ -152,6 +164,23 @@ def create_kb_routes(api_key: Optional[str] = None) -> APIRouter:
             total_count=len(response_items),
         )
 
+    @router.get(
+        "/workspaces/{workspace_id}/kb/categories",
+        response_model=KnowledgeBaseCategoriesResponse,
+        dependencies=[Depends(workspace_view_permission)],
+    )
+    async def list_knowledge_base_categories(
+        request: Request,
+        workspace_id: str,
+    ) -> KnowledgeBaseCategoriesResponse:
+        registry = _require_kb_registry(request)
+        context = get_request_context(request)
+        resolved_workspace_id = context.workspace_id or workspace_id
+        return KnowledgeBaseCategoriesResponse(
+            workspace_id=resolved_workspace_id,
+            categories=registry.list_categories(resolved_workspace_id),
+        )
+
     @router.post(
         "/workspaces/{workspace_id}/kb",
         response_model=KnowledgeBaseMutationResponse,
@@ -173,6 +202,7 @@ def create_kb_routes(api_key: Optional[str] = None) -> APIRouter:
                 description=payload.description,
                 config_override=payload.config_override,
                 status=payload.status,
+                category=payload.category,
             )
         except ValueError as exc:
             detail = str(exc)
@@ -245,6 +275,7 @@ def create_kb_routes(api_key: Optional[str] = None) -> APIRouter:
                 description=payload.description,
                 config_override=payload.config_override,
                 status=payload.status,
+                category=payload.category,
             )
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

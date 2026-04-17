@@ -464,11 +464,17 @@ export type KnowledgeBaseRecord = {
   created_at: string
   config_override: Record<string, any>
   status: string
+  category: string
 }
 
 export type KnowledgeBaseListResponse = {
   items: KnowledgeBaseRecord[]
   total_count: number
+}
+
+export type KnowledgeBaseCategoriesResponse = {
+  workspace_id: string
+  categories: string[]
 }
 
 export type KnowledgeBaseCreateRequest = {
@@ -477,6 +483,7 @@ export type KnowledgeBaseCreateRequest = {
   description?: string
   config_override?: Record<string, any>
   status?: string
+  category?: string
 }
 
 export type KnowledgeBaseUpdateRequest = {
@@ -484,6 +491,8 @@ export type KnowledgeBaseUpdateRequest = {
   description?: string
   config_override?: Record<string, any>
   status?: string
+  // Omit = unchanged. "" = clear back to uncategorised. Any other value = set/rename.
+  category?: string
 }
 
 export type KnowledgeBaseMutationResponse = {
@@ -853,6 +862,15 @@ export const listKnowledgeBases = async (
   workspaceId: string
 ): Promise<KnowledgeBaseListResponse> => {
   const response = await axiosInstance.get(`/workspaces/${encodeURIComponent(workspaceId)}/kb`)
+  return response.data
+}
+
+export const listKnowledgeBaseCategories = async (
+  workspaceId: string
+): Promise<KnowledgeBaseCategoriesResponse> => {
+  const response = await axiosInstance.get(
+    `/workspaces/${encodeURIComponent(workspaceId)}/kb/categories`
+  )
   return response.data
 }
 

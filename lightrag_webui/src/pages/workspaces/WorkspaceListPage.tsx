@@ -67,6 +67,7 @@ interface KnowledgeBaseFormDialogProps {
   mode: 'create' | 'edit'
   knowledgeBase: KnowledgeBaseRecord | null
   submitting: boolean
+  categorySuggestions: string[]
   onOpenChange: (open: boolean) => void
   onSubmit: (payload: KnowledgeBaseCreateRequest) => Promise<void>
 }
@@ -75,12 +76,14 @@ function KnowledgeBaseFormDialogContent({
   mode,
   knowledgeBase,
   submitting,
+  categorySuggestions,
   onSubmit,
   onCancel,
 }: {
   mode: 'create' | 'edit'
   knowledgeBase: KnowledgeBaseRecord | null
   submitting: boolean
+  categorySuggestions: string[]
   onSubmit: (payload: KnowledgeBaseCreateRequest) => Promise<void>
   onCancel: () => void
 }) {
@@ -92,6 +95,9 @@ function KnowledgeBaseFormDialogContent({
   )
   const [status, setStatus] = useState(
     mode === 'edit' ? knowledgeBase?.status || 'active' : 'active'
+  )
+  const [category, setCategory] = useState(
+    mode === 'edit' ? knowledgeBase?.category || '' : ''
   )
   const [configOverrideText, setConfigOverrideText] = useState(
     mode === 'edit'
@@ -127,6 +133,9 @@ function KnowledgeBaseFormDialogContent({
       description: description.trim(),
       status: status.trim() || 'active',
       config_override: configOverride,
+      // Send trimmed category; backend treats "" as "uncategorised" which
+      // is exactly what we want when the user leaves the field blank.
+      category: category.trim(),
     })
   }
 
@@ -205,6 +214,39 @@ function KnowledgeBaseFormDialogContent({
         </div>
 
         <div className="space-y-2">
+          <label htmlFor="kb-category" className="text-sm font-medium text-foreground">
+            {t('platformShell.workspaceDirectory.categoryLabel', {
+              defaultValue: '分类',
+            })}
+          </label>
+          <Input
+            id="kb-category"
+            list="kb-category-suggestions"
+            value={category}
+            onChange={(event) => setCategory(event.target.value)}
+            placeholder={t('platformShell.workspaceDirectory.categoryPlaceholder', {
+              defaultValue: '例如：研究、行业、客户… 留空表示未分类',
+            })}
+            disabled={submitting}
+            className="h-10 rounded-xl border-border/70"
+            autoComplete="off"
+          />
+          {categorySuggestions.length > 0 && (
+            <datalist id="kb-category-suggestions">
+              {categorySuggestions.map((tag) => (
+                <option key={tag} value={tag} />
+              ))}
+            </datalist>
+          )}
+          <p className="text-xs text-muted-foreground">
+            {t('platformShell.workspaceDirectory.categoryHint', {
+              defaultValue:
+                '用于在工作区知识库列表按组展示；输入已有分类可复用，新分类会自动加入候选。',
+            })}
+          </p>
+        </div>
+
+        <div className="space-y-2">
           <label htmlFor="kb-config-override" className="text-sm font-medium text-foreground">
             {t('platformShell.workspaceDirectory.configOverride')}
           </label>
@@ -240,6 +282,7 @@ function KnowledgeBaseFormDialog({
   mode,
   knowledgeBase,
   submitting,
+  categorySuggestions,
   onOpenChange,
   onSubmit,
 }: KnowledgeBaseFormDialogProps) {
@@ -252,6 +295,7 @@ function KnowledgeBaseFormDialog({
           mode={mode}
           knowledgeBase={knowledgeBase}
           submitting={submitting}
+          categorySuggestions={categorySuggestions}
           onSubmit={onSubmit}
           onCancel={() => onOpenChange(false)}
         />
@@ -298,6 +342,7 @@ export default function WorkspaceListPage() {
   const canManageKnowledgeBases = hasPermission(effectiveRole, 'workspace:update')
 
   // Knowledge bases for the current workspace.
+  const UNCATEGORIZED_KEY = '__uncategorized__'
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseRecord[]>([])
   const [kbLoading, setKbLoading] = useState(true)
   const [kbError, setKbError] = useState<string | null>(null)
@@ -342,6 +387,45 @@ export default function WorkspaceListPage() {
   useEffect(() => {
     void loadKnowledgeBases()
   }, [loadKnowledgeBases])
+
+  // Derived category buckets. We group in-memory off whatever the registry
+  // returned rather than hitting /categories separately — that endpoint is
+  // still useful elsewhere but here we already have every KB loaded.
+  const categorySuggestions = useMemo(() => {
+    const seen = new Set<string>()
+    for (const kb of knowledgeBases) {
+      const tag = (kb.category || '').trim()
+      if (tag) seen.add(tag)
+    }
+    return Array.from(seen).sort((a, b) =>
+      a.localeCompare(b, undefined, { sensitivity: 'base' })
+    )
+  }, [knowledgeBases])
+
+  const knowledgeBaseGroups = useMemo(() => {
+    const buckets = new Map<string, KnowledgeBaseRecord[]>()
+    for (const kb of knowledgeBases) {
+      const tag = (kb.category || '').trim()
+      const key = tag || UNCATEGORIZED_KEY
+      const existing = buckets.get(key)
+      if (existing) {
+        existing.push(kb)
+      } else {
+        buckets.set(key, [kb])
+      }
+    }
+
+    // Sort named categories case-insensitively, push the "uncategorized"
+    // bucket to the end so uncategorised KBs never obscure the grouping.
+    const named = Array.from(buckets.entries())
+      .filter(([key]) => key !== UNCATEGORIZED_KEY)
+      .sort(([a], [b]) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+    const uncategorized = buckets.get(UNCATEGORIZED_KEY)
+    if (uncategorized && uncategorized.length > 0) {
+      named.push([UNCATEGORIZED_KEY, uncategorized])
+    }
+    return named
+  }, [knowledgeBases])
 
   // ---------- workspace handlers ----------
 
@@ -429,6 +513,9 @@ export default function WorkspaceListPage() {
           description: payload.description,
           status: payload.status,
           config_override: payload.config_override,
+          // Forward as-is; "" (blank) clears the tag back to uncategorised,
+          // any other string sets/renames it.
+          category: payload.category,
         })
         toast.success(response.message)
       }
@@ -615,17 +702,48 @@ export default function WorkspaceListPage() {
                 {t('platformShell.workspaceDirectory.empty')}
               </div>
             ) : (
-              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                {knowledgeBases.map((kb) => (
-                  <KnowledgeBaseCard
-                    key={kb.id}
-                    kb={kb}
-                    canManage={canManageKnowledgeBases}
-                    onOpen={appRoutes.kbDocuments(kb.workspace_id, kb.id)}
-                    onEdit={() => openKbEditDialog(kb)}
-                    onDelete={() => setKbDeleteTarget(kb)}
-                  />
-                ))}
+              <div className="space-y-5">
+                {knowledgeBaseGroups.map(([groupKey, items]) => {
+                  const isUncategorized = groupKey === UNCATEGORIZED_KEY
+                  const label = isUncategorized
+                    ? t('platformShell.workspaceDirectory.uncategorized', {
+                        defaultValue: '未分类',
+                      })
+                    : groupKey
+                  return (
+                    <div key={groupKey} className="space-y-3">
+                      <div className="flex items-center gap-2">
+                        <h3
+                          className={`text-xs font-semibold uppercase tracking-[0.14em] ${
+                            isUncategorized
+                              ? 'text-muted-foreground/70'
+                              : 'text-foreground'
+                          }`}
+                        >
+                          {label}
+                        </h3>
+                        <Badge
+                          variant="outline"
+                          className="rounded-full px-2 py-0.5 text-[10px]"
+                        >
+                          {items.length}
+                        </Badge>
+                      </div>
+                      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                        {items.map((kb) => (
+                          <KnowledgeBaseCard
+                            key={kb.id}
+                            kb={kb}
+                            canManage={canManageKnowledgeBases}
+                            onOpen={appRoutes.kbDocuments(kb.workspace_id, kb.id)}
+                            onEdit={() => openKbEditDialog(kb)}
+                            onDelete={() => setKbDeleteTarget(kb)}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
             )}
           </section>
@@ -640,6 +758,7 @@ export default function WorkspaceListPage() {
         mode={kbDialogMode}
         knowledgeBase={selectedKnowledgeBase}
         submitting={kbSubmitting}
+        categorySuggestions={categorySuggestions}
         onOpenChange={setKbDialogOpen}
         onSubmit={handleKnowledgeBaseSubmit}
       />

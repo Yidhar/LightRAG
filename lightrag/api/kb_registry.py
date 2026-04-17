@@ -92,6 +92,7 @@ class KnowledgeBaseRegistry:
         description: str = "",
         config_override: dict[str, Any] | None = None,
         status: str = "active",
+        category: str = "",
     ) -> KnowledgeBase:
         workspace_key = _sanitize_identifier(workspace_id, label="workspace_id")
         resolved_kb_id = _sanitize_identifier(
@@ -106,6 +107,7 @@ class KnowledgeBaseRegistry:
             description=description,
             config_override=config_override or {},
             status=status,
+            category=category,
         )
 
         with self._lock:
@@ -166,6 +168,20 @@ class KnowledgeBaseRegistry:
             self._write_state_unlocked(state)
         return True
 
+    def list_categories(self, workspace_id: str) -> list[str]:
+        """
+        Return distinct category tags used by KBs in this workspace,
+        sorted case-insensitively. Empty strings (uncategorised KBs) are
+        excluded — the UI handles the "Uncategorised" bucket separately
+        so the dropdown can stay clean.
+        """
+        seen: set[str] = set()
+        for kb in self.list_kbs(workspace_id):
+            tag = (kb.category or "").strip()
+            if tag:
+                seen.add(tag)
+        return sorted(seen, key=lambda v: v.lower())
+
     def update_kb(
         self,
         workspace_id: str,
@@ -175,6 +191,7 @@ class KnowledgeBaseRegistry:
         description: str | None = None,
         config_override: dict[str, Any] | None = None,
         status: str | None = None,
+        category: str | None = None,
     ) -> KnowledgeBase | None:
         workspace_key = _sanitize_identifier(workspace_id, label="workspace_id")
         kb_key = _sanitize_identifier(kb_id, label="kb_id")
@@ -207,6 +224,10 @@ class KnowledgeBaseRegistry:
                 if not normalized_status:
                     raise ValueError("Knowledge base status must not be empty.")
                 kb_record.status = normalized_status
+            if category is not None:
+                # Empty string explicitly clears the tag back to
+                # "uncategorised"; None means "leave whatever was stored".
+                kb_record.category = str(category).strip()
 
             state.setdefault("workspaces", {}).setdefault(
                 workspace_key,
