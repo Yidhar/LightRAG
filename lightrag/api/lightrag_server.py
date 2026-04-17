@@ -28,7 +28,12 @@ from lightrag.api.utils_api import (
     display_splash_screen,
     check_env_file,
 )
-from lightrag.api.dependencies import get_request_context, install_platform_state
+from lightrag.api.dependencies import (
+    get_request_context,
+    install_platform_state,
+    resolve_kb_id,
+    resolve_workspace_id,
+)
 from lightrag.api.kb_registry import KnowledgeBaseRegistry
 from lightrag.api.rag_factory import RagFactory
 from .config import (
@@ -525,11 +530,19 @@ def create_app(args):
 
     @app.middleware("http")
     async def attach_request_context(request: Request, call_next):
+        # Initialise the auth fields. We MUST NOT build the full
+        # RequestContext here: it would cache with db_user_id=None, and
+        # the subsequent ``combined_auth`` dep that populates
+        # request.state.db_user_id would be ignored by later
+        # ``get_request_context(request)`` calls (the cache wins).
+        # Leave context construction to the first consumer after auth.
         request.state.db_user_id = None
         request.state.token_info = None
-        request_context = get_request_context(request)
-        request.state.workspace_id = request_context.workspace_id
-        request.state.kb_id = request_context.kb_id
+        # Pre-resolve the workspace / kb ids purely for downstream
+        # observability hooks that read request.state directly; this
+        # does not build or cache a RequestContext.
+        request.state.workspace_id = resolve_workspace_id(request)
+        request.state.kb_id = resolve_kb_id(request)
         response = await call_next(request)
         return response
 
