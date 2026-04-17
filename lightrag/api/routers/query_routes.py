@@ -7,7 +7,11 @@ from typing import Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from lightrag.base import QueryParam
 from lightrag.api.dependencies import get_current_rag
-from lightrag.api.federation import federated_aquery_llm
+from lightrag.api.federation import (
+    federated_aquery_data,
+    federated_aquery_llm,
+    federated_stream,
+)
 from lightrag.api.permissions import Action, require_permission
 from lightrag.utils import logger
 from pydantic import BaseModel, Field, field_validator
@@ -554,6 +558,7 @@ def create_query_routes(
     )
     async def query_text_stream(
         request: QueryRequest,
+        http_request: Request,
         active_rag: Any = Depends(resolve_route_rag),
     ):
         """
@@ -688,6 +693,29 @@ def create_query_routes(
             param = request.to_query_params(stream_mode)
 
             from fastapi.responses import StreamingResponse
+
+            # Phase D-stream: serial per-KB streaming when the workspace
+            # owns multiple KBs and the caller targeted the default KB.
+            # Returns None if federation does not apply, in which case we
+            # stay on the single-rag path.
+            federated_iter = await federated_stream(
+                http_request,
+                request.query,
+                param,
+                include_references=bool(request.include_references),
+                include_chunk_content=bool(request.include_chunk_content),
+            )
+            if federated_iter is not None:
+                return StreamingResponse(
+                    federated_iter,
+                    media_type="application/x-ndjson",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "Content-Type": "application/x-ndjson",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
 
             # Unified approach: always use aquery_llm for all cases
             result = await active_rag.aquery_llm(request.query, param=param)
@@ -1060,6 +1088,7 @@ def create_query_routes(
     )
     async def query_data(
         request: QueryRequest,
+        http_request: Request,
         active_rag: Any = Depends(resolve_route_rag),
     ):
         """
@@ -1166,7 +1195,15 @@ def create_query_routes(
         """
         try:
             param = request.to_query_params(False)  # No streaming for data endpoint
-            response = await active_rag.aquery_data(request.query, param=param)
+
+            # Phase D-data: fan out across every KB when the workspace
+            # owns more than one, merging entities / relationships /
+            # chunks / references into the single-rag response shape.
+            response = await federated_aquery_data(
+                http_request, request.query, param
+            )
+            if response is None:
+                response = await active_rag.aquery_data(request.query, param=param)
 
             # aquery_data returns the new format with status, message, data, and metadata
             if isinstance(response, dict):
