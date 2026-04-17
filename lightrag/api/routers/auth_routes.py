@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, Field
 
+from lightrag.api.audit import emit_audit_event
 from lightrag.api.auth import auth_handler
 from lightrag.api.auth_provider import get_auth_provider
 from uuid import uuid4 as _auth_uuid4
@@ -393,6 +394,20 @@ def create_auth_routes() -> APIRouter:
                 "bootstrap": True,
             },
         )
+        await emit_audit_event(
+            request,
+            action="user:bootstrap",
+            resource_type="user",
+            resource_id=user.user_id,
+            outcome="success",
+            status_code=status.HTTP_200_OK,
+            actor_user_id=user.user_id,
+            actor_username=user.username,
+            actor_role="owner",
+            metadata={
+                "default_workspace_id": default_workspace_id,
+            },
+        )
         return {**tokens, "auth_mode": "local", "bootstrap": True}
 
     @router.post(
@@ -497,6 +512,21 @@ def create_auth_routes() -> APIRouter:
                 "personal_workspace_id": personal_workspace_id,
             },
         )
+        await emit_audit_event(
+            request,
+            action="user:register",
+            resource_type="user",
+            resource_id=user.user_id,
+            outcome="success",
+            status_code=status.HTTP_200_OK,
+            actor_user_id=user.user_id,
+            actor_username=user.username,
+            actor_role="owner",
+            metadata={
+                "personal_workspace_id": personal_workspace_id,
+                "self_registered": True,
+            },
+        )
         return {
             **tokens,
             "auth_mode": "local",
@@ -536,6 +566,17 @@ def create_auth_routes() -> APIRouter:
             await revoke_refresh_token(raw_refresh_token)
         result = await get_auth_provider(request).logout(request, token_info=token_info)
         clear_refresh_token_cookie(response, request)
+        await emit_audit_event(
+            request,
+            action="user:logout",
+            resource_type="user",
+            resource_id=token_info.get("user_id"),
+            outcome="success",
+            status_code=status.HTTP_200_OK,
+            actor_user_id=token_info.get("user_id"),
+            actor_username=token_info.get("username"),
+            actor_role=token_info.get("role"),
+        )
         return AuthMessageResponse(
             status=result.get("status", "success"),
             message=result.get("message"),

@@ -28,6 +28,7 @@ from fastapi.params import Depends as DependsParameter
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from lightrag import LightRAG
+from lightrag.api.audit import emit_audit_event
 from lightrag.api.dependencies import (
     compose_runtime_workspace,
     get_current_rag,
@@ -5108,6 +5109,7 @@ def create_document_routes(
     async def delete_document(
         delete_request: DeleteDocRequest,
         background_tasks: BackgroundTasks,
+        request: Request,
         active_rag: LightRAG = Depends(resolve_route_rag),
         active_doc_manager: DocumentManager = Depends(resolve_route_doc_manager),
     ) -> DeleteDocByIdResponse:
@@ -5170,6 +5172,23 @@ def create_document_routes(
                 delete_request.delete_llm_cache,
             )
 
+            await emit_audit_event(
+                request,
+                action="doc:delete",
+                resource_type="document",
+                # Join so a single log entry lists every doc touched — we
+                # intentionally avoid one-row-per-doc so the audit table
+                # does not drown on large bulk deletes.
+                resource_id=", ".join(doc_ids)[:256],
+                outcome="success",
+                status_code=200,
+                metadata={
+                    "doc_count": len(doc_ids),
+                    "delete_file": bool(delete_request.delete_file),
+                    "delete_llm_cache": bool(delete_request.delete_llm_cache),
+                },
+            )
+
             return DeleteDocByIdResponse(
                 status="deletion_started",
                 message=f"Document deletion for {len(doc_ids)} documents has been initiated. Processing will continue in background.",
@@ -5209,6 +5228,7 @@ def create_document_routes(
     )
     async def cancel_document(
         doc_id: str,
+        request: Request,
         active_rag: LightRAG = Depends(resolve_route_rag),
     ) -> "CancelDocResponse":  # noqa: F821 — forward ref in same function
         """
@@ -5309,6 +5329,18 @@ def create_document_routes(
                     status_code=500,
                     detail=f"Failed to request cancellation for document {doc_id}: {exc}",
                 )
+            await emit_audit_event(
+                request,
+                action="doc:cancel",
+                resource_type="document",
+                resource_id=doc_id,
+                outcome="success",
+                status_code=200,
+                metadata={
+                    "mode": "cancel_requested",
+                    "previous_status": previous_status,
+                },
+            )
             return CancelDocResponse(
                 status="cancel_requested",
                 message=(
@@ -5345,6 +5377,18 @@ def create_document_routes(
                 detail=f"Failed to cancel document {doc_id}: {exc}",
             )
 
+        await emit_audit_event(
+            request,
+            action="doc:cancel",
+            resource_type="document",
+            resource_id=doc_id,
+            outcome="success",
+            status_code=200,
+            metadata={
+                "mode": "cancelled",
+                "previous_status": previous_status,
+            },
+        )
         return CancelDocResponse(
             status="cancelled",
             message=f"Document '{doc_id}' cancelled before processing started.",

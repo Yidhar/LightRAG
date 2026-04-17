@@ -1396,12 +1396,26 @@ def create_app(args):
         response: Response,
         form_data: OAuth2PasswordRequestForm = Depends(),
     ):
+        from lightrag.api.audit import emit_audit_event
+
         principal = await get_auth_provider(request).authenticate_password(
             request,
             form_data.username,
             form_data.password,
         )
         if principal is None:
+            # Record the failed attempt so operators can spot brute-force
+            # patterns. No user_id / role context yet — just the supplied
+            # username, which may be garbage.
+            await emit_audit_event(
+                request,
+                action="user:login",
+                resource_type="user",
+                outcome="denied",
+                status_code=401,
+                actor_username=str(form_data.username)[:128] or None,
+                metadata={"reason": "invalid_credentials"},
+            )
             raise HTTPException(status_code=401, detail="Incorrect credentials")
 
         login_tokens = await issue_login_tokens(
@@ -1412,6 +1426,21 @@ def create_app(args):
             role=principal.role,
             memberships=principal.memberships,
             metadata=principal.metadata,
+        )
+        await emit_audit_event(
+            request,
+            action="user:login",
+            resource_type="user",
+            resource_id=principal.user_id,
+            outcome="success",
+            status_code=200,
+            actor_user_id=principal.user_id,
+            actor_username=principal.username,
+            actor_role=principal.role,
+            metadata={
+                "auth_provider": (principal.metadata or {}).get("auth_provider"),
+                "account_source": (principal.metadata or {}).get("account_source"),
+            },
         )
         return {
             **login_tokens,
