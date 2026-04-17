@@ -6,8 +6,14 @@ import { BookOpenTextIcon, PlusIcon } from 'lucide-react'
 import { listKnowledgeBases, type KnowledgeBaseRecord } from '@/api/lightrag'
 import { useKBStore } from '@/stores/kb'
 import { defaultKnowledgeBaseId } from '@/app/routes'
-import { cn } from '@/lib/utils'
 import Button from '@/components/ui/Button'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/Select'
 
 // Query-string key used to persist the active KB selection across reloads.
 // Keeping the key short so shared URLs read cleanly.
@@ -21,13 +27,14 @@ interface KBTabsProps {
 }
 
 /**
- * Horizontal tab picker for KBs inside a workspace (Phase C).
+ * KB picker: dropdown Select (previously a horizontal pills row).
  *
- * Writes the selected KB id to ``useKBStore.activeKbId`` so the axios
- * request interceptor injects ``X-KB-Id`` on every following API call.
- * Parents that render DocumentManager (or other KB-scoped features)
- * should key the child on the returned id so a switch triggers a
- * refetch.
+ * The component is still named ``KBTabs`` because every page imports
+ * it under that name and the behavior contract — writing the picked
+ * id to ``useKBStore.activeKbId`` so the axios interceptor injects
+ * ``X-KB-Id`` — is unchanged. Switched from pills to a Select so
+ * workspaces with many KBs stay scannable, and to match the user's
+ * request: "直接提供下拉表单来选取配置的知识库".
  */
 export default function KBTabs({ workspaceId, onChange, onCreate }: KBTabsProps) {
   const { t } = useTranslation()
@@ -39,7 +46,7 @@ export default function KBTabs({ workspaceId, onChange, onCreate }: KBTabsProps)
   const setActiveKb = useKBStore((s) => s.setActiveKb)
 
   // Writes the active KB into the URL with replaceState so we don't
-  // pollute history with a back-button entry per tab click.
+  // pollute history with a back-button entry per pick.
   const writeKbQuery = useCallback(
     (kbId: string | null) => {
       setSearchParams(
@@ -59,9 +66,9 @@ export default function KBTabs({ workspaceId, onChange, onCreate }: KBTabsProps)
   )
 
   // Seed activeKbId from ``?kb=`` on the first mount of this component.
-  // Runs before the list loads so the correct tab is highlighted as
+  // Runs before the list loads so the correct option is selected as
   // soon as the fetch returns. Intentionally [] — we do not want URL
-  // edits made *after* mount to fight the tab picker.
+  // edits made *after* mount to fight the picker.
   useEffect(() => {
     const fromUrl = searchParams.get(KB_QUERY_KEY)
     if (fromUrl && fromUrl !== activeKbId) {
@@ -97,7 +104,7 @@ export default function KBTabs({ workspaceId, onChange, onCreate }: KBTabsProps)
 
   useEffect(() => {
     void load()
-    // Refresh on cross-component KB mutations (create / delete).
+    // Refresh on cross-component KB mutations (create / rename / delete).
     const handler = () => {
       void load()
     }
@@ -132,14 +139,13 @@ export default function KBTabs({ workspaceId, onChange, onCreate }: KBTabsProps)
   }
 
   return (
-    <div
-      className="flex items-center gap-2 overflow-x-auto border-b border-border/60 bg-muted/10 px-4 py-2 text-sm"
-      role="tablist"
-      aria-label={t('platformShell.documents.kbTabs.label', { defaultValue: '知识库' })}
-    >
-      <span className="shrink-0 text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
+    <div className="flex items-center gap-3 border-b border-border/60 bg-muted/10 px-4 py-2 text-sm">
+      <label
+        htmlFor="kb-picker"
+        className="shrink-0 text-[11px] uppercase tracking-[0.12em] text-muted-foreground"
+      >
         {t('platformShell.documents.kbTabs.label', { defaultValue: '知识库' })}
-      </span>
+      </label>
 
       {loading && knowledgeBases.length === 0 ? (
         <span className="text-xs text-muted-foreground">
@@ -152,30 +158,21 @@ export default function KBTabs({ workspaceId, onChange, onCreate }: KBTabsProps)
           })}
         </span>
       ) : (
-        <div className="flex min-w-0 flex-wrap items-center gap-1">
-          {knowledgeBases.map((kb) => {
-            const isActive = kb.id === activeKbId
-            return (
-              <button
-                key={kb.id}
-                type="button"
-                role="tab"
-                aria-selected={isActive}
-                onClick={() => handlePick(kb.id)}
-                className={cn(
-                  'inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors',
-                  isActive
-                    ? 'border-emerald-500/40 bg-emerald-500/[0.10] text-emerald-700 dark:text-emerald-300'
-                    : 'border-border/60 bg-background/70 text-muted-foreground hover:border-emerald-500/30 hover:text-foreground'
-                )}
-                title={kb.description || kb.name || kb.id}
-              >
-                <BookOpenTextIcon className="size-3.5" aria-hidden="true" />
-                <span className="truncate">{kb.name || kb.id}</span>
-              </button>
-            )
-          })}
-        </div>
+        <Select value={activeKbId} onValueChange={handlePick}>
+          <SelectTrigger id="kb-picker" className="h-8 w-[260px] rounded-lg">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {knowledgeBases.map((kb) => (
+              <SelectItem key={kb.id} value={kb.id}>
+                <div className="flex items-center gap-2">
+                  <BookOpenTextIcon className="size-3.5" aria-hidden="true" />
+                  <span className="truncate">{kb.name || kb.id}</span>
+                </div>
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       )}
 
       {onCreate && (

@@ -1,10 +1,9 @@
 import { type FormEvent, useCallback, useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
-import { ShieldCheckIcon, UsersIcon } from 'lucide-react'
+import { useParams } from 'react-router-dom'
+import { ShieldCheckIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
-import { appRoutes } from '@/app/routes'
 import { resolveWorkspaceId } from '@/app/routeHelpers'
 import { useAuthStore } from '@/stores/state'
 import {
@@ -128,12 +127,6 @@ export default function WorkspaceSettingsPage() {
             {t('platformShell.workspaceSettings.description')}
           </p>
         </div>
-        <Button variant="outline" size="sm" asChild>
-          <Link to={appRoutes.workspaceMembers(currentWorkspaceId)}>
-            <UsersIcon className="size-4" />
-            {t('platformShell.workspaceSettings.openMembers')}
-          </Link>
-        </Button>
       </header>
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border/60 bg-muted/20 px-6 py-2 text-sm">

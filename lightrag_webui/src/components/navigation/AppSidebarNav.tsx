@@ -5,9 +5,7 @@ import {
   FileStackIcon,
   LayoutDashboardIcon,
   NetworkIcon,
-  ScrollTextIcon,
   Settings2Icon,
-  UsersIcon,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
@@ -104,21 +102,11 @@ export default function AppSidebarNav() {
     },
   ]
 
+  // Admin nav intentionally kept narrow. Member management and audit
+  // log are still route-reachable for power users / multi-tenant deploys
+  // (LDAP, shared workspaces, etc.) — they just don't take up sidebar
+  // real estate when the product surface is "personal workspace + KBs".
   const adminItems: NavItem[] = [
-    {
-      key: 'members',
-      label: t('header.members'),
-      to: appRoutes.workspaceMembers(currentWorkspaceId),
-      icon: UsersIcon,
-      requiredPermission: 'workspace:invite_member',
-    },
-    {
-      key: 'audit',
-      label: t('header.audit', { defaultValue: '审计日志' }),
-      to: appRoutes.workspaceAudit(currentWorkspaceId),
-      icon: ScrollTextIcon,
-      requiredPermission: 'audit:view_workspace',
-    },
     {
       key: 'settings',
       label: t('header.workspaceSettings'),
