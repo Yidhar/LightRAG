@@ -4,9 +4,14 @@ import SiteHeader from '@/features/SiteHeader'
 import { resolveCurrentTabFromPath } from '@/app/routeHelpers'
 import { useSettingsStore } from '@/stores/settings'
 import AppSidebarNav from '@/components/navigation/AppSidebarNav'
+import { useSyncKBScope } from '@/hooks/useSyncKBScope'
 
 export default function AppShellLayout() {
   const location = useLocation()
+
+  // Mirror the URL workspace into the KB scope store so the axios
+  // interceptor can inject X-Workspace-Id on root-level API calls.
+  useSyncKBScope()
 
   useEffect(() => {
     const nextTab = resolveCurrentTabFromPath(location.pathname)

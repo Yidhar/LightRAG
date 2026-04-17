@@ -3,9 +3,10 @@ import { Link, useParams } from 'react-router-dom'
 import { FileStackIcon, ShieldCheckIcon, SparklesIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
-import { appRoutes } from '@/app/routes'
+import { appRoutes, defaultKnowledgeBaseId } from '@/app/routes'
 import { resolveKnowledgeBaseId, resolveWorkspaceId } from '@/app/routeHelpers'
 import { useAuthStore } from '@/stores/state'
+import { useKBStore } from '@/stores/kb'
 import {
   hasPermission,
   resolveEffectiveRole,
@@ -15,6 +16,7 @@ import {
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/Alert'
 import Badge from '@/components/ui/Badge'
 import Button from '@/components/ui/Button'
+import KBTabs from '@/components/documents/KBTabs'
 
 const DocumentManager = lazy(() => import('@/features/DocumentManager'))
 
@@ -58,6 +60,7 @@ export default function DocumentsPage() {
 
   const canViewKnowledgeBase = hasPermission(effectiveRole, 'kb:view')
   const capabilitySummary = summarizeRoleCapabilityKeys(effectiveRole)
+  const activeKbId = useKBStore((s) => s.activeKbId) ?? defaultKnowledgeBaseId
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
@@ -119,6 +122,8 @@ export default function DocumentsPage() {
         </div>
       </div>
 
+      {canViewKnowledgeBase && <KBTabs workspaceId={currentWorkspaceId} />}
+
       {!canViewKnowledgeBase && (
         <Alert className="mx-6 mt-4 border-border/70 bg-muted/20">
           <AlertTitle>{t('platformShell.documents.unavailableTitle')}</AlertTitle>
@@ -131,7 +136,10 @@ export default function DocumentsPage() {
       {canViewKnowledgeBase ? (
         <div className="min-h-0 flex-1 overflow-hidden">
           <Suspense fallback={<DocumentsSurfaceLoading />}>
-            <DocumentManager />
+            {/* Key the manager on activeKbId so switching tabs forces a
+                fresh mount (and a fresh fetch with the new X-KB-Id
+                header injected by the axios interceptor). */}
+            <DocumentManager key={activeKbId} />
           </Suspense>
         </div>
       ) : (

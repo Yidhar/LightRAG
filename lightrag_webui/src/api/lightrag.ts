@@ -1,5 +1,6 @@
 import axios, { AxiosError, type AxiosRequestConfig, type AxiosResponse } from 'axios'
 import { backendBaseUrl, popularLabelsDefaultLimit, searchLabelsDefaultLimit } from '@/lib/constants'
+import { useKBStore } from '@/stores/kb'
 import { errorMessage } from '@/lib/utils'
 import { useSettingsStore } from '@/stores/settings'
 import { useAuthStore } from '@/stores/state'
@@ -525,6 +526,24 @@ axiosInstance.interceptors.request.use((config) => {
   if (apiKey) {
     config.headers['X-API-Key'] = apiKey
   }
+
+  // Inject the current workspace / KB scope on root-level endpoints
+  // that can't read the scope from path params. The backend dependency
+  // resolver accepts ``X-Workspace-Id`` and ``X-KB-Id`` as a fallback
+  // when path segments don't supply them.
+  try {
+    const { activeWorkspaceId, activeKbId } = useKBStore.getState()
+    if (activeWorkspaceId && !config.headers['X-Workspace-Id']) {
+      config.headers['X-Workspace-Id'] = activeWorkspaceId
+    }
+    if (activeKbId && !config.headers['X-KB-Id']) {
+      config.headers['X-KB-Id'] = activeKbId
+    }
+  } catch {
+    // Scope headers are best-effort; a failure here must never block
+    // the request.
+  }
+
   return config
 })
 
