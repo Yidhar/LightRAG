@@ -27,6 +27,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, model_validator
 
+from lightrag.api.audit import emit_audit_event
 from lightrag.api.config import sanitize_platform_identifier
 from lightrag.api.dependencies import get_request_context
 from lightrag.api.identity_store import (
@@ -216,6 +217,19 @@ def create_workspace_routes(api_key: Optional[str] = None) -> APIRouter:
             source="workspace_create",
         )
 
+        await emit_audit_event(
+            request,
+            action="workspace:create",
+            resource_type="workspace",
+            resource_id=workspace_id,
+            outcome="success",
+            status_code=status.HTTP_201_CREATED,
+            metadata={
+                "name": record.name,
+                "description": record.description,
+            },
+        )
+
         return _to_response(record)
 
     @router.get(
@@ -257,6 +271,18 @@ def create_workspace_routes(api_key: Optional[str] = None) -> APIRouter:
                 status_code=404,
                 detail=f"Workspace '{workspace_id}' not found",
             )
+        await emit_audit_event(
+            request,
+            action="workspace:update",
+            resource_type="workspace",
+            resource_id=workspace_id,
+            outcome="success",
+            status_code=status.HTTP_200_OK,
+            metadata={
+                "name": payload.name,
+                "description": payload.description,
+            },
+        )
         return _to_response(record)
 
     @router.delete(
@@ -290,6 +316,15 @@ def create_workspace_routes(api_key: Optional[str] = None) -> APIRouter:
                 status_code=404,
                 detail=f"Workspace '{workspace_id}' not found",
             )
+
+        await emit_audit_event(
+            request,
+            action="workspace:delete",
+            resource_type="workspace",
+            resource_id=workspace_id,
+            outcome="success",
+            status_code=status.HTTP_200_OK,
+        )
 
         return WorkspaceDeleteResponse(
             status="deleted",

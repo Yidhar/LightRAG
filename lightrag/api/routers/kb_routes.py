@@ -9,6 +9,7 @@ from typing import Any, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, model_validator
 
+from lightrag.api.audit import emit_audit_event
 from lightrag.api.dependencies import compose_runtime_workspace, get_request_context
 from lightrag.api.kb_registry import KnowledgeBaseRegistry
 from lightrag.api.models.kb import KnowledgeBase
@@ -182,6 +183,20 @@ def create_kb_routes(api_key: Optional[str] = None) -> APIRouter:
             )
             raise HTTPException(status_code=status_code, detail=detail) from exc
 
+        await emit_audit_event(
+            request,
+            action="workspace:update",
+            resource_type="kb",
+            resource_id=kb.id,
+            outcome="success",
+            status_code=status.HTTP_201_CREATED,
+            metadata={
+                "operation": "create",
+                "workspace_id": kb.workspace_id,
+                "name": kb.name,
+            },
+        )
+
         return KnowledgeBaseMutationResponse(
             status="created",
             message=f"Knowledge base '{kb.id}' created in workspace '{kb.workspace_id}'.",
@@ -242,6 +257,21 @@ def create_kb_routes(api_key: Optional[str] = None) -> APIRouter:
             kb_id=resolved_kb_id,
         )
 
+        await emit_audit_event(
+            request,
+            action="kb:manage_settings",
+            resource_type="kb",
+            resource_id=resolved_kb_id,
+            outcome="success",
+            status_code=status.HTTP_200_OK,
+            metadata={
+                "operation": "update",
+                "workspace_id": resolved_workspace_id,
+                "name": payload.name,
+                "status_field": payload.status,
+            },
+        )
+
         return KnowledgeBaseMutationResponse(
             status="updated",
             message=f"Knowledge base '{resolved_kb_id}' updated.",
@@ -289,6 +319,19 @@ def create_kb_routes(api_key: Optional[str] = None) -> APIRouter:
             request,
             workspace_id=resolved_workspace_id,
             kb_id=resolved_kb_id,
+        )
+
+        await emit_audit_event(
+            request,
+            action="workspace:update",
+            resource_type="kb",
+            resource_id=resolved_kb_id,
+            outcome="success",
+            status_code=status.HTTP_200_OK,
+            metadata={
+                "operation": "delete",
+                "workspace_id": resolved_workspace_id,
+            },
         )
 
         return KnowledgeBaseDeleteResponse(

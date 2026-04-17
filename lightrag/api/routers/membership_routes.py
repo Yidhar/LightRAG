@@ -9,6 +9,7 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
+from lightrag.api.audit import emit_audit_event
 from lightrag.api.dependencies import get_request_context
 from lightrag.api.identity_store import (
     MembershipRecord,
@@ -164,6 +165,18 @@ def create_membership_routes(api_key: Optional[str] = None) -> APIRouter:
             payload.role,
         )
         status_value = "created" if result.created else "updated"
+        await emit_audit_event(
+            request,
+            action="workspace:invite_member",
+            resource_type="workspace_membership",
+            resource_id=target_user.user_id,
+            outcome="success",
+            metadata={
+                "target_username": target_user.username,
+                "role": payload.role,
+                "membership_status": status_value,
+            },
+        )
         return MembershipMutationResponse(
             status=status_value,
             message=(
@@ -194,6 +207,18 @@ def create_membership_routes(api_key: Optional[str] = None) -> APIRouter:
             payload.role,
         )
         status_value = "created" if result.created else "updated"
+        await emit_audit_event(
+            request,
+            action="workspace:update",
+            resource_type="workspace_membership",
+            resource_id=target_user.user_id,
+            outcome="success",
+            metadata={
+                "target_username": target_user.username,
+                "role": payload.role,
+                "membership_status": status_value,
+            },
+        )
         return MembershipMutationResponse(
             status=status_value,
             message=(
@@ -221,6 +246,17 @@ def create_membership_routes(api_key: Optional[str] = None) -> APIRouter:
         if membership is None:
             raise HTTPException(status_code=404, detail="Workspace membership not found")
         await delete_workspace_membership(user_id, context.workspace_id or workspace_id)
+        await emit_audit_event(
+            request,
+            action="workspace:invite_member",
+            resource_type="workspace_membership",
+            resource_id=user_id,
+            outcome="success",
+            metadata={
+                "target_username": membership.username,
+                "operation": "remove",
+            },
+        )
         return MembershipDeleteResponse(
             status="deleted",
             message=f"Removed workspace membership for user '{membership.username}'.",
@@ -283,6 +319,19 @@ def create_membership_routes(api_key: Optional[str] = None) -> APIRouter:
             payload.role,
         )
         status_value = "created" if result.created else "updated"
+        await emit_audit_event(
+            request,
+            action="kb:manage_permissions",
+            resource_type="kb_membership",
+            resource_id=target_user.user_id,
+            outcome="success",
+            metadata={
+                "target_username": target_user.username,
+                "role": payload.role,
+                "membership_status": status_value,
+                "operation": "upsert",
+            },
+        )
         return MembershipMutationResponse(
             status=status_value,
             message=f"KB membership {status_value} for user '{target_user.username}'.",
@@ -324,6 +373,19 @@ def create_membership_routes(api_key: Optional[str] = None) -> APIRouter:
             payload.role,
         )
         status_value = "created" if result.created else "updated"
+        await emit_audit_event(
+            request,
+            action="kb:manage_permissions",
+            resource_type="kb_membership",
+            resource_id=target_user.user_id,
+            outcome="success",
+            metadata={
+                "target_username": target_user.username,
+                "role": payload.role,
+                "membership_status": status_value,
+                "operation": "update",
+            },
+        )
         return MembershipMutationResponse(
             status=status_value,
             message=f"KB membership {status_value} for user '{target_user.username}'.",
@@ -354,6 +416,17 @@ def create_membership_routes(api_key: Optional[str] = None) -> APIRouter:
             user_id,
             context.workspace_id or workspace_id,
             context.kb_id or kb_id,
+        )
+        await emit_audit_event(
+            request,
+            action="kb:manage_permissions",
+            resource_type="kb_membership",
+            resource_id=user_id,
+            outcome="success",
+            metadata={
+                "target_username": membership.username,
+                "operation": "remove",
+            },
         )
         return MembershipDeleteResponse(
             status="deleted",
