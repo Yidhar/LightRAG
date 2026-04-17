@@ -185,8 +185,12 @@ function SidebarSection({
 
 function SidebarItem({ item }: { item: NavItem }) {
   const Icon = item.icon
+  // ``end`` makes NavLink use an exact match. Without it, navigating to
+  // ``/workspaces/<id>/api`` would mark BOTH the "API" entry AND the
+  // "工作区管理" entry (→ ``/workspaces``) as active because the latter
+  // is a prefix of the former.
   return (
-    <NavLink to={item.to} className={navLinkClassName}>
+    <NavLink to={item.to} end className={navLinkClassName}>
       <Icon className="size-4 shrink-0" aria-hidden="true" />
       <span className="truncate">{item.label}</span>
     </NavLink>

@@ -81,6 +81,10 @@ export default function AppPrimaryNav() {
         <NavLink
           key={item.to}
           to={item.to}
+          // Exact match only — without ``end`` the "工作区管理" link
+          // (→ /workspaces) stays active on every /workspaces/<id>/*
+          // page because the former is a prefix of the latter.
+          end
           className={({ isActive }) =>
             cn(
               'motion-standard inline-flex h-9 items-center rounded-full px-3 text-sm font-medium active:scale-[0.98]',
