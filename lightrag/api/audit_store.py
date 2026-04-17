@@ -219,3 +219,223 @@ async def insert_audit_event(event: AuditEventRow) -> bool:
         return False
 
     return False
+
+
+# ---------------------------------------------------------------------------
+# PR-AUDIT-3: read path
+# ---------------------------------------------------------------------------
+
+
+_SELECT_COLUMNS = ", ".join(_INSERT_COLUMNS)
+
+
+def _row_to_dict(row: Any) -> dict[str, Any]:
+    """Convert a DB row (sqlite3.Row / SQLAlchemy mapping) to a plain dict."""
+    if hasattr(row, "keys"):
+        return {key: row[key] for key in row.keys()}
+    if isinstance(row, dict):
+        return dict(row)
+    # Fallback: iterate positional values.
+    return {col: value for col, value in zip(_INSERT_COLUMNS, row)}
+
+
+def _hydrate_metadata(event: dict[str, Any]) -> dict[str, Any]:
+    raw = event.get("metadata")
+    if raw is None or raw == "":
+        event["metadata"] = None
+        return event
+    try:
+        event["metadata"] = json.loads(raw)
+    except (TypeError, ValueError):
+        # Preserve the raw string so callers can surface corruption.
+        event["metadata"] = {"_raw": raw}
+    return event
+
+
+async def list_audit_events(
+    *,
+    workspace_id: str | None = None,
+    actor_user_id: str | None = None,
+    action: str | None = None,
+    outcome: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """
+    Return up to ``limit`` audit events matching the provided filters,
+    newest first. ``metadata`` is hydrated from its stored JSON string.
+    """
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
+
+    filters: list[str] = []
+    params: dict[str, Any] = {"limit": limit, "offset": offset}
+    if workspace_id is not None:
+        filters.append("workspace_id = :workspace_id")
+        params["workspace_id"] = workspace_id
+    if actor_user_id is not None:
+        filters.append("actor_user_id = :actor_user_id")
+        params["actor_user_id"] = actor_user_id
+    if action is not None:
+        filters.append("action = :action")
+        params["action"] = action
+    if outcome is not None:
+        filters.append("outcome = :outcome")
+        params["outcome"] = outcome
+    if since is not None:
+        filters.append("occurred_at >= :since")
+        params["since"] = since
+    if until is not None:
+        filters.append("occurred_at <= :until")
+        params["until"] = until
+
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+    sql = (
+        f"SELECT {_SELECT_COLUMNS} FROM {AUDIT_LOG_TABLE_NAME} "
+        f"{where_clause} "
+        f"ORDER BY occurred_at DESC, id DESC "
+        f"LIMIT :limit OFFSET :offset"
+    )
+
+    backend = get_db_backend()
+    if backend is None:
+        return []
+
+    try:
+        if backend == "sqlalchemy":
+            from sqlalchemy import text
+
+            engine = get_engine()
+            if engine is None:
+                return []
+            async with engine.connect() as conn:
+                result = await conn.execute(text(sql), params)
+                rows = [_row_to_dict(r) for r in result.mappings().all()]
+
+        elif backend == "sqlite3":
+            sqlite_path = get_sqlite_path()
+            if sqlite_path is None:
+                return []
+
+            # sqlite3 uses qmark/named placeholders; translate :name to ?
+            # manually because we want a predictable sync path.
+            def _sqlite_read() -> list[dict[str, Any]]:
+                placeholders_order: list[str] = []
+                sqlite_sql = sql
+                for key in [
+                    "workspace_id",
+                    "actor_user_id",
+                    "action",
+                    "outcome",
+                    "since",
+                    "until",
+                    "limit",
+                    "offset",
+                ]:
+                    token = f":{key}"
+                    if token in sqlite_sql and key in params:
+                        sqlite_sql = sqlite_sql.replace(token, "?", 1)
+                        placeholders_order.append(key)
+                values = tuple(params[key] for key in placeholders_order)
+                with sqlite3.connect(sqlite_path) as conn:
+                    conn.row_factory = sqlite3.Row
+                    cursor = conn.execute(sqlite_sql, values)
+                    return [_row_to_dict(r) for r in cursor.fetchall()]
+
+            rows = await asyncio.to_thread(_sqlite_read)
+        else:
+            return []
+    except Exception:
+        return []
+
+    return [_hydrate_metadata(event) for event in rows]
+
+
+async def get_audit_event_by_id(event_id: str) -> dict[str, Any] | None:
+    sql = (
+        f"SELECT {_SELECT_COLUMNS} FROM {AUDIT_LOG_TABLE_NAME} "
+        f"WHERE id = :id LIMIT 1"
+    )
+    backend = get_db_backend()
+    if backend is None:
+        return None
+
+    try:
+        if backend == "sqlalchemy":
+            from sqlalchemy import text
+
+            engine = get_engine()
+            if engine is None:
+                return None
+            async with engine.connect() as conn:
+                result = await conn.execute(text(sql), {"id": event_id})
+                row = result.mappings().first()
+            if row is None:
+                return None
+            return _hydrate_metadata(_row_to_dict(row))
+
+        if backend == "sqlite3":
+            sqlite_path = get_sqlite_path()
+            if sqlite_path is None:
+                return None
+
+            def _sqlite_read_one() -> dict[str, Any] | None:
+                sqlite_sql = sql.replace(":id", "?")
+                with sqlite3.connect(sqlite_path) as conn:
+                    conn.row_factory = sqlite3.Row
+                    cursor = conn.execute(sqlite_sql, (event_id,))
+                    row = cursor.fetchone()
+                return _row_to_dict(row) if row is not None else None
+
+            row = await asyncio.to_thread(_sqlite_read_one)
+            return _hydrate_metadata(row) if row is not None else None
+    except Exception:
+        return None
+
+    return None
+
+
+async def delete_audit_events_before(
+    workspace_id: str, *, before: str
+) -> int:
+    """Retention pruning: delete events before the given ISO timestamp."""
+    sql = (
+        f"DELETE FROM {AUDIT_LOG_TABLE_NAME} "
+        f"WHERE workspace_id = :workspace_id AND occurred_at < :before"
+    )
+    backend = get_db_backend()
+    if backend is None:
+        return 0
+
+    try:
+        if backend == "sqlalchemy":
+            from sqlalchemy import text
+
+            engine = get_engine()
+            if engine is None:
+                return 0
+            async with engine.begin() as conn:
+                result = await conn.execute(
+                    text(sql), {"workspace_id": workspace_id, "before": before}
+                )
+                return int(result.rowcount or 0)
+
+        if backend == "sqlite3":
+            sqlite_path = get_sqlite_path()
+            if sqlite_path is None:
+                return 0
+
+            def _sqlite_delete() -> int:
+                sqlite_sql = sql.replace(":workspace_id", "?").replace(":before", "?")
+                with sqlite3.connect(sqlite_path) as conn:
+                    cursor = conn.execute(sqlite_sql, (workspace_id, before))
+                    conn.commit()
+                    return int(cursor.rowcount or 0)
+
+            return await asyncio.to_thread(_sqlite_delete)
+    except Exception:
+        return 0
+
+    return 0

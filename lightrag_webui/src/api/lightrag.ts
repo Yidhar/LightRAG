@@ -815,6 +815,88 @@ export const listKnowledgeBases = async (
   return response.data
 }
 
+// ---------------------------------------------------------------------------
+// Audit log API (PR-AUDIT-3)
+// ---------------------------------------------------------------------------
+
+export type AuditOutcome = 'success' | 'denied' | 'error'
+
+export type AuditEventResponse = {
+  id: string
+  occurred_at: string
+  workspace_id: string | null
+  kb_id: string | null
+  action: string
+  outcome: AuditOutcome
+  actor: {
+    user_id: string | null
+    username: string | null
+    role: string | null
+  }
+  resource: {
+    type: string
+    id: string | null
+  }
+  http: {
+    method: string | null
+    path: string | null
+    status: number | null
+  }
+  client: {
+    ip: string | null
+    user_agent: string | null
+  }
+  metadata: Record<string, any> | null
+}
+
+export type AuditEventListResponse = {
+  events: AuditEventResponse[]
+  total_count: number
+  next_offset: number | null
+}
+
+export type AuditListFilters = {
+  actor_user_id?: string
+  action?: string
+  outcome?: AuditOutcome
+  since?: string
+  until?: string
+  limit?: number
+  offset?: number
+}
+
+export const listAuditEvents = async (
+  workspaceId: string,
+  filters: AuditListFilters = {}
+): Promise<AuditEventListResponse> => {
+  const response = await axiosInstance.get(
+    `/workspaces/${encodeURIComponent(workspaceId)}/audit`,
+    { params: filters }
+  )
+  return response.data
+}
+
+export const getAuditEvent = async (
+  workspaceId: string,
+  eventId: string
+): Promise<AuditEventResponse> => {
+  const response = await axiosInstance.get(
+    `/workspaces/${encodeURIComponent(workspaceId)}/audit/${encodeURIComponent(eventId)}`
+  )
+  return response.data
+}
+
+export const deleteAuditEventsBefore = async (
+  workspaceId: string,
+  before: string
+): Promise<{ status: 'deleted'; deleted_count: number; before: string }> => {
+  const response = await axiosInstance.delete(
+    `/workspaces/${encodeURIComponent(workspaceId)}/audit`,
+    { params: { before } }
+  )
+  return response.data
+}
+
 export const getKnowledgeBase = async (
   workspaceId: string,
   kbId: string

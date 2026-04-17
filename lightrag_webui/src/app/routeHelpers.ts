@@ -35,6 +35,10 @@ export const resolveCurrentTabFromPath = (pathname: string): Tab => {
     return 'members'
   }
 
+  if (pathname.endsWith('/audit') || pathname.includes('/audit/')) {
+    return 'audit'
+  }
+
   if (pathname.endsWith('/settings')) {
     return 'workspace-settings'
   }

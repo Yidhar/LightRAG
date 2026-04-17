@@ -22,6 +22,8 @@ export const appRoutes = {
     `/app/workspaces/${workspaceId}/members`,
   workspaceSettings: (workspaceId: string = defaultWorkspaceId) =>
     `/app/workspaces/${workspaceId}/settings`,
+  workspaceAudit: (workspaceId: string = defaultWorkspaceId) =>
+    `/app/workspaces/${workspaceId}/audit`,
   kbRoot: (workspaceId: string = defaultWorkspaceId, _legacyKbId?: string) =>
     `/app/workspaces/${workspaceId}`,
   kbOverview: (workspaceId: string = defaultWorkspaceId, _legacyKbId?: string) =>

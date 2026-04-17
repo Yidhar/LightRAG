@@ -13,6 +13,7 @@ const LoginPage = lazy(() => import('@/features/LoginPage'))
 const WorkspaceListPage = lazy(() => import('@/pages/workspaces/WorkspaceListPage'))
 const MembersPage = lazy(() => import('@/pages/workspaces/MembersPage'))
 const WorkspaceSettingsPage = lazy(() => import('@/pages/workspaces/WorkspaceSettingsPage'))
+const AuditLogPage = lazy(() => import('@/pages/workspaces/AuditLogPage'))
 const KnowledgeBaseOverviewPage = lazy(() => import('@/pages/kb/KnowledgeBaseOverviewPage'))
 const DocumentsPage = lazy(() => import('@/pages/kb/DocumentsPage'))
 const RetrievalPage = lazy(() => import('@/pages/kb/RetrievalPage'))
@@ -148,6 +149,7 @@ const AppContent = () => {
             />
             <Route path="members" element={withRouteSuspense(<MembersPage />)} />
             <Route path="settings" element={withRouteSuspense(<WorkspaceSettingsPage />)} />
+            <Route path="audit" element={withRouteSuspense(<AuditLogPage />)} />
 
             {/* Legacy ``/kb/:kbId/<leaf>`` paths redirect to the flat form
                 so bookmarks, shared links, and the backend KB-id-prefixed

@@ -5,6 +5,7 @@ import {
   FileStackIcon,
   LayoutDashboardIcon,
   NetworkIcon,
+  ScrollTextIcon,
   Settings2Icon,
   UsersIcon,
 } from 'lucide-react'
@@ -110,6 +111,13 @@ export default function AppSidebarNav() {
       to: appRoutes.workspaceMembers(currentWorkspaceId),
       icon: UsersIcon,
       requiredPermission: 'workspace:invite_member',
+    },
+    {
+      key: 'audit',
+      label: t('header.audit', { defaultValue: '审计日志' }),
+      to: appRoutes.workspaceAudit(currentWorkspaceId),
+      icon: ScrollTextIcon,
+      requiredPermission: 'audit:view_workspace',
     },
     {
       key: 'settings',

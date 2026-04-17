@@ -24,6 +24,10 @@ class Action:
     # membership), so it is gated at the route level on an authenticated
     # identity rather than through ROLE_PERMISSIONS.
     WORKSPACE_CREATE = "workspace:create"
+    # Audit surface (PR-AUDIT-3). View is granted to owner + admin;
+    # delete (retention pruning) only to owner.
+    AUDIT_VIEW_WORKSPACE = "audit:view_workspace"
+    AUDIT_DELETE_WORKSPACE = "audit:delete_workspace"
     KB_VIEW = "kb:view"
     KB_QUERY = "kb:query"
     KB_UPLOAD_DOCUMENT = "kb:upload_document"
@@ -46,6 +50,8 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         Action.KB_EDIT_GRAPH,
         Action.KB_MANAGE_SETTINGS,
         Action.KB_MANAGE_PERMISSIONS,
+        Action.AUDIT_VIEW_WORKSPACE,
+        Action.AUDIT_DELETE_WORKSPACE,
     },
     "admin": {
         Action.WORKSPACE_VIEW,
@@ -57,6 +63,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         Action.KB_DELETE_DOCUMENT,
         Action.KB_EDIT_GRAPH,
         Action.KB_MANAGE_SETTINGS,
+        Action.AUDIT_VIEW_WORKSPACE,
     },
     "editor": {
         Action.WORKSPACE_VIEW,

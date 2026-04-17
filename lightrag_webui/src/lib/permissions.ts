@@ -12,6 +12,8 @@ export type PermissionAction =
   | 'kb:edit_graph'
   | 'kb:manage_settings'
   | 'kb:manage_permissions'
+  | 'audit:view_workspace'
+  | 'audit:delete_workspace'
 
 export type MembershipClaim = {
   workspace_id: string
@@ -37,6 +39,8 @@ const ROLE_PERMISSIONS: Record<AccessRole, Set<PermissionAction>> = {
     'kb:edit_graph',
     'kb:manage_settings',
     'kb:manage_permissions',
+    'audit:view_workspace',
+    'audit:delete_workspace',
   ]),
   admin: new Set<PermissionAction>([
     'workspace:view',
@@ -48,6 +52,7 @@ const ROLE_PERMISSIONS: Record<AccessRole, Set<PermissionAction>> = {
     'kb:delete_document',
     'kb:edit_graph',
     'kb:manage_settings',
+    'audit:view_workspace',
   ]),
   editor: new Set<PermissionAction>([
     'workspace:view',

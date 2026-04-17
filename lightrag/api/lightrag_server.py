@@ -55,6 +55,7 @@ from lightrag.api.routers.document_routes import (
 )
 from lightrag.api.routers.auth_routes import create_auth_routes, issue_login_tokens
 from lightrag.api.auth_provider import get_auth_provider
+from lightrag.api.routers.audit_routes import create_audit_routes
 from lightrag.api.routers.kb_routes import create_kb_routes
 from lightrag.api.routers.membership_routes import create_membership_routes
 from lightrag.api.routers.workspace_routes import create_workspace_routes
@@ -1322,6 +1323,7 @@ def create_app(args):
     app.include_router(create_workspace_routes(api_key))
     app.include_router(create_membership_routes(api_key))
     app.include_router(create_kb_routes(api_key))
+    app.include_router(create_audit_routes(api_key))
     app.include_router(create_query_routes(api_key=api_key, top_k=args.top_k))
     app.include_router(create_graph_routes(api_key=api_key))
 

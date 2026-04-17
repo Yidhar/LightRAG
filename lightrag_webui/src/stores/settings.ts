@@ -15,6 +15,7 @@ export type Tab =
   | 'kb-settings'
   | 'members'
   | 'workspace-settings'
+  | 'audit'
 
 interface SettingsState {
   // Document manager settings
