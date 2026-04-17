@@ -13,6 +13,7 @@ from fastapi.security import APIKeyHeader, OAuth2PasswordBearer
 from lightrag.api.auth import auth_handler
 from lightrag.api.dependencies import get_request_context
 from lightrag.api.utils_api import get_combined_auth_dependency
+from lightrag.utils import logger
 
 
 class Action:
@@ -227,8 +228,41 @@ def require_permission(action: str, api_key: Optional[str] = None):
                 detail="No credentials provided. Please login.",
             )
 
+        # Prefer DB memberships over the token's snapshot when possible.
+        # A token is signed at login and its ``memberships`` claim is
+        # frozen at that moment — if the user creates a new workspace
+        # (which grants them an owner membership in the DB) the token
+        # still reports the old set, and every follow-up request to the
+        # fresh workspace would 403. Re-reading from DB closes that
+        # window without forcing a token rotation on every mutation.
+        resolution_token_info = token_info
+        db_user_id = token_info.get("user_id")
+        if (
+            db_user_id
+            and getattr(request.app.state, "use_db_auth", False)
+            and getattr(request.app.state, "db_ready", False)
+        ):
+            try:
+                from lightrag.api.identity_store import get_membership_claims
+
+                fresh_memberships = await get_membership_claims(db_user_id)
+                resolution_token_info = {
+                    **token_info,
+                    "memberships": fresh_memberships,
+                }
+            except Exception:
+                # DB hiccup — fall back to the token snapshot. That still
+                # closes the cross-workspace hole (no_access sentinel) but
+                # gives up newly-granted-since-login memberships until the
+                # next token refresh. Worth a log, not a 500.
+                logger.debug(
+                    "permission resolver: DB membership lookup failed for "
+                    "user_id=%s; falling back to token memberships",
+                    db_user_id,
+                )
+
         effective_role = resolve_effective_role(
-            token_info,
+            resolution_token_info,
             workspace_id=context.workspace_id,
             kb_id=permission_kb_id,
         )
