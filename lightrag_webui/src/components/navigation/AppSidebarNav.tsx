@@ -4,15 +4,16 @@ import {
   BracesIcon,
   FileStackIcon,
   FolderKanbanIcon,
-  LayoutDashboardIcon,
   NetworkIcon,
 } from 'lucide-react'
+import { useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { cn } from '@/lib/utils'
 import { appRoutes, defaultKnowledgeBaseId } from '@/app/routes'
 import { resolveKnowledgeBaseId, resolveWorkspaceId } from '@/app/routeHelpers'
 import { useAuthStore } from '@/stores/state'
+import { useWorkspaceDirectoryStore } from '@/stores/workspaceDirectory'
 import {
   hasPermission,
   resolveEffectiveRole,
@@ -44,7 +45,7 @@ type NavItem = {
   key: string
   label: string
   to: string
-  icon: typeof LayoutDashboardIcon
+  icon: typeof FileStackIcon
   requiredPermission: PermissionAction | null
 }
 
@@ -60,18 +61,21 @@ export default function AppSidebarNav() {
     { workspaceId: currentWorkspaceId, kbId: currentKnowledgeBaseId }
   )
   const roleLabel = t(roleLabelKeys[effectiveRole])
+  const ensureLoaded = useWorkspaceDirectoryStore((s) => s.ensureLoaded)
+  const workspaceName = useWorkspaceDirectoryStore((s) =>
+    s.nameFor(currentWorkspaceId)
+  )
+  useEffect(() => {
+    void ensureLoaded()
+  }, [ensureLoaded])
 
   // Workspace-scoped primary items. Pages that still require a kb id in their
   // URL receive ``defaultKnowledgeBaseId`` here; backend federation makes that
   // equivalent to "all knowledge bases in the current workspace".
+  //
+  // The old "总览" entry was removed — every leaf it linked to is already a
+  // sibling below, so it just added redundant navigation.
   const workspaceItems: NavItem[] = [
-    {
-      key: 'overview',
-      label: t('header.overview'),
-      to: appRoutes.kbOverview(currentWorkspaceId, defaultKnowledgeBaseId),
-      icon: LayoutDashboardIcon,
-      requiredPermission: null,
-    },
     {
       key: 'documents',
       label: t('header.documents'),
@@ -134,8 +138,11 @@ export default function AppSidebarNav() {
           <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
             {t('platformShell.common.workspace')}
           </p>
-          <p className="truncate text-sm font-semibold text-sidebar-foreground">
-            {currentWorkspaceId}
+          <p
+            className="truncate text-sm font-semibold text-sidebar-foreground"
+            title={currentWorkspaceId}
+          >
+            {workspaceName}
           </p>
         </div>
         <AccessBadge role={effectiveRole} compact />

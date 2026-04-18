@@ -41,11 +41,6 @@ export default function AppPrimaryNav() {
     ]
     : [
       {
-        label: t('header.overview'),
-        to: appRoutes.kbOverview(currentWorkspaceId),
-        requiredPermission: null,
-      },
-      {
         label: t('header.documents'),
         to: appRoutes.kbDocuments(currentWorkspaceId),
         requiredPermission: 'kb:view' as PermissionAction,

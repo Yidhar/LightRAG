@@ -920,11 +920,23 @@ export default function DocumentManager({ allKbsMode = false }: DocumentManagerP
       return { type: 'network', shouldRetry: true, shouldShowToast: true };
     }
 
-    if (error.status >= 500) {
+    // Axios wraps the HTTP response on error.response; older code paths
+    // sometimes flatten status onto the error. Check both.
+    const httpStatus = error.response?.status ?? error.status
+    if (httpStatus === 404) {
+      // Most commonly: the active KB isn't linked to the current
+      // workspace (we default to kb_id='default' even when the user
+      // just switched to a personal workspace with no linked KBs).
+      // Treat this as an empty result, not a blocking error — the
+      // empty state + KB picker already convey "there's nothing here".
+      return { type: 'not_found', shouldRetry: false, shouldShowToast: false };
+    }
+
+    if (httpStatus >= 500) {
       return { type: 'server', shouldRetry: true, shouldShowToast: true };
     }
 
-    if (error.status >= 400 && error.status < 500) {
+    if (httpStatus >= 400 && httpStatus < 500) {
       return { type: 'client', shouldRetry: false, shouldShowToast: true };
     }
 
@@ -1081,6 +1093,13 @@ export default function DocumentManager({ allKbsMode = false }: DocumentManagerP
     } catch (err) {
       if (isMountedRef.current) {
         const errorClassification = classifyError(err);
+
+        if (errorClassification.type === 'not_found') {
+          // Clear any stale rows from the previous workspace so the
+          // empty state reads honestly.
+          setDocs(null);
+          setStatusCounts({ all: 0 });
+        }
 
         if (errorClassification.shouldShowToast) {
           toast.error(t('documentPanel.documentManager.errors.loadFailed', { error: errorMessage(err) }));
