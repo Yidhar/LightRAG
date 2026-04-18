@@ -67,9 +67,6 @@ export default function RetrievalPage() {
           <h1 className="text-2xl font-semibold tracking-tight text-foreground">
             {t('platformShell.retrieval.title')}
           </h1>
-          <p className="max-w-3xl text-sm leading-6 text-muted-foreground">
-            {t('platformShell.retrieval.description')}
-          </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button variant="outline" size="sm" asChild>
