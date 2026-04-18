@@ -100,16 +100,30 @@ export default function KBTabs({
       setLoadError(false)
       const response = await listKnowledgeBases(workspaceId)
       setKnowledgeBases(response.items)
-      // If the currently-active KB no longer exists (deleted, workspace
-      // switched, or stale URL ``?kb=``), fall back to the default and
-      // clean up the URL so share-links stay valid.
-      if (
-        response.items.length > 0 &&
-        activeKbId &&
-        !response.items.some((kb) => kb.id === activeKbId)
-      ) {
-        setActiveKb(defaultKnowledgeBaseId)
-        writeKbQuery(null)
+      const firstKbId = response.items[0]?.id ?? null
+      if (response.items.length > 0) {
+        // If nothing is selected yet, or the selection doesn't exist in
+        // this workspace (stale URL ``?kb=`` / workspace switch / deleted
+        // KB), snap to the first actually-linked KB. Falling back to the
+        // string "default" is wrong — a personal workspace might not have
+        // any KB named "default" linked, which 404s /documents/paginated.
+        if (
+          !activeKbId ||
+          !response.items.some((kb) => kb.id === activeKbId)
+        ) {
+          if (firstKbId) {
+            setActiveKb(firstKbId)
+            writeKbQuery(firstKbId)
+          }
+        }
+      } else {
+        // No KBs linked to this workspace at all — clear the selection so
+        // downstream callers (DocumentManager interceptor header injector)
+        // don't keep sending a stale id.
+        if (activeKbId) {
+          setActiveKb(null)
+          writeKbQuery(null)
+        }
       }
     } catch {
       setKnowledgeBases([])
@@ -131,12 +145,10 @@ export default function KBTabs({
     }
   }, [load])
 
-  // Initialise activeKbId to default on first render if not already set.
-  useEffect(() => {
-    if (activeKbId == null) {
-      setActiveKb(defaultKnowledgeBaseId)
-    }
-  }, [activeKbId, setActiveKb])
+  // Intentionally no "init to default" effect here — `load()` above
+  // picks the first *actually-linked* KB once the list returns. Seeding
+  // a hardcoded "default" triggered spurious 404s on workspaces where
+  // no KB with that id is linked.
 
   const handlePick = (kbId: string) => {
     if (kbId === ALL_KBS_SENTINEL) {

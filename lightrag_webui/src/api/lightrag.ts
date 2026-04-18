@@ -644,11 +644,19 @@ axiosInstance.interceptors.response.use(
             : 'You do not have permission to perform this action.'
         toast.error(detail)
       }
-      throw new Error(
+      // Rewrap into a plain Error for uniform message formatting, but keep
+      // the status code + response payload attached so downstream callers
+      // can branch on specific HTTP conditions (e.g. DocumentManager
+      // swallowing 404 "KB not linked" into an empty state instead of a
+      // blocking toast).
+      const composed = new Error(
         `${error.response.status} ${error.response.statusText}\n${JSON.stringify(
           error.response.data
         )}\n${error.config?.url}`
-      )
+      ) as Error & { status?: number; response?: AxiosError['response'] }
+      composed.status = error.response.status
+      composed.response = error.response
+      throw composed
     }
     throw error
   }
