@@ -1,22 +1,15 @@
-import { lazy, Suspense, useMemo } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
-import { BriefcaseBusinessIcon, SparklesIcon } from 'lucide-react'
+import { lazy, Suspense } from 'react'
+import { Link, useParams } from 'react-router-dom'
+import { SparklesIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
-import { appRoutes, defaultWorkspaceId } from '@/app/routes'
+import { appRoutes } from '@/app/routes'
 import { resolveKnowledgeBaseId, resolveWorkspaceId } from '@/app/routeHelpers'
 import { useAuthStore } from '@/stores/state'
 import { hasPermission, resolveEffectiveRole } from '@/lib/permissions'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/Alert'
 import Badge from '@/components/ui/Badge'
 import Button from '@/components/ui/Button'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/Select'
 
 const RetrievalTesting = lazy(() => import('@/features/RetrievalTesting'))
 
@@ -47,7 +40,6 @@ function RetrievalSurfaceLoading() {
  */
 export default function RetrievalPage() {
   const { t } = useTranslation()
-  const navigate = useNavigate()
   const { workspaceId, kbId } = useParams()
   const { role, memberships } = useAuthStore()
   const currentWorkspaceId = resolveWorkspaceId(workspaceId)
@@ -59,23 +51,6 @@ export default function RetrievalPage() {
 
   const canQueryKnowledgeBase = hasPermission(effectiveRole, 'kb:query')
   const canManageKnowledgeBaseSettings = hasPermission(effectiveRole, 'kb:manage_settings')
-
-  // Workspaces the user has any membership claim in — keeps the default
-  // workspace pinned so single-tenant setups always have a valid option.
-  const workspaceOptions = useMemo(() => {
-    const seen = new Set<string>()
-    const items: string[] = []
-    const push = (id: string) => {
-      if (!id || seen.has(id)) return
-      seen.add(id)
-      items.push(id)
-    }
-    push(defaultWorkspaceId)
-    for (const claim of memberships) {
-      if (claim.workspace_id) push(claim.workspace_id)
-    }
-    return items
-  }, [memberships])
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
@@ -97,37 +72,6 @@ export default function RetrievalPage() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <label
-            htmlFor="retrieval-workspace-picker"
-            className="flex items-center gap-1.5 text-[11px] uppercase tracking-[0.12em] text-muted-foreground"
-          >
-            <BriefcaseBusinessIcon
-              className="size-3.5 text-emerald-600 dark:text-emerald-400"
-              aria-hidden="true"
-            />
-            {t('platformShell.retrieval.workspaceLabel', { defaultValue: '工作区' })}
-          </label>
-          <Select
-            value={currentWorkspaceId}
-            onValueChange={(nextId) => {
-              if (nextId === currentWorkspaceId) return
-              navigate(appRoutes.kbRetrieval(nextId, currentKnowledgeBaseId))
-            }}
-          >
-            <SelectTrigger
-              id="retrieval-workspace-picker"
-              className="h-8 w-[180px] rounded-full"
-            >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {workspaceOptions.map((ws) => (
-                <SelectItem key={ws} value={ws}>
-                  {ws}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
           <Button variant="outline" size="sm" asChild>
             <Link to={appRoutes.kbApi(currentWorkspaceId, currentKnowledgeBaseId)}>
               {t('platformShell.common.openApiDocs')}

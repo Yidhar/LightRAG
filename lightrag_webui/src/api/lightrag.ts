@@ -1269,6 +1269,23 @@ export const queryTextStream = async (
   if (apiKey) {
     headers['X-API-Key'] = apiKey;
   }
+  // Mirror the axios request-interceptor: streaming uses raw fetch(),
+  // so we have to inject the workspace / KB scope by hand. Without
+  // this the backend falls back to the default workspace and a non-
+  // default-workspace query silently hits the wrong data ("no context"
+  // from the default KB's documents instead of the user's own KB).
+  try {
+    const { activeWorkspaceId, activeKbId } = useKBStore.getState();
+    if (activeWorkspaceId) {
+      (headers as Record<string, string>)['X-Workspace-Id'] = activeWorkspaceId;
+    }
+    if (activeKbId) {
+      (headers as Record<string, string>)['X-KB-Id'] = activeKbId;
+    }
+  } catch {
+    // Scope injection is best-effort; never let a store read crash the
+    // streaming call.
+  }
 
   try {
     const response = await fetch(`${backendBaseUrl}/query/stream`, {
