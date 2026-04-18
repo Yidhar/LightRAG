@@ -86,6 +86,13 @@ api = [
     "pytz",
     "uvicorn",
     "gunicorn",
+    # DB-backed auth / identity store (Platform V2). The code falls back to
+    # stdlib sqlite3 when SQLAlchemy is absent, but that path does ad-hoc URL
+    # parsing and has tripped up real deployments — keep the async engine on
+    # the happy path and let aiosqlite drive sqlite:// URLs without a libpq
+    # dependency.
+    "sqlalchemy[asyncio]>=2.0.0,<3.0.0",
+    "aiosqlite>=0.19.0,<1.0.0",
     # Document processing dependencies (required for API document upload functionality)
     "openpyxl>=3.0.0,<4.0.0",      # XLSX processing
     "pycryptodome>=3.0.0,<4.0.0",  # PDF encryption support
