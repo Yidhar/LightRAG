@@ -1,18 +1,13 @@
 import { lazy, Suspense } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { BracesIcon, ShieldCheckIcon } from 'lucide-react'
+import { BracesIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 import { appRoutes } from '@/app/routes'
 import { resolveKnowledgeBaseId, resolveWorkspaceId } from '@/app/routeHelpers'
 import { backendBaseUrl } from '@/lib/constants'
 import { useAuthStore } from '@/stores/state'
-import {
-  hasPermission,
-  resolveEffectiveRole,
-  roleDescriptionKeys,
-  summarizeRoleCapabilityKeys,
-} from '@/lib/permissions'
+import { hasPermission, resolveEffectiveRole } from '@/lib/permissions'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/Alert'
 import Badge from '@/components/ui/Badge'
 import Button from '@/components/ui/Button'
@@ -42,7 +37,6 @@ export default function ApiPage() {
     { workspaceId: currentWorkspaceId, kbId: currentKnowledgeBaseId }
   )
   const canQueryKnowledgeBase = hasPermission(effectiveRole, 'kb:query')
-  const capabilitySummary = summarizeRoleCapabilityKeys(effectiveRole)
   const apiDocsUrl = backendBaseUrl ? `${backendBaseUrl}/docs` : '/docs'
 
   return (
@@ -75,34 +69,6 @@ export default function ApiPage() {
           </Button>
         </div>
       </header>
-
-      {/* Access ribbon — role description + capability chips */}
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border/60 bg-muted/20 px-6 py-2 text-sm">
-        <div className="flex min-w-0 items-center gap-2">
-          <ShieldCheckIcon
-            className="size-4 shrink-0 text-emerald-600 dark:text-emerald-400"
-            aria-hidden="true"
-          />
-          <span className="font-medium text-foreground">
-            {t('platformShell.api.developerAccess')}
-          </span>
-          <span className="text-muted-foreground">·</span>
-          <span className="truncate text-muted-foreground">
-            {t(roleDescriptionKeys[effectiveRole])}
-          </span>
-        </div>
-        <div className="ml-auto flex flex-wrap items-center gap-1.5">
-          {capabilitySummary.map((capabilityKey) => (
-            <Badge
-              key={capabilityKey}
-              variant="outline"
-              className="rounded-full bg-background/70 px-2.5 py-0.5 text-[11px]"
-            >
-              {t(capabilityKey)}
-            </Badge>
-          ))}
-        </div>
-      </div>
 
       {canQueryKnowledgeBase ? (
         <div className="min-h-0 flex-1 overflow-hidden">

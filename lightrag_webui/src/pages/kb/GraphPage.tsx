@@ -1,17 +1,12 @@
 import { lazy, Suspense } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { NetworkIcon, ShieldCheckIcon } from 'lucide-react'
+import { NetworkIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 import { appRoutes } from '@/app/routes'
 import { resolveKnowledgeBaseId, resolveWorkspaceId } from '@/app/routeHelpers'
 import { useAuthStore } from '@/stores/state'
-import {
-  hasPermission,
-  resolveEffectiveRole,
-  roleDescriptionKeys,
-  summarizeRoleCapabilityKeys,
-} from '@/lib/permissions'
+import { hasPermission, resolveEffectiveRole } from '@/lib/permissions'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/Alert'
 import Badge from '@/components/ui/Badge'
 import Button from '@/components/ui/Button'
@@ -50,7 +45,6 @@ export default function GraphPage() {
   )
 
   const canViewKnowledgeBase = hasPermission(effectiveRole, 'kb:view')
-  const capabilitySummary = summarizeRoleCapabilityKeys(effectiveRole)
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
@@ -82,32 +76,6 @@ export default function GraphPage() {
         </div>
       </header>
 
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border/60 bg-muted/20 px-6 py-2 text-sm">
-        <div className="flex min-w-0 items-center gap-2">
-          <ShieldCheckIcon
-            className="size-4 shrink-0 text-emerald-600 dark:text-emerald-400"
-            aria-hidden="true"
-          />
-          <span className="font-medium text-foreground">
-            {t('platformShell.graph.accessAndRole')}
-          </span>
-          <span className="text-muted-foreground">·</span>
-          <span className="truncate text-muted-foreground">
-            {t(roleDescriptionKeys[effectiveRole])}
-          </span>
-        </div>
-        <div className="ml-auto flex flex-wrap items-center gap-1.5">
-          {capabilitySummary.map((capabilityKey) => (
-            <Badge
-              key={capabilityKey}
-              variant="outline"
-              className="rounded-full bg-background/70 px-2.5 py-0.5 text-[11px]"
-            >
-              {t(capabilityKey)}
-            </Badge>
-          ))}
-        </div>
-      </div>
 
       {!canViewKnowledgeBase && (
         <Alert className="mx-6 mt-4 border-border/70 bg-muted/20">
