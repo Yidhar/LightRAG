@@ -74,9 +74,6 @@ export default function DocumentsPage() {
           <h1 className="text-2xl font-semibold tracking-tight text-foreground">
             {t('platformShell.documents.title')}
           </h1>
-          <p className="max-w-3xl text-sm leading-6 text-muted-foreground">
-            {t('platformShell.documents.description')}
-          </p>
         </div>
         <div className="flex flex-wrap gap-2">
           <Button variant="outline" size="sm" asChild>
