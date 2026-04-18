@@ -85,6 +85,21 @@ def is_db_initialized() -> bool:
     return _engine is not None and _session_factory is not None
 
 
+def _project_anchor() -> str:
+    """Directory we resolve relative sqlite paths against.
+
+    Prefer the dir the ``.env`` was loaded from (captured in
+    ``config.PROJECT_ROOT``); fall back to the current CWD when the API
+    config module isn't importable (unit tests, isolated usage).
+    """
+    try:
+        from lightrag.api.config import get_project_root
+
+        return get_project_root()
+    except Exception:  # pragma: no cover — defensive
+        return os.getcwd()
+
+
 def _resolve_sqlite_path(db_url: str) -> str:
     prefixes = ("sqlite+aiosqlite:///", "sqlite:///")
 
@@ -93,12 +108,46 @@ def _resolve_sqlite_path(db_url: str) -> str:
             raw_path = unquote(db_url[len(prefix) :])
             if raw_path == ":memory:":
                 return raw_path
-            return os.path.abspath(raw_path)
+            if os.path.isabs(raw_path):
+                return raw_path
+            return os.path.abspath(os.path.join(_project_anchor(), raw_path))
 
     raise RuntimeError(
         "SQLAlchemy is not installed, and the DB fallback only supports "
         "sqlite:/// or sqlite+aiosqlite:/// URLs."
     )
+
+
+def _normalize_sqlite_url(db_url: str) -> str:
+    """Rewrite a relative sqlite(+async) URL into an absolute one.
+
+    SQLAlchemy passes ``database`` straight to ``sqlite3.connect`` which
+    resolves against process CWD — fragile under systemd / Docker /
+    ``uv run`` where CWD may not be the project dir the user expects.
+    We lift the path to ``<project_root>/<rel>`` at startup so the same
+    ``.env`` works on any deployment.
+
+    Absolute paths and ``:memory:`` are passed through untouched.
+    """
+    try:
+        from sqlalchemy.engine import make_url
+    except ModuleNotFoundError:
+        return db_url
+
+    try:
+        url = make_url(db_url)
+    except Exception:
+        return db_url
+
+    if not url.drivername.startswith("sqlite"):
+        return db_url
+
+    database = url.database or ""
+    if not database or database == ":memory:" or os.path.isabs(database):
+        return db_url
+
+    absolute = os.path.abspath(os.path.join(_project_anchor(), database))
+    return str(url.set(database=absolute))
 
 
 def _ensure_sqlite_bootstrap(path: str) -> None:
@@ -118,6 +167,15 @@ async def init_db(db_url: str) -> None:
 
     if is_db_initialized():
         return
+
+    resolved_url = _normalize_sqlite_url(db_url)
+    if resolved_url != db_url:
+        import logging as _logging
+
+        _logging.getLogger("lightrag").info(
+            "DB_URL relative path resolved against project root: %s", resolved_url
+        )
+    db_url = resolved_url
 
     if has_sqlalchemy_support():
         from sqlalchemy import text

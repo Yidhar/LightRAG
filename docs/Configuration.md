@@ -88,6 +88,9 @@ WHITELIST_PATHS=/health,/api/*
 
 # Platform V2 switches. The bootstrap script sets these automatically
 # — only touch them if you are driving deployment without bootstrap.
+# DB_URL's relative sqlite paths anchor to the directory this .env lives
+# in (not the process CWD), so the file lands next to your config no
+# matter how the server is launched (systemd / Docker / `uv run`).
 USE_DB_AUTH=true
 DB_URL=sqlite+aiosqlite:///./lightrag_auth.db
 ENABLE_KB_ISOLATION=true

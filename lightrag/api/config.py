@@ -6,7 +6,7 @@ import os
 import re
 import argparse
 import logging
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from lightrag.utils import get_env_value
 from lightrag.llm.binding_options import (
     GeminiEmbeddingOptions,
@@ -44,10 +44,32 @@ from lightrag.constants import (
     DEFAULT_ENTITY_TYPES,
 )
 
-# use the .env that is inside the current folder
-# allows to use different .env file for each lightrag instance
+# Locate .env by walking up from CWD; we record the directory it came
+# from as the "project root" so downstream code can anchor other
+# relative paths (DB_URL, WORKING_DIR, etc.) to it. Without this, a
+# server launched from systemd / Docker / nested `uv run` silently
+# lands on whatever CWD its parent handed it — which is how we got
+# "sqlite3.OperationalError: unable to open database file" for users
+# who wrote `sqlite+aiosqlite:///./lightrag_auth.db` expecting the
+# file to land next to their .env.
+_ENV_PATH = find_dotenv(filename=".env", usecwd=True)
+PROJECT_ROOT = os.path.dirname(os.path.abspath(_ENV_PATH)) if _ENV_PATH else os.getcwd()
+
 # the OS environment variables take precedence over the .env file
-load_dotenv(dotenv_path=".env", override=False)
+if _ENV_PATH:
+    load_dotenv(dotenv_path=_ENV_PATH, override=False)
+else:
+    load_dotenv(dotenv_path=".env", override=False)
+
+
+def get_project_root() -> str:
+    """Directory the .env was loaded from; falls back to CWD at import time.
+
+    Use this as the anchor for resolving relative paths declared in
+    env-based config (e.g. sqlite file paths in ``DB_URL``), so the same
+    ``.env`` works regardless of how the process was launched.
+    """
+    return PROJECT_ROOT
 
 
 ollama_server_infos = OllamaServerInfos()
