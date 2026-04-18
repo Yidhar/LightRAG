@@ -36,11 +36,17 @@ export default function WorkspaceSwitcher({ className }: WorkspaceSwitcherProps)
   const { memberships } = useAuthStore()
   const currentWorkspaceId = resolveWorkspaceId(workspaceId)
 
-  const { byId, ensureLoaded, nameFor } = useWorkspaceDirectoryStore((s) => ({
-    byId: s.byId,
-    ensureLoaded: s.ensureLoaded,
-    nameFor: s.nameFor,
-  }))
+  // Select slices independently — Zustand's default equality is
+  // ``Object.is``, so returning an object literal from a combined
+  // selector invalidates on every render and triggers the
+  // "getSnapshot should be cached" / "Maximum update depth exceeded"
+  // loop caught by useSyncExternalStore. Primitive / stable-ref
+  // selectors keep it shallow.
+  const byId = useWorkspaceDirectoryStore((s) => s.byId)
+  const ensureLoaded = useWorkspaceDirectoryStore((s) => s.ensureLoaded)
+  const currentName = useWorkspaceDirectoryStore((s) =>
+    currentWorkspaceId ? s.byId[currentWorkspaceId]?.name || currentWorkspaceId : ''
+  )
 
   useEffect(() => {
     void ensureLoaded()
@@ -98,7 +104,7 @@ export default function WorkspaceSwitcher({ className }: WorkspaceSwitcherProps)
             {t('header.workspace')}
           </span>
           <span className="truncate font-medium text-foreground">
-            {nameFor(currentWorkspaceId)}
+            {currentName}
           </span>
         </span>
       </SelectTrigger>
