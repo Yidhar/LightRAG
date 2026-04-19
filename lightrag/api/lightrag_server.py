@@ -412,6 +412,22 @@ def create_app(args):
         args, "default_workspace_id", None
     ) or args.workspace or "default"
     default_kb_id = getattr(args, "default_kb_id", None) or "default"
+    # Safety rail: self-registration + no KB isolation = every new user
+    # silently shares the one global RAG, so their data is visible to
+    # every other user. Fail closed on startup instead of deploying a
+    # silent multi-tenant leak.
+    if (
+        getattr(args, "allow_self_registration", False)
+        and not args.enable_kb_isolation
+    ):
+        raise RuntimeError(
+            "LIGHTRAG_ALLOW_SELF_REGISTRATION=true requires "
+            "ENABLE_KB_ISOLATION=true — without isolation, every "
+            "self-registered user shares one storage backend and can "
+            "read each other's data. Either enable KB isolation or "
+            "disable self-registration."
+        )
+
     default_runtime_workspace = args.workspace
     if args.enable_kb_isolation:
         # Post-v2 registry pivot: KBs are global, so the storage

@@ -438,14 +438,44 @@ def create_kb_routes(api_key: Optional[str] = None) -> APIRouter:
     async def list_all_knowledge_bases(
         request: Request,
     ) -> KnowledgeBaseListResponse:
-        """Every KB in the global pool, regardless of workspace linkage.
+        """Every KB the caller can see across the workspaces they belong
+        to — used by the "link existing KB" picker in the workspace
+        management UI.
 
-        Used by the "link existing KB" picker in the workspace
-        management UI: it shows every KB the user could conceivably
-        link into a workspace they own.
+        Security: we must NOT return the global pool. Earlier iterations
+        shipped ``registry.list_all_kbs()`` directly, which leaked every
+        other user's KB ids into the picker (and made source-KB theft
+        trivial when combined with the /link endpoint). Now we union the
+        per-workspace KB lists for every workspace the caller is a
+        member of. API-key callers and env-seeded admins (no db_user_id)
+        still see everything — they already pass the workspace-update
+        check for any scope.
         """
         registry = _require_kb_registry(request)
-        items = registry.list_all_kbs()
+        context = get_request_context(request)
+
+        # API-key / env-seed fallback: no DB user id → treat as admin
+        # (the workspace_view_permission check already passed for the
+        # header-supplied workspace).
+        if not context.db_user_id:
+            items = registry.list_all_kbs()
+        else:
+            from lightrag.api.identity_store import list_workspaces_for_user
+
+            workspaces = await list_workspaces_for_user(context.db_user_id)
+            seen: set[str] = set()
+            items = []
+            for workspace in workspaces:
+                try:
+                    ws_kbs = registry.list_kbs(workspace.id)
+                except Exception:
+                    continue
+                for kb in ws_kbs or []:
+                    if kb.id in seen:
+                        continue
+                    seen.add(kb.id)
+                    items.append(kb)
+
         response_items = [_to_response(item) for item in items]
         return KnowledgeBaseListResponse(
             items=response_items,
@@ -462,11 +492,19 @@ def create_kb_routes(api_key: Optional[str] = None) -> APIRouter:
         workspace_id: str,
         payload: LinkKbRequest,
     ) -> LinkKbResponse:
-        """Attach an existing global KB to this workspace.
+        """Attach an existing KB to this workspace.
 
-        After the link is created the workspace's KB list includes
-        the newly-linked KB. Idempotent — re-linking returns
-        ``already_linked`` without error.
+        After the link is created the workspace's KB list includes the
+        newly-linked KB. Idempotent — re-linking returns ``already_linked``
+        without error.
+
+        Security: the caller must already be a member of at least one
+        workspace that links the target KB. Without this check, any
+        authed user could enumerate ``GET /kb`` and sneak another
+        user's KB into their own workspace, trivially laundering read /
+        edit / delete rights on someone else's data. API-key callers
+        and env-seeded admins (no db_user_id) still bypass since they
+        already pass every downstream permission check.
         """
         registry = _require_kb_registry(request)
         context = get_request_context(request)
@@ -480,6 +518,24 @@ def create_kb_routes(api_key: Optional[str] = None) -> APIRouter:
                 status_code=404,
                 detail=f"Knowledge base '{target_kb_id}' does not exist.",
             )
+
+        if context.db_user_id:
+            from lightrag.api.identity_store import list_workspaces_for_user
+
+            caller_ws_ids = {
+                record.id
+                for record in await list_workspaces_for_user(context.db_user_id)
+            }
+            linker_ws_ids = set(registry.list_workspaces_linking_kb(target_kb_id))
+            if not (caller_ws_ids & linker_ws_ids):
+                # Caller has no membership in any workspace that already
+                # links this KB → they shouldn't even know it exists.
+                # Return 404 (not 403) to avoid confirming the KB's
+                # existence to an attacker probing ids.
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Knowledge base '{target_kb_id}' does not exist.",
+                )
 
         try:
             newly_linked = registry.link_kb_to_workspace(

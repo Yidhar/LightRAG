@@ -27,6 +27,7 @@ from pydantic import BaseModel
 
 from lightrag import LightRAG
 from lightrag.api.dependencies import get_current_rag
+from lightrag.api.permissions import Action, require_permission
 from lightrag.api.utils_api import get_combined_auth_dependency
 from lightrag.utils import logger
 
@@ -82,6 +83,11 @@ def create_image_routes(
 
     router = APIRouter(prefix="/images", tags=["images"])
     combined_auth = get_combined_auth_dependency(api_key)
+    # Image blobs are sourced from a KB's image_blob_store — the same
+    # membership rule that guards /documents applies here. Without this
+    # any authed user could fetch any blob by guessing / enumerating
+    # ``img-<sha>`` ids and flipping the ``X-KB-Id`` header.
+    image_view_permission = require_permission(Action.KB_VIEW, api_key)
 
     async def resolve_route_rag(request: Request) -> LightRAG:
         if rag is not None:
@@ -102,7 +108,10 @@ def create_image_routes(
             )
         return active_rag
 
-    @router.get("/{blob_id}", dependencies=[Depends(combined_auth)])
+    @router.get(
+        "/{blob_id}",
+        dependencies=[Depends(combined_auth), Depends(image_view_permission)],
+    )
     async def get_image_blob(
         blob_id: str,
         active_rag: LightRAG = Depends(resolve_route_rag),
@@ -155,7 +164,7 @@ def create_image_routes(
     @router.get(
         "/{blob_id}/metadata",
         response_model=ImageMetadataResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(combined_auth), Depends(image_view_permission)],
     )
     async def get_image_metadata(
         blob_id: str,
