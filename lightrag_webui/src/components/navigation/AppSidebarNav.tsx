@@ -10,12 +10,13 @@ import { useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { cn } from '@/lib/utils'
-import { appRoutes, defaultKnowledgeBaseId } from '@/app/routes'
+import { appRoutes, defaultKnowledgeBaseId, defaultWorkspaceId } from '@/app/routes'
 import { resolveKnowledgeBaseId, resolveWorkspaceId } from '@/app/routeHelpers'
 import { useAuthStore } from '@/stores/state'
 import { useWorkspaceDirectoryStore } from '@/stores/workspaceDirectory'
 import {
   hasPermission,
+  isSystemAdmin,
   resolveEffectiveRole,
   roleLabelKeys,
   type PermissionAction,
@@ -46,6 +47,10 @@ type NavItem = {
   to: string
   icon: typeof FileStackIcon
   requiredPermission: PermissionAction | null
+  // Platform-admin gate — hides the entry from regular users (e.g. the
+  // self-registered "viewer" on their personal workspace) even if the
+  // workspace-level permission check would otherwise let them through.
+  adminOnly?: boolean
 }
 
 export default function AppSidebarNav() {
@@ -115,6 +120,7 @@ export default function AppSidebarNav() {
       to: appRoutes.kbApi(currentWorkspaceId, defaultKnowledgeBaseId),
       icon: BracesIcon,
       requiredPermission: 'kb:query',
+      adminOnly: true,
     },
   ]
 
@@ -136,11 +142,16 @@ export default function AppSidebarNav() {
     },
   ]
 
+  const platformAdmin = isSystemAdmin(memberships, defaultWorkspaceId)
   const visibleWorkspaceItems = workspaceItems.filter(
-    (item) => !item.requiredPermission || hasPermission(effectiveRole, item.requiredPermission)
+    (item) =>
+      (!item.adminOnly || platformAdmin) &&
+      (!item.requiredPermission || hasPermission(effectiveRole, item.requiredPermission))
   )
   const visibleAdminItems = adminItems.filter(
-    (item) => !item.requiredPermission || hasPermission(effectiveRole, item.requiredPermission)
+    (item) =>
+      (!item.adminOnly || platformAdmin) &&
+      (!item.requiredPermission || hasPermission(effectiveRole, item.requiredPermission))
   )
 
   return (

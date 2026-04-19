@@ -9,7 +9,7 @@ import {
   SparklesIcon,
 } from 'lucide-react'
 
-import { appRoutes } from '@/app/routes'
+import { appRoutes, defaultWorkspaceId } from '@/app/routes'
 import { resolveKnowledgeBaseId, resolveWorkspaceId } from '@/app/routeHelpers'
 import {
   getDocumentStatusCounts,
@@ -17,7 +17,7 @@ import {
   type KnowledgeBaseRecord,
 } from '@/api/lightrag'
 import { useAuthStore } from '@/stores/state'
-import { hasPermission, resolveEffectiveRole } from '@/lib/permissions'
+import { hasPermission, isSystemAdmin, resolveEffectiveRole } from '@/lib/permissions'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/Alert'
 import Badge from '@/components/ui/Badge'
 import Button from '@/components/ui/Button'
@@ -103,7 +103,11 @@ export default function KnowledgeBaseOverviewPage() {
   const canOpenDocuments = hasPermission(effectiveRole, 'kb:view')
   const canOpenRetrieval = hasPermission(effectiveRole, 'kb:query')
   const canOpenGraph = hasPermission(effectiveRole, 'kb:view')
-  const canOpenApi = hasPermission(effectiveRole, 'kb:query')
+  // API reference is platform-admin only; mask the quick-action tile for
+  // everyone else so regular users don't land on a page they can't use.
+  const canOpenApi =
+    hasPermission(effectiveRole, 'kb:query') &&
+    isSystemAdmin(memberships, defaultWorkspaceId)
   const canOpenSettings = hasPermission(effectiveRole, 'kb:manage_settings')
 
   const configOverrideCount = Object.keys(knowledgeBase?.config_override || {}).length

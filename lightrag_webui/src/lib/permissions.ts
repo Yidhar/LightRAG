@@ -178,6 +178,33 @@ export const resolveEffectiveRole = (
 export const hasPermission = (role: AccessRole, action: PermissionAction): boolean =>
   ROLE_PERMISSIONS[role].has(action)
 
+/**
+ * "系统级管理员" predicate used by admin-only UI surfaces (currently the
+ * API-reference nav entries and page).
+ *
+ * Heuristic: a user is a platform admin iff they hold an owner/admin
+ * membership on the canonical ``default`` workspace.
+ *   - Env-seeded admin (AUTH_ACCOUNTS) → granted default/owner at boot.
+ *   - Bootstrap admin (/auth/register-admin) → granted default/owner.
+ *   - Self-registered users → provisioned a uuid4 personal workspace,
+ *     never default → returns false.
+ *   - Admin-invited collaborators → only treated as admin if explicitly
+ *     granted owner/admin on default (matches the semantic "has keys
+ *     to the shared/default workspace"), which is the correct gate
+ *     for the API-reference surface.
+ */
+export const isSystemAdmin = (
+  memberships: MembershipClaim[] | null | undefined,
+  defaultWorkspaceId: string
+): boolean => {
+  if (!memberships) return false
+  return memberships.some(
+    (claim) =>
+      claim.workspace_id === defaultWorkspaceId &&
+      (claim.role === 'owner' || claim.role === 'admin')
+  )
+}
+
 export const summarizeRoleCapabilityKeys = (role: AccessRole): string[] => {
   switch (role) {
     case 'owner':

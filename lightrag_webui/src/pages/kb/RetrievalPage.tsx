@@ -1,13 +1,13 @@
-import { lazy, Suspense, useEffect, useState } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { SparklesIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
-import { appRoutes } from '@/app/routes'
+import { appRoutes, defaultWorkspaceId } from '@/app/routes'
 import { resolveKnowledgeBaseId, resolveWorkspaceId } from '@/app/routeHelpers'
 import { useAuthStore } from '@/stores/state'
 import { useKBStore } from '@/stores/kb'
-import { hasPermission, resolveEffectiveRole } from '@/lib/permissions'
+import { hasPermission, isSystemAdmin, resolveEffectiveRole } from '@/lib/permissions'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/Alert'
 import Badge from '@/components/ui/Badge'
 import Button from '@/components/ui/Button'
@@ -53,6 +53,10 @@ export default function RetrievalPage() {
 
   const canQueryKnowledgeBase = hasPermission(effectiveRole, 'kb:query')
   const canManageKnowledgeBaseSettings = hasPermission(effectiveRole, 'kb:manage_settings')
+  // API reference is platform-admin only — hide its entry point from
+  // regular users so the surface stops advertising a page they can't
+  // usefully operate.
+  const platformAdmin = isSystemAdmin(memberships, defaultWorkspaceId)
 
   // Retrieval defaults to federated mode — every query spans every KB in
   // the current workspace until the operator narrows scope via the
@@ -61,13 +65,18 @@ export default function RetrievalPage() {
   const setActiveKb = useKBStore((s) => s.setActiveKb)
   const activeKbId = useKBStore((s) => s.activeKbId)
   const [allKbsMode, setAllKbsMode] = useState(true)
-  useEffect(() => {
-    // Re-enter federated mode on workspace switch so a stale per-KB
-    // selection from the previous workspace does not silently scope
-    // queries in the new one.
+  // Reset-on-prop-change via the "store previous prop in state"
+  // pattern recommended by the React docs. An effect here would trip
+  // the ``set-state-in-effect`` rule; deriving from a render-phase
+  // comparison keeps the reset synchronous with the route change and
+  // avoids a wasted render where the stale per-KB scope would leak
+  // into the first query against the new workspace.
+  const [lastWorkspaceId, setLastWorkspaceId] = useState(currentWorkspaceId)
+  if (lastWorkspaceId !== currentWorkspaceId) {
+    setLastWorkspaceId(currentWorkspaceId)
     setAllKbsMode(true)
     setActiveKb(null)
-  }, [currentWorkspaceId, setActiveKb])
+  }
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
@@ -86,11 +95,13 @@ export default function RetrievalPage() {
           </h1>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Button variant="outline" size="sm" asChild>
-            <Link to={appRoutes.kbApi(currentWorkspaceId, currentKnowledgeBaseId)}>
-              {t('platformShell.common.openApiDocs')}
-            </Link>
-          </Button>
+          {platformAdmin && (
+            <Button variant="outline" size="sm" asChild>
+              <Link to={appRoutes.kbApi(currentWorkspaceId, currentKnowledgeBaseId)}>
+                {t('platformShell.common.openApiDocs')}
+              </Link>
+            </Button>
+          )}
           {canManageKnowledgeBaseSettings && (
             <Button variant="outline" size="sm" asChild>
               <Link to={appRoutes.kbSettings(currentWorkspaceId, currentKnowledgeBaseId)}>

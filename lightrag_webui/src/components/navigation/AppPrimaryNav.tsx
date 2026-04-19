@@ -1,10 +1,15 @@
 import { NavLink, useLocation, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
-import { appRoutes } from '@/app/routes'
+import { appRoutes, defaultWorkspaceId } from '@/app/routes'
 import { resolveWorkspaceId } from '@/app/routeHelpers'
 import { useAuthStore } from '@/stores/state'
-import { hasPermission, resolveEffectiveRole, type PermissionAction } from '@/lib/permissions'
+import {
+  hasPermission,
+  isSystemAdmin,
+  resolveEffectiveRole,
+  type PermissionAction,
+} from '@/lib/permissions'
 
 /**
  * Tablet primary nav. Phase A removed the KB URL tier, so the visible
@@ -59,6 +64,7 @@ export default function AppPrimaryNav() {
         label: t('header.api'),
         to: appRoutes.kbApi(currentWorkspaceId),
         requiredPermission: 'kb:query' as PermissionAction,
+        adminOnly: true,
       },
       {
         label: t('header.kbSettings'),
@@ -66,9 +72,17 @@ export default function AppPrimaryNav() {
         requiredPermission: 'kb:manage_settings' as PermissionAction,
       },
     ]
-  const visibleItems = items.filter(
-    (item) => !item.requiredPermission || hasPermission(effectiveRole, item.requiredPermission)
-  )
+  const platformAdmin = isSystemAdmin(memberships, defaultWorkspaceId)
+  const visibleItems = items.filter((item) => {
+    // ``adminOnly`` is only set on the API-reference entry; access via a
+    // soft cast so the TS union (admin-route branch vs feature branch)
+    // stays inferrable from the object literals.
+    const adminOnly = (item as { adminOnly?: boolean }).adminOnly ?? false
+    return (
+      (!adminOnly || platformAdmin) &&
+      (!item.requiredPermission || hasPermission(effectiveRole, item.requiredPermission))
+    )
+  })
 
   return (
     <nav className="flex flex-wrap items-center justify-center gap-2">

@@ -1,13 +1,13 @@
 import { lazy, Suspense } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, Navigate, useParams } from 'react-router-dom'
 import { BracesIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
-import { appRoutes } from '@/app/routes'
+import { appRoutes, defaultWorkspaceId } from '@/app/routes'
 import { resolveKnowledgeBaseId, resolveWorkspaceId } from '@/app/routeHelpers'
 import { backendBaseUrl } from '@/lib/constants'
 import { useAuthStore } from '@/stores/state'
-import { hasPermission, resolveEffectiveRole } from '@/lib/permissions'
+import { hasPermission, isSystemAdmin, resolveEffectiveRole } from '@/lib/permissions'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/Alert'
 import Badge from '@/components/ui/Badge'
 import Button from '@/components/ui/Button'
@@ -38,6 +38,19 @@ export default function ApiPage() {
   )
   const canQueryKnowledgeBase = hasPermission(effectiveRole, 'kb:query')
   const apiDocsUrl = backendBaseUrl ? `${backendBaseUrl}/docs` : '/docs'
+
+  // API reference is platform-admin only. A regular user who types the
+  // URL directly (or follows a stale bookmark) gets bounced back to the
+  // workspace documents page rather than seeing a Swagger UI they can't
+  // usefully operate.
+  if (!isSystemAdmin(memberships, defaultWorkspaceId)) {
+    return (
+      <Navigate
+        to={appRoutes.kbDocuments(currentWorkspaceId, currentKnowledgeBaseId)}
+        replace
+      />
+    )
+  }
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
