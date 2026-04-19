@@ -3,10 +3,9 @@ import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { BriefcaseBusinessIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
-import { appRoutes, defaultWorkspaceId } from '@/app/routes'
+import { appRoutes } from '@/app/routes'
 import { resolveWorkspaceId } from '@/app/routeHelpers'
 import { cn } from '@/lib/utils'
-import { useAuthStore } from '@/stores/state'
 import { useWorkspaceDirectoryStore } from '@/stores/workspaceDirectory'
 import {
   Select,
@@ -33,7 +32,6 @@ export default function WorkspaceSwitcher({ className }: WorkspaceSwitcherProps)
   const navigate = useNavigate()
   const { pathname } = useLocation()
   const { workspaceId } = useParams()
-  const { memberships } = useAuthStore()
   const currentWorkspaceId = resolveWorkspaceId(workspaceId)
 
   // Select slices independently — Zustand's default equality is
@@ -43,6 +41,7 @@ export default function WorkspaceSwitcher({ className }: WorkspaceSwitcherProps)
   // loop caught by useSyncExternalStore. Primitive / stable-ref
   // selectors keep it shallow.
   const byId = useWorkspaceDirectoryStore((s) => s.byId)
+  const workspaces = useWorkspaceDirectoryStore((s) => s.workspaces)
   const ensureLoaded = useWorkspaceDirectoryStore((s) => s.ensureLoaded)
   const currentName = useWorkspaceDirectoryStore((s) =>
     currentWorkspaceId ? s.byId[currentWorkspaceId]?.name || currentWorkspaceId : ''
@@ -52,25 +51,29 @@ export default function WorkspaceSwitcher({ className }: WorkspaceSwitcherProps)
     void ensureLoaded()
   }, [ensureLoaded])
 
-  // Union of: default workspace, every workspace the user holds a claim
-  // in, and whatever directory record we already cached. Deduped by id
-  // and sorted so the default sticks to the top.
+  // Authoritative list comes ONLY from the backend — `GET /workspaces`
+  // already filters by the caller's memberships. Do NOT merge in
+  // hardcoded fallbacks (defaultWorkspaceId) or JWT claims; that let
+  // self-registered users see workspaces they're not members of.
+  // Preserve backend order (created_at asc) so the user's personal
+  // workspace (usually first membership) sticks to the top.
   const options = useMemo(() => {
     const seen = new Set<string>()
     const ids: string[] = []
-    const push = (id: string) => {
-      if (!id || seen.has(id)) return
-      seen.add(id)
-      ids.push(id)
+    for (const ws of workspaces) {
+      if (!seen.has(ws.id)) {
+        seen.add(ws.id)
+        ids.push(ws.id)
+      }
     }
-    push(defaultWorkspaceId)
-    for (const claim of memberships) {
-      if (claim.workspace_id) push(claim.workspace_id)
+    // Include the current url-scoped workspace iff it's genuinely one
+    // of the user's workspaces — never leak a non-member workspace
+    // into the dropdown just because the URL points at it.
+    if (currentWorkspaceId && seen.has(currentWorkspaceId) === false) {
+      // Intentionally omit — triggering a redirect is handled elsewhere.
     }
-    for (const id of Object.keys(byId)) push(id)
-    if (currentWorkspaceId) push(currentWorkspaceId)
     return ids
-  }, [memberships, byId, currentWorkspaceId])
+  }, [workspaces, currentWorkspaceId])
 
   // Map /app/workspaces/<current>/<rest> → /app/workspaces/<next>/<rest>
   // so clicking in the switcher keeps the operator on the same surface.

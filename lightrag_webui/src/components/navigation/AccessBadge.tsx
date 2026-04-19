@@ -12,6 +12,9 @@ const toneByRole: Record<AccessRole, string> = {
     'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/12 dark:text-amber-300',
   viewer:
     'border-slate-200 bg-slate-50 text-slate-700 dark:border-slate-500/30 dark:bg-slate-500/12 dark:text-slate-300',
+  // no_access short-circuits in the component body, so this tone is
+  // never rendered — declared only to satisfy the exhaustive Record.
+  no_access: '',
 }
 
 interface AccessBadgeProps {
@@ -22,6 +25,14 @@ interface AccessBadgeProps {
 
 export default function AccessBadge({ role, className, compact = false }: AccessBadgeProps) {
   const { t } = useTranslation()
+  // no_access means "the user isn't a member of this workspace". The
+  // app should never strand a user on such a workspace in the first
+  // place (the redirect in RequireAuth handles it). Don't render a
+  // "无权访问" chip as a fallback — it implies we support a permission
+  // tier we intentionally don't.
+  if (role === 'no_access') {
+    return null
+  }
   const roleLabel = t(roleLabelKeys[role])
 
   return (

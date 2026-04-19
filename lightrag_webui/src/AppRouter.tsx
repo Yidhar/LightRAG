@@ -124,12 +124,9 @@ const AppContent = () => {
   return (
     <Routes>
       <Route path="/login" element={withRouteSuspense(<LoginPage />)} />
-      <Route path="/" element={<Navigate to={appRoutes.kbDocuments()} replace />} />
+      <Route path="/" element={<LandingRedirect />} />
       <Route path="/app" element={<RequireAuth />}>
-        <Route
-          index
-          element={<Navigate to={`workspaces/${defaultWorkspaceId}/documents`} replace />}
-        />
+        <Route index element={<LandingRedirect />} />
         <Route path="workspaces">
           <Route index element={withRouteSuspense(<WorkspaceListPage />)} />
           <Route path=":workspaceId">
@@ -194,6 +191,39 @@ function LegacyKbRedirect({ leaf }: { leaf: string }) {
   const { workspaceId } = useParams()
   const resolvedWorkspace = workspaceId || defaultWorkspaceId
   return <Navigate to={`/app/workspaces/${resolvedWorkspace}/${leaf}`} replace />
+}
+
+/**
+ * Pick the right workspace to land on for the current user.
+ *
+ * - Unauthenticated → /login
+ * - First membership in the JWT claims → /app/workspaces/<that>/documents
+ * - No memberships at all → /app/workspaces (workspace management page
+ *   where the user can see they have nothing and create one)
+ *
+ * We deliberately do NOT fall back to the literal "default" workspace id
+ * — a self-registered user does not belong to the default workspace and
+ * landing them there leaves the sidebar in a stranded "无权访问" state.
+ */
+function LandingRedirect() {
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
+  const memberships = useAuthStore((s) => s.memberships)
+
+  if (!isAuthenticated) {
+    return <Navigate to={appRoutes.login} replace />
+  }
+
+  const firstWorkspaceId = (() => {
+    for (const claim of memberships || []) {
+      if (claim.workspace_id) return claim.workspace_id
+    }
+    return null
+  })()
+
+  if (firstWorkspaceId) {
+    return <Navigate to={appRoutes.kbDocuments(firstWorkspaceId)} replace />
+  }
+  return <Navigate to={appRoutes.workspaces} replace />
 }
 
 const AppRouter = () => {
