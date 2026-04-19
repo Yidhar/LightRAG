@@ -6,10 +6,12 @@ import { useTranslation } from 'react-i18next'
 import { appRoutes } from '@/app/routes'
 import { resolveKnowledgeBaseId, resolveWorkspaceId } from '@/app/routeHelpers'
 import { useAuthStore } from '@/stores/state'
+import { useKBStore } from '@/stores/kb'
 import { hasPermission, resolveEffectiveRole } from '@/lib/permissions'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/Alert'
 import Badge from '@/components/ui/Badge'
 import Button from '@/components/ui/Button'
+import KBTabs from '@/components/documents/KBTabs'
 
 const GraphViewer = lazy(() => import('@/features/GraphViewer'))
 
@@ -45,6 +47,11 @@ export default function GraphPage() {
   )
 
   const canViewKnowledgeBase = hasPermission(effectiveRole, 'kb:view')
+  // Graph reads can't federate across KBs — each KB has its own graph
+  // storage and merging them server-side would be expensive and largely
+  // meaningless for visualization. So the picker here is single-select
+  // (no "全部" option); KBTabs auto-seeds the first linked KB.
+  const activeKbId = useKBStore((s) => s.activeKbId)
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
@@ -76,6 +83,7 @@ export default function GraphPage() {
         </div>
       </header>
 
+      {canViewKnowledgeBase && <KBTabs workspaceId={currentWorkspaceId} />}
 
       {!canViewKnowledgeBase && (
         <Alert className="mx-6 mt-4 border-border/70 bg-muted/20">
@@ -87,7 +95,12 @@ export default function GraphPage() {
       {canViewKnowledgeBase ? (
         <div className="min-h-0 flex-1 overflow-hidden">
           <Suspense fallback={<GraphSurfaceLoading />}>
-            <GraphViewer />
+            {/* Key on ``activeKbId`` so picking a different KB forces a
+                fresh mount — sigma reinitializes, label dropdowns
+                reload, and the cached viewport is thrown away. Without
+                the remount the previous KB's graph data lingers because
+                internal refs hold onto nodes/edges from the old query. */}
+            <GraphViewer key={activeKbId ?? '__unscoped__'} />
           </Suspense>
         </div>
       ) : (
