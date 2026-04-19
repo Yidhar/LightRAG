@@ -20,7 +20,6 @@ import {
   roleLabelKeys,
   type PermissionAction,
 } from '@/lib/permissions'
-import AccessBadge from '@/components/navigation/AccessBadge'
 
 /**
  * Workspace-scoped sidebar navigation.
@@ -54,7 +53,20 @@ export default function AppSidebarNav() {
   const { workspaceId, kbId } = useParams()
   const { role, memberships } = useAuthStore()
 
-  const currentWorkspaceId = resolveWorkspaceId(workspaceId)
+  // On routes that do carry ``:workspaceId`` (documents / retrieval /
+  // graph / api / …) use the URL's workspace. On routes that don't
+  // (notably ``/app/workspaces`` — the management list) fall back to
+  // the user's PRIMARY membership, not the literal "default" — a
+  // self-registered user isn't a member of "default" and the old
+  // fallback left their sidebar empty because ``resolveEffectiveRole``
+  // returned ``no_access`` against a workspace they don't belong to.
+  const primaryWorkspaceId = (() => {
+    for (const claim of memberships || []) {
+      if (claim.workspace_id) return claim.workspace_id
+    }
+    return null
+  })()
+  const currentWorkspaceId = workspaceId || primaryWorkspaceId || resolveWorkspaceId(workspaceId)
   const currentKnowledgeBaseId = resolveKnowledgeBaseId(kbId)
   const effectiveRole = resolveEffectiveRole(
     { role, memberships },
@@ -133,19 +145,16 @@ export default function AppSidebarNav() {
 
   return (
     <aside className="hidden w-[240px] shrink-0 flex-col border-r border-border/60 bg-sidebar/95 lg:flex">
-      <div className="flex items-center justify-between border-b border-border/60 px-4 py-3">
-        <div className="min-w-0">
-          <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-            {t('platformShell.common.workspace')}
-          </p>
-          <p
-            className="truncate text-sm font-semibold text-sidebar-foreground"
-            title={currentWorkspaceId}
-          >
-            {workspaceName}
-          </p>
-        </div>
-        <AccessBadge role={effectiveRole} compact />
+      <div className="border-b border-border/60 px-4 py-3">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+          {t('platformShell.common.workspace')}
+        </p>
+        <p
+          className="truncate text-sm font-semibold text-sidebar-foreground"
+          title={currentWorkspaceId}
+        >
+          {workspaceName}
+        </p>
       </div>
 
       <nav className="flex-1 space-y-5 overflow-y-auto px-2 py-3">
