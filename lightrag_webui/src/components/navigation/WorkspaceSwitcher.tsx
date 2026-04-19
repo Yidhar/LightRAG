@@ -6,6 +6,7 @@ import { useTranslation } from 'react-i18next'
 import { appRoutes } from '@/app/routes'
 import { resolveWorkspaceId } from '@/app/routeHelpers'
 import { cn } from '@/lib/utils'
+import { useAuthStore } from '@/stores/state'
 import { useWorkspaceDirectoryStore } from '@/stores/workspaceDirectory'
 import {
   Select,
@@ -32,7 +33,21 @@ export default function WorkspaceSwitcher({ className }: WorkspaceSwitcherProps)
   const navigate = useNavigate()
   const { pathname } = useLocation()
   const { workspaceId } = useParams()
-  const currentWorkspaceId = resolveWorkspaceId(workspaceId)
+  const memberships = useAuthStore((s) => s.memberships)
+  // On routes without ``:workspaceId`` (notably ``/app/workspaces`` —
+  // the management list), fall back to the user's PRIMARY membership
+  // rather than ``resolveWorkspaceId``'s literal ``"default"``. A
+  // self-registered user is not a member of "default", so the old
+  // fallback surfaced a workspace they cannot use and — because
+  // ``byId["default"]`` is absent — displayed the raw id string.
+  const primaryWorkspaceId = useMemo(() => {
+    for (const claim of memberships || []) {
+      if (claim.workspace_id) return claim.workspace_id
+    }
+    return null
+  }, [memberships])
+  const currentWorkspaceId =
+    workspaceId || primaryWorkspaceId || resolveWorkspaceId(workspaceId)
 
   // Select slices independently — Zustand's default equality is
   // ``Object.is``, so returning an object literal from a combined

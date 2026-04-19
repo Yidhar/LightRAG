@@ -97,7 +97,9 @@ const useSettingsStoreBase = create<SettingsState>()(
   persist(
     (set) => ({
       theme: 'system',
-      language: 'en',
+      // Default product language is Simplified Chinese. The i18n runtime
+      // still falls back to English for any key missing in zh.json.
+      language: 'zh',
       showPropertyPanel: true,
       showNodeSearchBar: true,
       showLegend: false,

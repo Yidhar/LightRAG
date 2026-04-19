@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { SparklesIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -6,10 +6,12 @@ import { useTranslation } from 'react-i18next'
 import { appRoutes } from '@/app/routes'
 import { resolveKnowledgeBaseId, resolveWorkspaceId } from '@/app/routeHelpers'
 import { useAuthStore } from '@/stores/state'
+import { useKBStore } from '@/stores/kb'
 import { hasPermission, resolveEffectiveRole } from '@/lib/permissions'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/Alert'
 import Badge from '@/components/ui/Badge'
 import Button from '@/components/ui/Button'
+import KBTabs from '@/components/documents/KBTabs'
 
 const RetrievalTesting = lazy(() => import('@/features/RetrievalTesting'))
 
@@ -52,6 +54,21 @@ export default function RetrievalPage() {
   const canQueryKnowledgeBase = hasPermission(effectiveRole, 'kb:query')
   const canManageKnowledgeBaseSettings = hasPermission(effectiveRole, 'kb:manage_settings')
 
+  // Retrieval defaults to federated mode — every query spans every KB in
+  // the current workspace until the operator narrows scope via the
+  // dropdown. Start with the sentinel selected and ``activeKbId`` null so
+  // the axios interceptor does not inject ``X-KB-Id`` on the first query.
+  const setActiveKb = useKBStore((s) => s.setActiveKb)
+  const activeKbId = useKBStore((s) => s.activeKbId)
+  const [allKbsMode, setAllKbsMode] = useState(true)
+  useEffect(() => {
+    // Re-enter federated mode on workspace switch so a stale per-KB
+    // selection from the previous workspace does not silently scope
+    // queries in the new one.
+    setAllKbsMode(true)
+    setActiveKb(null)
+  }, [currentWorkspaceId, setActiveKb])
+
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
       <header className="flex flex-wrap items-end justify-between gap-4 border-b border-border/60 px-6 py-4">
@@ -84,6 +101,16 @@ export default function RetrievalPage() {
         </div>
       </header>
 
+      {canQueryKnowledgeBase && (
+        <KBTabs
+          workspaceId={currentWorkspaceId}
+          allowAllOption
+          allKbsSelected={allKbsMode}
+          onPickAll={() => setAllKbsMode(true)}
+          onChange={() => setAllKbsMode(false)}
+        />
+      )}
+
       {!canQueryKnowledgeBase && (
         <Alert className="mx-6 mt-4 border-border/70 bg-muted/20">
           <AlertTitle>{t('platformShell.retrieval.unavailableTitle')}</AlertTitle>
@@ -94,7 +121,13 @@ export default function RetrievalPage() {
       {canQueryKnowledgeBase ? (
         <div className="min-h-0 flex-1 overflow-hidden">
           <Suspense fallback={<RetrievalSurfaceLoading />}>
-            <RetrievalTesting />
+            {/* Key on the picked scope so switching KB remounts and
+                re-fetches the per-KB history. In allKbsMode we key on
+                the sentinel so remount fires when flipping in/out of
+                the federated view. */}
+            <RetrievalTesting
+              key={allKbsMode ? '__all_kbs__' : activeKbId ?? '__default__'}
+            />
           </Suspense>
         </div>
       ) : (

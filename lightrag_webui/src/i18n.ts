@@ -6,6 +6,11 @@ import { useSettingsStore } from '@/stores/settings'
 type SupportedLanguage = 'en' | 'zh' | 'fr' | 'ar' | 'zh_TW' | 'ru' | 'ja' | 'de' | 'uk' | 'ko' | 'vi'
 type TranslationDictionary = Record<string, unknown>
 
+// Simplified-Chinese is the product default (首次进入即中文); English
+// stays as the i18next fallback so any translation key missing from
+// zh.json silently resolves to its English string instead of showing
+// the raw key to the user.
+const defaultLanguage: SupportedLanguage = 'zh'
 const fallbackLanguage: SupportedLanguage = 'en'
 const supportedLanguages: SupportedLanguage[] = [
   'en',
@@ -55,7 +60,7 @@ const getStoredLanguage = () => {
   } catch (e) {
     console.error('Failed to get stored language:', e)
   }
-  return fallbackLanguage
+  return defaultLanguage
 }
 
 const loadTranslationDictionary = async (language: SupportedLanguage): Promise<TranslationDictionary> => {

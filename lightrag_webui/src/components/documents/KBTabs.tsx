@@ -102,15 +102,26 @@ export default function KBTabs({
       setKnowledgeBases(response.items)
       const firstKbId = response.items[0]?.id ?? null
       if (response.items.length > 0) {
-        // If nothing is selected yet, or the selection doesn't exist in
-        // this workspace (stale URL ``?kb=`` / workspace switch / deleted
-        // KB), snap to the first actually-linked KB. Falling back to the
-        // string "default" is wrong — a personal workspace might not have
-        // any KB named "default" linked, which 404s /documents/paginated.
-        if (
+        if (allKbsSelected) {
+          // Parent owns the selection ("全部知识库"): do NOT auto-seed
+          // ``activeKbId`` to the first KB. Also clear any stale id so the
+          // axios interceptor stops injecting ``X-KB-Id`` and the backend
+          // federates across every KB in the workspace. Without this, the
+          // picker would render "全部" while queries silently scoped to
+          // firstKb — the exact bug we hit on RetrievalPage.
+          if (activeKbId) {
+            setActiveKb(null)
+            writeKbQuery(null)
+          }
+        } else if (
           !activeKbId ||
           !response.items.some((kb) => kb.id === activeKbId)
         ) {
+          // If nothing is selected yet, or the selection doesn't exist in
+          // this workspace (stale URL ``?kb=`` / workspace switch / deleted
+          // KB), snap to the first actually-linked KB. Falling back to the
+          // string "default" is wrong — a personal workspace might not have
+          // any KB named "default" linked, which 404s /documents/paginated.
           if (firstKbId) {
             setActiveKb(firstKbId)
             writeKbQuery(firstKbId)
@@ -131,7 +142,7 @@ export default function KBTabs({
     } finally {
       setLoading(false)
     }
-  }, [workspaceId, activeKbId, setActiveKb, writeKbQuery])
+  }, [workspaceId, activeKbId, allKbsSelected, setActiveKb, writeKbQuery])
 
   useEffect(() => {
     void load()
@@ -152,6 +163,12 @@ export default function KBTabs({
 
   const handlePick = (kbId: string) => {
     if (kbId === ALL_KBS_SENTINEL) {
+      // Clear activeKbId in the store so the axios interceptor stops
+      // injecting ``X-KB-Id``. Callers that care about aggregate-mode
+      // read the ``allKbsSelected`` flag the parent now flips via
+      // ``onPickAll`` — never ``activeKbId`` being a sentinel.
+      setActiveKb(null)
+      writeKbQuery(null)
       if (onPickAll) onPickAll()
       return
     }
