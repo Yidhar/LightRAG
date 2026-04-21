@@ -601,8 +601,16 @@ def create_app(args):
         allow_methods=["*"],
         allow_headers=["*"],
         expose_headers=[
-            "X-New-Token"
-        ],  # Expose token renewal header for cross-origin requests
+            "X-New-Token",  # Token renewal header for cross-origin requests
+            # So the retrieval-citation download flow can honour the
+            # server-assigned filename (specifically the ``.txt``
+            # suffix appended when the source file is reconstructed
+            # from stored text rather than streamed from disk). Without
+            # this, browsers hide Content-Disposition from JS on CORS
+            # responses and the download falls back to the raw
+            # requested name — a ``.pdf`` that's actually plaintext.
+            "Content-Disposition",
+        ],
     )
 
     # Create combined auth dependency for all endpoints

@@ -1497,6 +1497,31 @@ export const uploadDocument = async (
 }
 
 /**
+ * Parse an RFC 5987 ``Content-Disposition`` header and return the
+ * filename the server asked us to save under, or ``null`` if the
+ * header is absent / malformed. Prefers the UTF-8 ``filename*=``
+ * form — the ASCII ``filename="..."`` fallback typically drops
+ * non-Latin characters so a Chinese-named file would arrive as a
+ * bare extension otherwise.
+ */
+const parseContentDispositionFilename = (
+  disposition: string | undefined | null
+): string | null => {
+  if (!disposition) return null
+  // RFC 5987 extended parameter: filename*=UTF-8''<url-encoded>
+  const utf8Match = disposition.match(/filename\*\s*=\s*UTF-8''([^;]+)/i)
+  if (utf8Match) {
+    try {
+      return decodeURIComponent(utf8Match[1].trim())
+    } catch {
+      // fall through to ASCII fallback
+    }
+  }
+  const asciiMatch = disposition.match(/filename\s*=\s*"?([^";]+)"?/i)
+  return asciiMatch ? asciiMatch[1].trim() : null
+}
+
+/**
  * Download a source document from the current workspace's input
  * directory and trigger a browser save dialog.
  *
@@ -1506,17 +1531,30 @@ export const uploadDocument = async (
  * header injection; a plain ``<a href>`` would not carry the JWT.
  * The blob is held only long enough to drive the click, then the
  * object URL is revoked so the blob can be GC'd.
+ *
+ * The server may return the file under a different name than the
+ * one requested — specifically, for programmatically-ingested
+ * docs with no on-disk source the server reconstructs the text
+ * and tags it with a ``.txt`` suffix. Respecting
+ * ``Content-Disposition`` keeps that suffix visible to the
+ * operator instead of mis-saving text content under a ``.pdf``
+ * extension that would confuse downstream viewers.
  */
 export const downloadSourceFile = async (name: string): Promise<void> => {
   const response = await axiosInstance.get('/documents/file', {
     params: { name },
     responseType: 'blob',
   })
+  const disposition =
+    (response.headers?.['content-disposition'] as string | undefined) ??
+    (response.headers?.['Content-Disposition'] as string | undefined) ??
+    null
+  const effectiveName = parseContentDispositionFilename(disposition) || name
   const blobUrl = URL.createObjectURL(response.data as Blob)
   try {
     const link = document.createElement('a')
     link.href = blobUrl
-    link.download = name
+    link.download = effectiveName
     document.body.appendChild(link)
     link.click()
     link.remove()

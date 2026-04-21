@@ -26,7 +26,8 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.params import Depends as DependsParameter
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
+from urllib.parse import quote as url_quote
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from lightrag import LightRAG
@@ -4524,28 +4525,41 @@ def create_document_routes(
                 "``file_path`` surfaced on retrieval chunks / references."
             ),
         ),
+        active_rag: LightRAG = Depends(resolve_route_rag),
         active_doc_manager: DocumentManager = Depends(resolve_route_doc_manager),
     ):
-        """Stream the original source file back to the caller.
+        """Stream the source file back to the caller.
 
-        Used by the retrieval UI's 参考来源 (source references) panel so
-        operators can click through to the underlying PDF / markdown /
-        text that a citation came from. Access is gated on ``KB_VIEW``
-        — the same permission required to see the citation in the
-        first place.
+        Two-tier resolution:
 
-        Path-traversal hardening layers:
-          * ``DocumentManager.input_dir`` is already a workspace-scoped
-            subdirectory, so caller A cannot read caller B's files.
-          * ``sanitize_filename`` strips path separators / ``..`` / NUL /
-            control chars and re-validates the resolved path stays
-            inside ``input_dir`` — idempotent for filenames that were
-            sanitized at upload time (i.e. every filename this endpoint
-            ever sees legitimately).
+        1. **On-disk fast path** — if ``input_dir/<safe_name>`` exists,
+           stream it via FastAPI's ``FileResponse`` (zero-copy sendfile).
+           This is the common case: anything uploaded via
+           ``POST /documents/upload`` landed on disk and is handed back
+           byte-for-byte.
 
-        Returns 404 for files that were indexed programmatically with a
-        logical ``file_path`` that does not correspond to an on-disk
-        source (``rag.ainsert(texts, file_paths=["logical-id"])``).
+        2. **Reconstructed-text fallback** — if no on-disk file matches,
+           try to find a tracked document whose ``file_path`` equals the
+           requested name and return the stored full text of that
+           document as a ``.txt`` attachment. Covers documents ingested
+           programmatically via
+           ``rag.ainsert(texts, file_paths=["logical-id"])`` where the
+           file path is a citation label and no binary source exists.
+           Appending ``.txt`` to the original name (instead of replacing
+           the extension) keeps the provenance visible — the user can
+           tell ``doc1.pdf.txt`` is the extracted text of the
+           programmatically-imported ``doc1.pdf``, not the real PDF.
+
+        Path-traversal hardening layers (step 1 only; step 2 never
+        touches the filesystem for the download name):
+          * ``DocumentManager.input_dir`` is workspace-scoped so caller
+            A cannot read caller B's files.
+          * ``sanitize_filename`` strips path separators / ``..`` / NUL
+            / control chars and re-validates ``is_relative_to`` —
+            idempotent for filenames sanitized at upload time.
+
+        Gated on ``KB_VIEW`` — the same permission required to surface
+        the citation in the first place.
         """
         doc_manager = _resolve_active_doc_manager(active_doc_manager)
         safe_name = sanitize_filename(name, doc_manager.input_dir)
@@ -4558,18 +4572,53 @@ def create_document_routes(
                 raise HTTPException(status_code=400, detail="Unsafe filename detected")
         except (OSError, ValueError):
             raise HTTPException(status_code=400, detail="Invalid filename")
-        if not candidate.is_file():
+
+        if candidate.is_file():
+            content_type = (
+                mimetypes.guess_type(str(candidate))[0] or "application/octet-stream"
+            )
+            return FileResponse(
+                candidate,
+                media_type=content_type,
+                filename=safe_name,
+            )
+
+        # Fallback: reconstruct the text from full_docs KV. The DB-backed
+        # ``file_path`` is the raw (un-sanitized) value passed at ingest
+        # time — ``name`` from the request is the value surfaced on the
+        # chunk, so they match without another round of sanitization.
+        rag = _resolve_active_rag(active_rag)
+        doc_id, _status = await _find_tracked_document_by_file_path(rag, name)
+        if doc_id is None:
             raise HTTPException(
                 status_code=404,
-                detail=f"Source file '{safe_name}' not found in this workspace",
+                detail=f"Source file '{name}' not found in this workspace",
             )
-        content_type = (
-            mimetypes.guess_type(str(candidate))[0] or "application/octet-stream"
+        full_doc = await rag.full_docs.get_by_id(doc_id)
+        content = (full_doc or {}).get("content") if isinstance(full_doc, dict) else None
+        if not content:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Source file '{name}' has no retrievable text content "
+                    "(document may have been purged or never indexed)."
+                ),
+            )
+
+        # Use the original name plus ``.txt`` so the file-tree preserves
+        # the citation label. RFC 5987 ``filename*`` carries the UTF-8
+        # name cleanly (Chinese / other non-ASCII filenames are common);
+        # the ASCII ``filename=`` fallback is a best-effort slug.
+        download_name = f"{name}.txt"
+        ascii_fallback = download_name.encode("ascii", "ignore").decode("ascii") or "source.txt"
+        disposition = (
+            f"attachment; filename=\"{ascii_fallback}\"; "
+            f"filename*=UTF-8''{url_quote(download_name)}"
         )
-        return FileResponse(
-            candidate,
-            media_type=content_type,
-            filename=safe_name,
+        return Response(
+            content=str(content).encode("utf-8"),
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": disposition},
         )
 
     @router.post(
