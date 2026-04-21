@@ -1,14 +1,21 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import {
   ChevronDownIcon,
+  DownloadIcon,
   FileTextIcon,
   LoaderIcon,
   ScanSearchIcon,
   SparklesIcon,
 } from 'lucide-react'
+import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
 
-import { type Message, type QueryReference, type RetrievedChunk } from '@/api/lightrag'
+import {
+  downloadSourceFile,
+  type Message,
+  type QueryReference,
+  type RetrievedChunk,
+} from '@/api/lightrag'
 import { ChunkImageGrid } from '@/components/retrieval/ChunkImage'
 import { cn } from '@/lib/utils'
 
@@ -35,6 +42,23 @@ export const ChatMessage = ({
   const { t } = useTranslation()
   const [isThinkingExpanded, setIsThinkingExpanded] = useState(false)
   const [areSourcesExpanded, setAreSourcesExpanded] = useState(false)
+  // Tracks which filename is currently downloading so concurrent clicks
+  // can't stack up duplicate save dialogs and the spinner is scoped to
+  // the row the operator actually clicked.
+  const [downloadingName, setDownloadingName] = useState<string | null>(null)
+
+  const handleDownloadSource = async (name: string) => {
+    if (!name || downloadingName) return
+    setDownloadingName(name)
+    try {
+      await downloadSourceFile(name)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      toast.error(t('retrievePanel.chatMessage.downloadFailed', { message }))
+    } finally {
+      setDownloadingName(null)
+    }
+  }
 
   const { thinkingContent, displayContent, thinkingTime, isThinking } = message
 
@@ -196,9 +220,21 @@ export const ChatMessage = ({
                           {t('retrievePanel.chatMessage.sourceLabel', { index: index + 1 })}
                         </span>
                         {chunk.file_path && (
-                          <span className="truncate text-xs text-muted-foreground">
-                            {chunk.file_path}
-                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleDownloadSource(chunk.file_path!)}
+                            disabled={downloadingName !== null}
+                            title={t('retrievePanel.chatMessage.downloadSource')}
+                            aria-label={t('retrievePanel.chatMessage.downloadSource')}
+                            className="motion-standard group inline-flex max-w-full items-center gap-1.5 rounded-md px-1 py-0.5 text-xs text-muted-foreground hover:bg-emerald-500/10 hover:text-emerald-700 disabled:cursor-wait disabled:opacity-60 dark:hover:text-emerald-300"
+                          >
+                            {downloadingName === chunk.file_path ? (
+                              <LoaderIcon className="size-3 shrink-0 animate-spin" />
+                            ) : (
+                              <DownloadIcon className="size-3 shrink-0 opacity-70 group-hover:opacity-100" />
+                            )}
+                            <span className="truncate">{chunk.file_path}</span>
+                          </button>
                         )}
                       </div>
                       <p className="whitespace-pre-wrap text-sm leading-6 text-foreground/90">
@@ -211,12 +247,22 @@ export const ChatMessage = ({
                     <div className="rounded-2xl border border-dashed border-border/70 bg-background/70 p-3">
                       <div className="flex flex-wrap gap-2">
                         {referenceItems.slice(0, 8).map((reference) => (
-                          <span
+                          <button
                             key={reference.reference_id}
-                            className="rounded-full border border-border/70 bg-muted/20 px-3 py-1 text-xs text-muted-foreground"
+                            type="button"
+                            onClick={() => handleDownloadSource(reference.file_path)}
+                            disabled={downloadingName !== null || !reference.file_path}
+                            title={t('retrievePanel.chatMessage.downloadSource')}
+                            aria-label={t('retrievePanel.chatMessage.downloadSource')}
+                            className="motion-standard group inline-flex max-w-full items-center gap-1.5 rounded-full border border-border/70 bg-muted/20 px-3 py-1 text-xs text-muted-foreground hover:border-emerald-500/40 hover:bg-emerald-500/10 hover:text-emerald-700 disabled:cursor-wait disabled:opacity-60 dark:hover:text-emerald-300"
                           >
-                            {reference.file_path}
-                          </span>
+                            {downloadingName === reference.file_path ? (
+                              <LoaderIcon className="size-3 shrink-0 animate-spin" />
+                            ) : (
+                              <DownloadIcon className="size-3 shrink-0 opacity-70 group-hover:opacity-100" />
+                            )}
+                            <span className="truncate">{reference.file_path}</span>
+                          </button>
                         ))}
                       </div>
                     </div>

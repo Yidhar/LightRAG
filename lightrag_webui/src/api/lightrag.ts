@@ -1496,6 +1496,38 @@ export const uploadDocument = async (
   return response.data
 }
 
+/**
+ * Download a source document from the current workspace's input
+ * directory and trigger a browser save dialog.
+ *
+ * Used by the retrieval citation UI so an operator can click a
+ * cited filename to pull the original PDF/markdown/txt. Axios
+ * handles the bearer token + ``X-Workspace-Id`` / ``X-KB-Id``
+ * header injection; a plain ``<a href>`` would not carry the JWT.
+ * The blob is held only long enough to drive the click, then the
+ * object URL is revoked so the blob can be GC'd.
+ */
+export const downloadSourceFile = async (name: string): Promise<void> => {
+  const response = await axiosInstance.get('/documents/file', {
+    params: { name },
+    responseType: 'blob',
+  })
+  const blobUrl = URL.createObjectURL(response.data as Blob)
+  try {
+    const link = document.createElement('a')
+    link.href = blobUrl
+    link.download = name
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+  } finally {
+    // Defer revoke a tick so the browser has actually started the
+    // download — some engines race the revoke against the click
+    // dispatch and cancel the save.
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 0)
+  }
+}
+
 export type MoveDocumentResponse = {
   status: 'moved'
   message: string

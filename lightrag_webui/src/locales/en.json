@@ -451,7 +451,9 @@
       "answerLabel": "Grounded answer",
       "sources": "Sources",
       "sourcesCount": "{{count}} supporting chunks",
-      "sourceLabel": "Source {{index}}"
+      "sourceLabel": "Source {{index}}",
+      "downloadSource": "Download source file",
+      "downloadFailed": "Download failed: {{message}}"
     },
     "retrieval": {
       "startPrompt": "Start a retrieval by typing your query below",

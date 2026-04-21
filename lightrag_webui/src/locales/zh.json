@@ -451,7 +451,9 @@
       "answerLabel": "已落地答案",
       "sources": "参考来源",
       "sourcesCount": "{{count}} 个支撑分块",
-      "sourceLabel": "来源 {{index}}"
+      "sourceLabel": "来源 {{index}}",
+      "downloadSource": "下载源文件",
+      "downloadFailed": "下载失败：{{message}}"
     },
     "retrieval": {
       "startPrompt": "输入查询开始检索",

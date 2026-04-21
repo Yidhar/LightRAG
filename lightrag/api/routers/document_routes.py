@@ -21,10 +21,12 @@ from fastapi import (
     Depends,
     File,
     HTTPException,
+    Query,
     Request,
     UploadFile,
 )
 from fastapi.params import Depends as DependsParameter
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from lightrag import LightRAG
@@ -4508,6 +4510,67 @@ def create_document_routes(
             logger.error(f"Error /documents/upload: {file.filename}: {str(e)}")
             logger.error(traceback.format_exc())
             raise HTTPException(status_code=500, detail=str(e))
+
+    @router.get(
+        "/file",
+        dependencies=[Depends(document_view_permission)],
+    )
+    async def download_source_file(
+        name: str = Query(
+            ...,
+            description=(
+                "Original filename of the source document as stored in the "
+                "caller's workspace input directory. Typically the "
+                "``file_path`` surfaced on retrieval chunks / references."
+            ),
+        ),
+        active_doc_manager: DocumentManager = Depends(resolve_route_doc_manager),
+    ):
+        """Stream the original source file back to the caller.
+
+        Used by the retrieval UI's 参考来源 (source references) panel so
+        operators can click through to the underlying PDF / markdown /
+        text that a citation came from. Access is gated on ``KB_VIEW``
+        — the same permission required to see the citation in the
+        first place.
+
+        Path-traversal hardening layers:
+          * ``DocumentManager.input_dir`` is already a workspace-scoped
+            subdirectory, so caller A cannot read caller B's files.
+          * ``sanitize_filename`` strips path separators / ``..`` / NUL /
+            control chars and re-validates the resolved path stays
+            inside ``input_dir`` — idempotent for filenames that were
+            sanitized at upload time (i.e. every filename this endpoint
+            ever sees legitimately).
+
+        Returns 404 for files that were indexed programmatically with a
+        logical ``file_path`` that does not correspond to an on-disk
+        source (``rag.ainsert(texts, file_paths=["logical-id"])``).
+        """
+        doc_manager = _resolve_active_doc_manager(active_doc_manager)
+        safe_name = sanitize_filename(name, doc_manager.input_dir)
+        candidate = (doc_manager.input_dir / safe_name).resolve()
+        # ``sanitize_filename`` already asserted ``is_relative_to`` but
+        # defence in depth — refuse to serve anything outside the
+        # workspace input dir even if the helper's contract changes.
+        try:
+            if not candidate.is_relative_to(doc_manager.input_dir.resolve()):
+                raise HTTPException(status_code=400, detail="Unsafe filename detected")
+        except (OSError, ValueError):
+            raise HTTPException(status_code=400, detail="Invalid filename")
+        if not candidate.is_file():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Source file '{safe_name}' not found in this workspace",
+            )
+        content_type = (
+            mimetypes.guess_type(str(candidate))[0] or "application/octet-stream"
+        )
+        return FileResponse(
+            candidate,
+            media_type=content_type,
+            filename=safe_name,
+        )
 
     @router.post(
         "/text",
