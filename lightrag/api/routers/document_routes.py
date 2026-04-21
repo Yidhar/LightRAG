@@ -4665,6 +4665,16 @@ def create_document_routes(
         Gated on ``KB_VIEW`` — the same permission required to surface
         the citation in the first place.
         """
+        # DIAGNOSTIC (temporary): unambiguous entry marker so we can
+        # tell if this endpoint body is running at all. If a 404 shows
+        # up WITHOUT this WARNING in the log, the running server is
+        # still on old code (stale reload / wrong process / cached
+        # .pyc) — restart the python process.
+        logger.warning(
+            "download_source_file ENTERED name=%r workspace_id=%s",
+            name,
+            get_request_context(raw_request).workspace_id,
+        )
         doc_manager = _resolve_active_doc_manager(active_doc_manager)
         # ``sanitize_filename`` still runs for defence in depth, but the
         # actual disk lookup now goes through ``_resolve_document_source_file``
