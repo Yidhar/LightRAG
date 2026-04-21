@@ -96,14 +96,6 @@ router = APIRouter(
     tags=["documents"],
 )
 
-# DIAGNOSTIC (temporary): prints once at module import time so the
-# user can verify their running server is actually loading this
-# revision of the file. If you restart the server and DO NOT see
-# "DOCUMENT_ROUTES_MODULE_LOADED" in the startup log, the restart
-# didn't pick up the new code (stale process / wrong venv / cached
-# .pyc). Remove after diagnosis.
-logger.info("DOCUMENT_ROUTES_MODULE_LOADED build=6b70ac84-download-diag")
-
 # Temporary file prefix
 temp_prefix = "__tmp__"
 UNKNOWN_FILE_SOURCE = "unknown_source"
@@ -4637,8 +4629,6 @@ def create_document_routes(
                 "``file_path`` surfaced on retrieval chunks / references."
             ),
         ),
-        active_rag: LightRAG = Depends(resolve_route_rag),
-        active_doc_manager: DocumentManager = Depends(resolve_route_doc_manager),
     ):
         """Stream the source file back to the caller.
 
@@ -4673,90 +4663,139 @@ def create_document_routes(
         Gated on ``KB_VIEW`` — the same permission required to surface
         the citation in the first place.
         """
-        # DIAGNOSTIC (temporary): unambiguous entry marker so we can
-        # tell if this endpoint body is running at all. If a 404 shows
-        # up WITHOUT this WARNING in the log, the running server is
-        # still on old code (stale reload / wrong process / cached
-        # .pyc) — restart the python process.
-        logger.warning(
-            "download_source_file ENTERED name=%r workspace_id=%s",
-            name,
-            get_request_context(raw_request).workspace_id,
+        # Resolve the primary DocumentManager INLINE. We deliberately
+        # don't use ``Depends(resolve_route_doc_manager)`` because that
+        # dep transitively depends on ``resolve_route_rag``, which
+        # raises HTTP 404 when the request's (workspace, kb) pair
+        # isn't linked in ``kb_registry`` (e.g. frontend sends the
+        # literal ``"default"`` kb id on a workspace whose only real
+        # KB is ``kb_<uuid>``). Pulling that dep out lets the fan-out
+        # fallback below enumerate sibling KBs and serve the file
+        # from wherever it actually lives.
+        state = raw_request.app.state
+        context = get_request_context(raw_request)
+        workspace_id = context.workspace_id or getattr(
+            state, "default_workspace_id", "default"
         )
-        doc_manager = _resolve_active_doc_manager(active_doc_manager)
-        # ``sanitize_filename`` still runs for defence in depth, but the
-        # actual disk lookup now goes through ``_resolve_document_source_file``
-        # which also checks ``input_dir/__enqueued__/`` — that's where
-        # uploads land AFTER ``_move_file_to_enqueued_directory`` moves
-        # them out of the hot input dir, so the old "look in input_dir root
-        # only" check was effectively always a miss on any ingested file.
-        safe_name = sanitize_filename(name, doc_manager.input_dir)
-        on_disk = _resolve_document_source_file(doc_manager, safe_name)
-        if on_disk is not None:
-            content_type = (
-                mimetypes.guess_type(str(on_disk))[0] or "application/octet-stream"
-            )
-            return FileResponse(
-                on_disk,
-                media_type=content_type,
-                filename=safe_name,
-            )
+        kb_id = context.kb_id or getattr(state, "default_kb_id", "default")
 
-        logger.info(
-            "Download: no on-disk file for '%s' under %s (or its __enqueued__ "
-            "subdir); falling back to full_docs reconstruction",
-            safe_name,
-            doc_manager.input_dir,
-        )
+        def _doc_manager_for(kb: str) -> DocumentManager:
+            # Reference the factory-param ``doc_manager`` via the outer
+            # ``create_document_routes`` closure. We AVOID binding any
+            # local name ``doc_manager`` anywhere in ``download_source_file``
+            # — Python would then treat every ``doc_manager`` reference
+            # inside this nested function as a local of the OUTER
+            # function (UnboundLocalError on read). Primary / per-kb
+            # managers are stored under different local names below.
+            if doc_manager is not None:
+                return doc_manager
+            if not getattr(state, "enable_kb_isolation", False):
+                default_dm = getattr(state, "default_doc_manager", None)
+                if default_dm is not None:
+                    return default_dm
+                base_input_dir = getattr(
+                    state, "doc_manager_base_input_dir", "./inputs"
+                )
+                return DocumentManager(
+                    base_input_dir,
+                    workspace=getattr(state, "default_runtime_workspace", None),
+                )
+            runtime_workspace = compose_runtime_workspace(state, workspace_id, kb)
+            cache = getattr(state, "doc_manager_cache", None)
+            if cache is None:
+                cache = {}
+                state.doc_manager_cache = cache
+            cached = cache.get(runtime_workspace)
+            if cached is None:
+                base_input_dir = getattr(
+                    state, "doc_manager_base_input_dir", "./inputs"
+                )
+                cached = DocumentManager(base_input_dir, workspace=runtime_workspace)
+                cache[runtime_workspace] = cached
+            return cached
 
-        # Fallback — reconstruct text from full_docs KV.
-        #
-        # When the user is on RetrievalPage in federated ("全部") mode the
-        # axios interceptor sends NO ``X-KB-Id``, so ``resolve_route_rag``
-        # lands on whichever KB the backend treats as default. The chunk
-        # the user clicked may actually live in a sibling KB. So: try the
-        # primary-resolved RAG first, and if it misses, fan out across
-        # every KB linked to the workspace. Workspace scoping is
-        # preserved end-to-end — ``collect_workspace_kb_ids`` returns
-        # only the caller's workspace's KBs, it cannot leak across
-        # tenants.
-        primary_rag = _resolve_active_rag(active_rag)
+        # ``sanitize_filename`` runs once against the primary KB's
+        # input_dir for path-traversal hardening. The sanitized name is
+        # then reused across every candidate KB's ``_resolve_document_source_file``
+        # call — sibling KBs share the same sanitization contract.
+        # Name the local ``primary_dm`` rather than ``doc_manager`` so
+        # the nested closure's free variable stays bound to the
+        # factory param (see the note in ``_doc_manager_for``).
+        primary_dm = _doc_manager_for(kb_id)
+        safe_name = sanitize_filename(name, primary_dm.input_dir)
+
+        # Enumerate sibling KBs linked to the workspace and try each
+        # one (disk first, then reconstructed text). The request's
+        # declared (workspace, kb) pair may not be a real kb_registry
+        # entry: the frontend's federated-retrieval mode
+        # can surface a chunk from ``kb_04af1653`` while the download
+        # request inherits ``X-KB-Id: default`` from the global store.
+        # Picking up the file from whichever sibling KB actually holds
+        # it stays workspace-scoped — ``collect_workspace_kb_ids``
+        # returns only the caller's workspace, no cross-tenant leaks.
         reason_per_kb: list[str] = []
-        content, matched_doc_id, matched_kb = await _reconstruct_text_for_file_path(
-            primary_rag, name, kb_label="primary", reason_sink=reason_per_kb
-        )
-        if content is None:
-            state = raw_request.app.state
-            if getattr(state, "enable_kb_isolation", False):
-                rag_factory = getattr(state, "rag_factory", None)
-                if rag_factory is not None:
-                    from lightrag.api.federation import collect_workspace_kb_ids
 
-                    context = get_request_context(raw_request)
-                    workspace_id = context.workspace_id or getattr(
-                        state, "default_workspace_id", "default"
+        candidate_kbs: list[str] = [kb_id]
+        if getattr(state, "enable_kb_isolation", False):
+            from lightrag.api.federation import collect_workspace_kb_ids
+
+            for sibling in collect_workspace_kb_ids(state, workspace_id) or []:
+                if sibling not in candidate_kbs:
+                    candidate_kbs.append(sibling)
+
+        rag_factory = getattr(state, "rag_factory", None)
+
+        # 1) Disk fan-out: try every candidate KB's input_dir (incl.
+        #    its __enqueued__ subdir) — original file bytes win over
+        #    reconstructed text when both are available.
+        for candidate_kb in candidate_kbs:
+            dm = _doc_manager_for(candidate_kb)
+            sibling_on_disk = _resolve_document_source_file(dm, safe_name)
+            if sibling_on_disk is not None:
+                logger.info(
+                    "Download fan-out: serving on-disk file from kb=%s path=%s",
+                    candidate_kb,
+                    sibling_on_disk,
+                )
+                content_type = (
+                    mimetypes.guess_type(str(sibling_on_disk))[0]
+                    or "application/octet-stream"
+                )
+                return FileResponse(
+                    sibling_on_disk,
+                    media_type=content_type,
+                    filename=safe_name,
+                )
+            reason_per_kb.append(
+                f"kb={candidate_kb}: no on-disk file under {dm.input_dir}"
+            )
+
+        # 2) full_docs fan-out: pull the original text content out of
+        #    the per-KB KV storage and serve as a ``.txt`` attachment.
+        content: str | None = None
+        matched_doc_id: str | None = None
+        matched_kb: str | None = None
+        if rag_factory is None:
+            reason_per_kb.append("full_docs fan-out skipped: rag_factory missing")
+        else:
+            for candidate_kb in candidate_kbs:
+                try:
+                    candidate_rag = await rag_factory.get(workspace_id, candidate_kb)
+                except Exception as exc:
+                    reason_per_kb.append(
+                        f"kb={candidate_kb}: rag_factory.get failed ({exc!r})"
                     )
-                    kb_ids = collect_workspace_kb_ids(state, workspace_id) or []
-                    for kb_id in kb_ids:
-                        try:
-                            sibling_rag = await rag_factory.get(workspace_id, kb_id)
-                        except Exception as exc:
-                            reason_per_kb.append(
-                                f"kb={kb_id}: rag_factory.get failed ({exc!r})"
-                            )
-                            continue
-                        if sibling_rag is primary_rag:
-                            continue
-                        content, matched_doc_id, matched_kb = (
-                            await _reconstruct_text_for_file_path(
-                                sibling_rag,
-                                name,
-                                kb_label=kb_id,
-                                reason_sink=reason_per_kb,
-                            )
-                        )
-                        if content is not None:
-                            break
+                    continue
+                content, matched_doc_id, matched_kb = (
+                    await _reconstruct_text_for_file_path(
+                        candidate_rag,
+                        name,
+                        kb_label=candidate_kb,
+                        reason_sink=reason_per_kb,
+                    )
+                )
+                if content is not None:
+                    break
 
         if content is None:
             logger.warning(
