@@ -285,6 +285,109 @@ async def _find_tracked_document_by_file_path(
     return doc_id, candidate_dict
 
 
+async def _reconstruct_text_for_file_path(
+    rag: LightRAG,
+    file_path: str,
+    *,
+    kb_label: str,
+    reason_sink: list[str],
+) -> tuple[str | None, str | None, str | None]:
+    """Locate the full-text content for ``file_path`` on one RAG instance.
+
+    Returns ``(content, doc_id, kb_label)`` on hit, ``(None, None, None)``
+    on miss. Appends a human-readable miss reason to ``reason_sink`` so
+    the calling endpoint can emit a single diagnostic log entry after it
+    exhausts every KB it tried — instead of spamming one warning per KB.
+
+    ``_find_tracked_document_by_file_path`` is intentionally NOT used:
+    its ``get_doc_by_file_path`` fallback branch returns ``(None, data)``
+    and loses the doc_id that ``full_docs.get_by_id`` requires. This
+    helper does the scan inline and preserves the key.
+    """
+    normalized_target = normalize_file_path(file_path)
+    all_statuses = [
+        DocStatus.PROCESSED,
+        DocStatus.FAILED,
+        DocStatus.PREPROCESSED,
+        DocStatus.PROCESSING,
+        DocStatus.PENDING,
+    ]
+    try:
+        tracked_docs = await rag.doc_status.get_docs_by_statuses(all_statuses)
+    except Exception as exc:
+        reason_sink.append(f"kb={kb_label}: get_docs_by_statuses raised {exc!r}")
+        return None, None, None
+
+    status_rank_map = {
+        DocStatus.PROCESSED.value: 50,
+        DocStatus.FAILED.value: 40,
+        DocStatus.PREPROCESSED.value: 30,
+        DocStatus.PROCESSING.value: 20,
+        DocStatus.PENDING.value: 10,
+    }
+    matching_doc_id: str | None = None
+    matching_rank = -1
+    for doc_id, status_doc in (tracked_docs or {}).items():
+        candidate_file_path = normalize_file_path(
+            _extract_doc_status_file_path(status_doc)
+        )
+        if candidate_file_path != normalized_target:
+            continue
+        rank = status_rank_map.get(
+            _coerce_doc_status_value(
+                _get_status_doc_field(status_doc, "status")
+            )
+            or "",
+            0,
+        )
+        if rank > matching_rank:
+            matching_rank = rank
+            matching_doc_id = doc_id
+
+    if matching_doc_id is None:
+        # Direct index lookup may know about rows dropped from the
+        # statuses iteration (legacy / retired status values).
+        try:
+            direct = await rag.doc_status.get_doc_by_file_path(file_path)
+        except Exception as exc:
+            reason_sink.append(
+                f"kb={kb_label}: get_doc_by_file_path raised {exc!r}"
+            )
+            direct = None
+        if direct is not None:
+            direct_fp = direct.get("file_path")
+            for doc_id, status_doc in (tracked_docs or {}).items():
+                if _extract_doc_status_file_path(status_doc) == direct_fp:
+                    matching_doc_id = doc_id
+                    break
+
+    if matching_doc_id is None:
+        reason_sink.append(
+            f"kb={kb_label}: no doc_status row with file_path matching "
+            f"'{normalized_target}' (scanned {len(tracked_docs or {})} rows)"
+        )
+        return None, None, None
+
+    try:
+        full_doc = await rag.full_docs.get_by_id(matching_doc_id)
+    except Exception as exc:
+        reason_sink.append(
+            f"kb={kb_label}: full_docs.get_by_id({matching_doc_id}) raised {exc!r}"
+        )
+        return None, None, None
+    content = (
+        (full_doc or {}).get("content") if isinstance(full_doc, dict) else None
+    )
+    if not content:
+        reason_sink.append(
+            f"kb={kb_label}: doc_id={matching_doc_id} matched but full_docs "
+            f"has no content (full_doc={full_doc!r})"
+        )
+        return None, None, None
+
+    return str(content), matching_doc_id, kb_label
+
+
 async def _ensure_pipeline_not_busy(
     rag: LightRAG,
     *,
@@ -4517,6 +4620,7 @@ def create_document_routes(
         dependencies=[Depends(document_view_permission)],
     )
     async def download_source_file(
+        raw_request: Request,
         name: str = Query(
             ...,
             description=(
@@ -4562,130 +4666,100 @@ def create_document_routes(
         the citation in the first place.
         """
         doc_manager = _resolve_active_doc_manager(active_doc_manager)
+        # ``sanitize_filename`` still runs for defence in depth, but the
+        # actual disk lookup now goes through ``_resolve_document_source_file``
+        # which also checks ``input_dir/__enqueued__/`` — that's where
+        # uploads land AFTER ``_move_file_to_enqueued_directory`` moves
+        # them out of the hot input dir, so the old "look in input_dir root
+        # only" check was effectively always a miss on any ingested file.
         safe_name = sanitize_filename(name, doc_manager.input_dir)
-        candidate = (doc_manager.input_dir / safe_name).resolve()
-        # ``sanitize_filename`` already asserted ``is_relative_to`` but
-        # defence in depth — refuse to serve anything outside the
-        # workspace input dir even if the helper's contract changes.
-        try:
-            if not candidate.is_relative_to(doc_manager.input_dir.resolve()):
-                raise HTTPException(status_code=400, detail="Unsafe filename detected")
-        except (OSError, ValueError):
-            raise HTTPException(status_code=400, detail="Invalid filename")
-
-        if candidate.is_file():
+        on_disk = _resolve_document_source_file(doc_manager, safe_name)
+        if on_disk is not None:
             content_type = (
-                mimetypes.guess_type(str(candidate))[0] or "application/octet-stream"
+                mimetypes.guess_type(str(on_disk))[0] or "application/octet-stream"
             )
             return FileResponse(
-                candidate,
+                on_disk,
                 media_type=content_type,
                 filename=safe_name,
             )
 
         logger.info(
-            "Download: no on-disk file at %s; falling back to full_docs reconstruction for '%s'",
-            candidate,
-            name,
+            "Download: no on-disk file for '%s' under %s (or its __enqueued__ "
+            "subdir); falling back to full_docs reconstruction",
+            safe_name,
+            doc_manager.input_dir,
         )
 
-        # Fallback: reconstruct the text from full_docs KV. The DB-backed
-        # ``file_path`` is the raw (un-sanitized) value passed at ingest
-        # time — ``name`` from the request is the value surfaced on the
-        # chunk, so they match without another round of sanitization.
+        # Fallback — reconstruct text from full_docs KV.
         #
-        # We deliberately do NOT route through
-        # ``_find_tracked_document_by_file_path`` here: that helper's
-        # ``get_doc_by_file_path`` fallback branch returns ``(None, data)``
-        # — it loses the doc_id, which is the ONE thing we actually need
-        # to fetch the full text. Write our own scan that keeps the key.
-        rag = _resolve_active_rag(active_rag)
-        normalized_target = normalize_file_path(name)
-        all_statuses = [
-            DocStatus.PROCESSED,
-            DocStatus.FAILED,
-            DocStatus.PREPROCESSED,
-            DocStatus.PROCESSING,
-            DocStatus.PENDING,
-        ]
-        tracked_docs = await rag.doc_status.get_docs_by_statuses(all_statuses)
-        matching_doc_id: str | None = None
-        matching_status_rank = -1
-        status_rank_map = {
-            DocStatus.PROCESSED.value: 50,
-            DocStatus.FAILED.value: 40,
-            DocStatus.PREPROCESSED.value: 30,
-            DocStatus.PROCESSING.value: 20,
-            DocStatus.PENDING.value: 10,
-        }
-        for doc_id, status_doc in (tracked_docs or {}).items():
-            candidate_file_path = normalize_file_path(
-                _extract_doc_status_file_path(status_doc)
-            )
-            if candidate_file_path != normalized_target:
-                continue
-            rank = status_rank_map.get(
-                _coerce_doc_status_value(
-                    _get_status_doc_field(status_doc, "status")
-                )
-                or "",
-                0,
-            )
-            if rank > matching_status_rank:
-                matching_status_rank = rank
-                matching_doc_id = doc_id
+        # When the user is on RetrievalPage in federated ("全部") mode the
+        # axios interceptor sends NO ``X-KB-Id``, so ``resolve_route_rag``
+        # lands on whichever KB the backend treats as default. The chunk
+        # the user clicked may actually live in a sibling KB. So: try the
+        # primary-resolved RAG first, and if it misses, fan out across
+        # every KB linked to the workspace. Workspace scoping is
+        # preserved end-to-end — ``collect_workspace_kb_ids`` returns
+        # only the caller's workspace's KBs, it cannot leak across
+        # tenants.
+        primary_rag = _resolve_active_rag(active_rag)
+        reason_per_kb: list[str] = []
+        content, matched_doc_id, matched_kb = await _reconstruct_text_for_file_path(
+            primary_rag, name, kb_label="primary", reason_sink=reason_per_kb
+        )
+        if content is None:
+            state = raw_request.app.state
+            if getattr(state, "enable_kb_isolation", False):
+                rag_factory = getattr(state, "rag_factory", None)
+                if rag_factory is not None:
+                    from lightrag.api.federation import collect_workspace_kb_ids
 
-        if matching_doc_id is None:
-            # Last-ditch: the direct ``get_doc_by_file_path`` index may know
-            # about rows that ``get_docs_by_statuses`` dropped (e.g. legacy
-            # records written with a status enum that's since been retired).
-            direct = await rag.doc_status.get_doc_by_file_path(name)
-            if direct is not None:
-                # doc_status stores the doc id as the dict key, so
-                # ``get_doc_by_file_path`` can't hand it back. Find it
-                # the slow way — iterate the same map we already pulled
-                # and match by object identity / file_path.
-                for doc_id, status_doc in (tracked_docs or {}).items():
-                    if _extract_doc_status_file_path(status_doc) == direct.get(
-                        "file_path"
-                    ):
-                        matching_doc_id = doc_id
-                        break
+                    context = get_request_context(raw_request)
+                    workspace_id = context.workspace_id or getattr(
+                        state, "default_workspace_id", "default"
+                    )
+                    kb_ids = collect_workspace_kb_ids(state, workspace_id) or []
+                    for kb_id in kb_ids:
+                        try:
+                            sibling_rag = await rag_factory.get(workspace_id, kb_id)
+                        except Exception as exc:
+                            reason_per_kb.append(
+                                f"kb={kb_id}: rag_factory.get failed ({exc!r})"
+                            )
+                            continue
+                        if sibling_rag is primary_rag:
+                            continue
+                        content, matched_doc_id, matched_kb = (
+                            await _reconstruct_text_for_file_path(
+                                sibling_rag,
+                                name,
+                                kb_label=kb_id,
+                                reason_sink=reason_per_kb,
+                            )
+                        )
+                        if content is not None:
+                            break
 
-        if matching_doc_id is None:
+        if content is None:
             logger.warning(
-                "Download fallback: no tracked document matched file_path '%s' "
-                "(scanned %d doc_status rows across statuses %s); returning 404",
+                "Download fallback exhausted for file_path '%s'; trace: %s",
                 name,
-                len(tracked_docs or {}),
-                [s.value for s in all_statuses],
-            )
-            raise HTTPException(
-                status_code=404,
-                detail=f"Source file '{name}' not found in this workspace",
-            )
-
-        full_doc = await rag.full_docs.get_by_id(matching_doc_id)
-        content = (full_doc or {}).get("content") if isinstance(full_doc, dict) else None
-        if not content:
-            logger.warning(
-                "Download fallback: doc_id=%s matched but full_docs has no "
-                "content (full_doc=%r); returning 404",
-                matching_doc_id,
-                full_doc,
+                "; ".join(reason_per_kb) or "(no sinks recorded)",
             )
             raise HTTPException(
                 status_code=404,
                 detail=(
-                    f"Source file '{name}' has no retrievable text content "
-                    "(document may have been purged or never indexed)."
+                    f"Source file '{name}' not found in this workspace "
+                    "(no on-disk file; no tracked document with matching "
+                    "file_path in any linked KB)."
                 ),
             )
 
         logger.info(
-            "Download fallback: serving reconstructed text for doc_id=%s "
-            "(file_path='%s', %d chars)",
-            matching_doc_id,
+            "Download fallback: serving reconstructed text doc_id=%s kb=%s "
+            "file_path='%s' (%d chars)",
+            matched_doc_id,
+            matched_kb,
             name,
             len(str(content)),
         )
