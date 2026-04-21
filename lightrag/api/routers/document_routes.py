@@ -96,6 +96,14 @@ router = APIRouter(
     tags=["documents"],
 )
 
+# DIAGNOSTIC (temporary): prints once at module import time so the
+# user can verify their running server is actually loading this
+# revision of the file. If you restart the server and DO NOT see
+# "DOCUMENT_ROUTES_MODULE_LOADED" in the startup log, the restart
+# didn't pick up the new code (stale process / wrong venv / cached
+# .pyc). Remove after diagnosis.
+logger.info("DOCUMENT_ROUTES_MODULE_LOADED build=6b70ac84-download-diag")
+
 # Temporary file prefix
 temp_prefix = "__tmp__"
 UNKNOWN_FILE_SOURCE = "unknown_source"
