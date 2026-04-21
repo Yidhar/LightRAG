@@ -9,8 +9,13 @@ services:
     ports:
       - "${HOST:-0.0.0.0}:${PORT:-9621}:9621"
     volumes:
-      - ./data/rag_storage:/app/data/rag_storage
-      - ./data/inputs:/app/data/inputs
+      # Single ``./data`` bind holds EVERYTHING the container needs to
+      # survive a recreate: file-based RAG storage, uploaded source
+      # documents, AND the SQLite auth/audit/KB-registry DB. The
+      # previous setup only mounted two subdirectories, so the auth
+      # DB landed at ``/app/lightrag_auth.db`` inside the container's
+      # writable layer — wiped on every ``docker rm``.
+      - ./data:/app/data
       - ./config.ini:/app/config.ini
       - ./.env:/app/.env
     deploy:
@@ -22,5 +27,10 @@ services:
     environment:
       WORKING_DIR: "/app/data/rag_storage"
       INPUT_DIR: "/app/data/inputs"
+      # Anchor the SQLite auth DB inside the mounted data volume so
+      # users, workspaces, memberships, audit log, KB registry, and
+      # refresh tokens all persist across recreates. Four leading
+      # slashes: ``sqlite+aiosqlite:///`` + absolute path ``/app/...``.
+      DB_URL: "sqlite+aiosqlite:////app/data/lightrag_auth.db"
       HOST: "0.0.0.0"
       PORT: "9621"

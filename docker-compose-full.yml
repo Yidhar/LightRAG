@@ -12,8 +12,10 @@ services:
     ports:
       - "${HOST:-0.0.0.0}:${PORT:-9621}:9621"
     volumes:
-      - ./data/rag_storage:/app/data/rag_storage
-      - ./data/inputs:/app/data/inputs
+      # Single ``./data`` bind covers RAG storage, uploaded docs, AND
+      # the SQLite auth/audit/KB-registry DB. See docker-compose.yml
+      # for the rationale — identical layout here.
+      - ./data:/app/data
       - ./config.ini:/app/config.ini
       - ./.env:/app/.env
     deploy:
@@ -31,6 +33,13 @@ services:
       RERANK_BINDING_HOST: "http://vllm-rerank:8000/rerank"
       WORKING_DIR: "/app/data/rag_storage"
       INPUT_DIR: "/app/data/inputs"
+      # Platform V2 SQLite DB (users / workspaces / memberships /
+      # audit / KB registry / refresh tokens / retrieval history).
+      # Anchored to the mounted ``/app/data`` volume so it survives
+      # ``docker compose down`` + recreate. Note: this stays SQLite
+      # even in the full-stack compose because the Postgres service
+      # below is for RAG storage backends, not auth.
+      DB_URL: "sqlite+aiosqlite:////app/data/lightrag_auth.db"
       MEMGRAPH_URI: "bolt://host.docker.internal:7687"
       HOST: "0.0.0.0"
       PORT: "9621"
