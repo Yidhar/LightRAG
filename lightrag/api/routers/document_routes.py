@@ -4583,20 +4583,97 @@ def create_document_routes(
                 filename=safe_name,
             )
 
+        logger.info(
+            "Download: no on-disk file at %s; falling back to full_docs reconstruction for '%s'",
+            candidate,
+            name,
+        )
+
         # Fallback: reconstruct the text from full_docs KV. The DB-backed
         # ``file_path`` is the raw (un-sanitized) value passed at ingest
         # time — ``name`` from the request is the value surfaced on the
         # chunk, so they match without another round of sanitization.
+        #
+        # We deliberately do NOT route through
+        # ``_find_tracked_document_by_file_path`` here: that helper's
+        # ``get_doc_by_file_path`` fallback branch returns ``(None, data)``
+        # — it loses the doc_id, which is the ONE thing we actually need
+        # to fetch the full text. Write our own scan that keeps the key.
         rag = _resolve_active_rag(active_rag)
-        doc_id, _status = await _find_tracked_document_by_file_path(rag, name)
-        if doc_id is None:
+        normalized_target = normalize_file_path(name)
+        all_statuses = [
+            DocStatus.PROCESSED,
+            DocStatus.FAILED,
+            DocStatus.PREPROCESSED,
+            DocStatus.PROCESSING,
+            DocStatus.PENDING,
+        ]
+        tracked_docs = await rag.doc_status.get_docs_by_statuses(all_statuses)
+        matching_doc_id: str | None = None
+        matching_status_rank = -1
+        status_rank_map = {
+            DocStatus.PROCESSED.value: 50,
+            DocStatus.FAILED.value: 40,
+            DocStatus.PREPROCESSED.value: 30,
+            DocStatus.PROCESSING.value: 20,
+            DocStatus.PENDING.value: 10,
+        }
+        for doc_id, status_doc in (tracked_docs or {}).items():
+            candidate_file_path = normalize_file_path(
+                _extract_doc_status_file_path(status_doc)
+            )
+            if candidate_file_path != normalized_target:
+                continue
+            rank = status_rank_map.get(
+                _coerce_doc_status_value(
+                    _get_status_doc_field(status_doc, "status")
+                )
+                or "",
+                0,
+            )
+            if rank > matching_status_rank:
+                matching_status_rank = rank
+                matching_doc_id = doc_id
+
+        if matching_doc_id is None:
+            # Last-ditch: the direct ``get_doc_by_file_path`` index may know
+            # about rows that ``get_docs_by_statuses`` dropped (e.g. legacy
+            # records written with a status enum that's since been retired).
+            direct = await rag.doc_status.get_doc_by_file_path(name)
+            if direct is not None:
+                # doc_status stores the doc id as the dict key, so
+                # ``get_doc_by_file_path`` can't hand it back. Find it
+                # the slow way — iterate the same map we already pulled
+                # and match by object identity / file_path.
+                for doc_id, status_doc in (tracked_docs or {}).items():
+                    if _extract_doc_status_file_path(status_doc) == direct.get(
+                        "file_path"
+                    ):
+                        matching_doc_id = doc_id
+                        break
+
+        if matching_doc_id is None:
+            logger.warning(
+                "Download fallback: no tracked document matched file_path '%s' "
+                "(scanned %d doc_status rows across statuses %s); returning 404",
+                name,
+                len(tracked_docs or {}),
+                [s.value for s in all_statuses],
+            )
             raise HTTPException(
                 status_code=404,
                 detail=f"Source file '{name}' not found in this workspace",
             )
-        full_doc = await rag.full_docs.get_by_id(doc_id)
+
+        full_doc = await rag.full_docs.get_by_id(matching_doc_id)
         content = (full_doc or {}).get("content") if isinstance(full_doc, dict) else None
         if not content:
+            logger.warning(
+                "Download fallback: doc_id=%s matched but full_docs has no "
+                "content (full_doc=%r); returning 404",
+                matching_doc_id,
+                full_doc,
+            )
             raise HTTPException(
                 status_code=404,
                 detail=(
@@ -4604,6 +4681,14 @@ def create_document_routes(
                     "(document may have been purged or never indexed)."
                 ),
             )
+
+        logger.info(
+            "Download fallback: serving reconstructed text for doc_id=%s "
+            "(file_path='%s', %d chars)",
+            matching_doc_id,
+            name,
+            len(str(content)),
+        )
 
         # Use the original name plus ``.txt`` so the file-tree preserves
         # the citation label. RFC 5987 ``filename*`` carries the UTF-8
