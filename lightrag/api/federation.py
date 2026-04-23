@@ -498,10 +498,12 @@ async def federated_stream(
             # Per-KB separator so the client can visually split shards.
             # Blank line before the header on every KB except the first
             # so the markdown stays tidy when rendered.
+            # NOTE: build ``header_text`` as a plain string first —
+            # embedding ``\n`` inside a nested f-string expression is a
+            # SyntaxError on Python 3.11 (relaxed in 3.12+ under PEP 701).
             separator = "\n\n" if index > 0 else ""
-            yield (
-                f"{json.dumps({'response': f'{separator}### Knowledge base: {kb_id}\\n\\n'})}\n"
-            )
+            header_text = f"{separator}### Knowledge base: {kb_id}\n\n"
+            yield f"{json.dumps({'response': header_text})}\n"
 
             if llm_response.get("is_streaming"):
                 response_stream = llm_response.get("response_iterator")
