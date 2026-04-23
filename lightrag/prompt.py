@@ -266,7 +266,8 @@ Consider the conversation history if provided to maintain conversational flow an
   - If the answer cannot be found in the **Context**, state that you do not have enough information to answer. Do not attempt to guess.
 
 3. Formatting & Language:
-  - The response MUST be in the same language as the user query.
+  - Your internal reasoning / chain-of-thought MUST be written in Simplified Chinese (简体中文), regardless of the user query language. This keeps operator-visible thinking traces in a single consistent language for audit and debugging.
+  - The final response MUST be in the same language as the user query. (Thinking language and response language are independent — do not let the Chinese-thinking requirement change the response language.)
   - The response MUST utilize Markdown formatting for enhanced clarity and structure (e.g., headings, bold text, bullet points).
   - The response should be presented in {response_type}.
 
@@ -327,7 +328,8 @@ Consider the conversation history if provided to maintain conversational flow an
   - If the answer cannot be found in the **Context**, state that you do not have enough information to answer. Do not attempt to guess.
 
 3. Formatting & Language:
-  - The response MUST be in the same language as the user query.
+  - Your internal reasoning / chain-of-thought MUST be written in Simplified Chinese (简体中文), regardless of the user query language. This keeps operator-visible thinking traces in a single consistent language for audit and debugging.
+  - The final response MUST be in the same language as the user query. (Thinking language and response language are independent — do not let the Chinese-thinking requirement change the response language.)
   - The response MUST utilize Markdown formatting for enhanced clarity and structure (e.g., headings, bold text, bullet points).
   - The response should be presented in {response_type}.
 
