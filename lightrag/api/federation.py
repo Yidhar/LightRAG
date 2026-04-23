@@ -66,18 +66,36 @@ def collect_workspace_kb_ids(state: Any, workspace_id: str) -> list[str]:
 
 
 def _format_federated_response(results: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
-    """Merge per-KB aquery_llm results into the single-rag response shape."""
+    """Merge per-KB aquery_llm results into the single-rag response shape.
+
+    The per-KB ``### Knowledge base: <id>`` header is emitted ONLY when
+    more than one KB contributed content — otherwise a workspace with a
+    single linked KB would have every answer prefixed by a useless
+    single-section header. Reference IDs are still namespaced so the
+    wire format stays consistent regardless of KB count.
+    """
     parts: list[str] = []
     merged_references: list[dict[str, Any]] = []
     merged_chunks: list[dict[str, Any]] = []
     seen_refs: set[tuple[str, str]] = set()
 
+    # Count how many KBs actually returned content — drives the
+    # single-shard unwrap below.
+    content_bearing = sum(
+        1
+        for _, result in results
+        if ((result.get("llm_response") or {}).get("content") or "").strip()
+    )
+
     for kb_id, result in results:
         data = result.get("data") or {}
         llm_response = result.get("llm_response") or {}
-        text = llm_response.get("content") or ""
+        text = (llm_response.get("content") or "").strip()
         if text:
-            parts.append(f"### Knowledge base: {kb_id}\n\n{text.strip()}")
+            if content_bearing > 1:
+                parts.append(f"### Knowledge base: {kb_id}\n\n{text}")
+            else:
+                parts.append(text)
 
         for ref in data.get("references") or []:
             # Reference ids are per-rag sequential ("1", "2", …). Namespace
@@ -122,6 +140,23 @@ def _should_federate(request: Request) -> tuple[str, list[str]] | None:
 
     Returns ``(workspace_id, kb_ids)`` when federation applies, or
     ``None`` when the caller should fall back to its single-rag path.
+
+    Semantics:
+      * Caller sent an EXPLICIT non-default ``X-KB-Id`` — respect it,
+        route to that single KB directly (no federation).
+      * Caller implicitly hit the default KB fallback — ANY number of
+        linked KBs triggers the federation path. The previous
+        ``<= 1`` guard fell through to the single-rag code path with
+        ``default_kb_id``, which raises 404 on workspaces whose only
+        linked KB is NOT "default" (the common case for
+        self-registered workspaces). Covering the 1-KB case here
+        routes the query to that one KB instead — still via fan-out
+        so the response merger runs and namespaces references
+        uniformly. ``_format_federated_response`` suppresses the
+        multi-KB header when only one shard contributes content,
+        so 1-KB output stays clean.
+      * Zero linked KBs — fall through; the downstream 404 is the
+        correct signal that the workspace has nothing to query.
     """
     from lightrag.api.dependencies import get_request_context
 
@@ -140,7 +175,7 @@ def _should_federate(request: Request) -> tuple[str, list[str]] | None:
         return None
 
     kb_ids = collect_workspace_kb_ids(state, workspace_id)
-    if len(kb_ids) <= 1:
+    if not kb_ids:
         return None
     return workspace_id, kb_ids
 

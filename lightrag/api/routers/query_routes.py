@@ -208,6 +208,43 @@ def create_query_routes(
             return rag
         return await get_current_rag(request)
 
+    async def resolve_route_rag_soft(request: Request) -> Any | None:
+        """Variant that returns ``None`` instead of raising when the
+        caller's (workspace, kb) isn't linked in kb_registry.
+
+        Query endpoints wire ``Depends(_)`` to this version so the
+        federation path (``federated_aquery_llm``) still gets a chance
+        to run when ``X-KB-Id`` defaults to the unlinked ``"default"``.
+        The hard variant would 404 at dep-resolution time and skip the
+        endpoint body entirely.
+
+        Two layers can raise kb-not-found 404 on this path:
+          * ``get_current_kb`` (via HTTPException) — fires when the
+            registry has no row for ``(workspace, kb)``. Implicit
+            default-fallback falls through this gate because
+            ``resolve_kb_id`` materialises the default kb id even
+            when the caller sent no ``X-KB-Id`` header.
+          * ``rag_factory.get`` (via KeyError) — same semantic but
+            raised at runtime-instance allocation time.
+        Swallow both so the endpoint body can route via federation.
+        """
+        if rag is not None:
+            return rag
+        try:
+            return await get_current_rag(request)
+        except KeyError:
+            return None
+        except HTTPException as exc:
+            # Only eat the specific "KB not found in workspace" 404 —
+            # authentication 401s, permission 403s, etc. must still
+            # propagate. The detail string below is the stable format
+            # emitted by ``get_current_kb`` in dependencies.py.
+            if exc.status_code == 404 and "Knowledge base" in str(exc.detail):
+                return None
+            raise
+        except Exception:
+            return None
+
     @router.post(
         "/query",
         response_model=QueryResponse,
@@ -340,7 +377,7 @@ def create_query_routes(
     async def query_text(
         request: QueryRequest,
         http_request: Request,
-        active_rag: Any = Depends(resolve_route_rag),
+        active_rag: Any = Depends(resolve_route_rag_soft),
     ):
         """
         Comprehensive RAG query endpoint with non-streaming response. Parameter "stream" is ignored.
@@ -428,11 +465,20 @@ def create_query_routes(
             param.stream = False
 
             # Phase D: federate when the caller targeted the default KB but
-            # the workspace actually owns multiple KBs. Falls back to the
-            # single-rag path for single-KB workspaces and when isolation
-            # is off.
+            # the workspace actually owns multiple KBs. The 1-KB case
+            # also routes through federation so workspaces whose only
+            # linked KB isn't literally named "default" still get
+            # served instead of 404ing at dep resolution.
             result = await federated_aquery_llm(http_request, request.query, param)
             if result is None:
+                if active_rag is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=(
+                            "No knowledge base linked to this workspace, or the "
+                            "requested KB is not linked here."
+                        ),
+                    )
                 result = await active_rag.aquery_llm(request.query, param=param)
 
             # Extract LLM response and references from unified result
@@ -559,7 +605,7 @@ def create_query_routes(
     async def query_text_stream(
         request: QueryRequest,
         http_request: Request,
-        active_rag: Any = Depends(resolve_route_rag),
+        active_rag: Any = Depends(resolve_route_rag_soft),
     ):
         """
         Advanced RAG query endpoint with flexible streaming response.
@@ -717,7 +763,20 @@ def create_query_routes(
                     },
                 )
 
-            # Unified approach: always use aquery_llm for all cases
+            # Unified approach: always use aquery_llm for all cases.
+            # ``active_rag`` can be None when the caller's (workspace, kb)
+            # isn't linked but federation also didn't apply (e.g.
+            # kb_isolation disabled globally but the workspace has no
+            # configured KB) — emit an explicit 404 instead of letting
+            # the ``.aquery_llm`` call crash with AttributeError.
+            if active_rag is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        "No knowledge base linked to this workspace, or the "
+                        "requested KB is not linked here."
+                    ),
+                )
             result = await active_rag.aquery_llm(request.query, param=param)
 
             async def stream_generator():
@@ -1089,7 +1148,7 @@ def create_query_routes(
     async def query_data(
         request: QueryRequest,
         http_request: Request,
-        active_rag: Any = Depends(resolve_route_rag),
+        active_rag: Any = Depends(resolve_route_rag_soft),
     ):
         """
         Advanced data retrieval endpoint for structured RAG analysis.
@@ -1203,6 +1262,14 @@ def create_query_routes(
                 http_request, request.query, param
             )
             if response is None:
+                if active_rag is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=(
+                            "No knowledge base linked to this workspace, or the "
+                            "requested KB is not linked here."
+                        ),
+                    )
                 response = await active_rag.aquery_data(request.query, param=param)
 
             # aquery_data returns the new format with status, message, data, and metadata
