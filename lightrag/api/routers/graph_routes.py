@@ -8,6 +8,10 @@ from fastapi import APIRouter, Depends, Query, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from lightrag.api.dependencies import get_current_rag
+from lightrag.api.federation import (
+    federated_get_knowledge_graph,
+    federated_labels,
+)
 from lightrag.utils import logger
 from ..permissions import Action, require_permission
 
@@ -96,8 +100,37 @@ def create_graph_routes(rag: Any | None = None, api_key: Optional[str] = None):
             return rag
         return await get_current_rag(request)
 
+    async def resolve_route_rag_soft(request: Request) -> Any | None:
+        """Return ``None`` instead of raising when the caller's
+        (workspace, kb) isn't linked in kb_registry.
+
+        Mirrors query_routes' soft resolver so graph endpoints can fall
+        through to the federation path instead of 404ing at
+        dependency-resolution time. Without this, browsing the graph of a
+        workspace whose only KB isn't literally named ``"default"`` (the
+        common case for created / self-registered workspaces) dependency-
+        404s before the handler body runs — the reported
+        "知识图谱子节点无法加载". Only the specific "KB not found" 404 is
+        swallowed; auth/permission errors still propagate.
+        """
+        if rag is not None:
+            return rag
+        try:
+            return await get_current_rag(request)
+        except KeyError:
+            return None
+        except HTTPException as exc:
+            if exc.status_code == 404 and "Knowledge base" in str(exc.detail):
+                return None
+            raise
+        except Exception:
+            return None
+
     @router.get("/graph/label/list", dependencies=[Depends(graph_view_permission)])
-    async def get_graph_labels(active_rag: Any = Depends(resolve_route_rag)):
+    async def get_graph_labels(
+        request: Request,
+        active_rag: Any = Depends(resolve_route_rag_soft),
+    ):
         """
         Get all graph labels
 
@@ -105,7 +138,21 @@ def create_graph_routes(rag: Any | None = None, api_key: Optional[str] = None):
             List[str]: List of graph labels
         """
         try:
-            return await active_rag.get_graph_labels()
+            if active_rag is not None:
+                return await active_rag.get_graph_labels()
+            # Default-KB fallback in a workspace without a linked "default"
+            # KB: union labels across every linked KB.
+            federated = await federated_labels(
+                request, lambda r: r.get_graph_labels()
+            )
+            if federated is not None:
+                return federated
+            raise HTTPException(
+                status_code=404,
+                detail="No knowledge base linked to this workspace.",
+            )
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Error getting graph labels: {str(e)}")
             logger.error(traceback.format_exc())
@@ -115,10 +162,11 @@ def create_graph_routes(rag: Any | None = None, api_key: Optional[str] = None):
 
     @router.get("/graph/label/popular", dependencies=[Depends(graph_view_permission)])
     async def get_popular_labels(
+        request: Request,
         limit: int = Query(
             300, description="Maximum number of popular labels to return", ge=1, le=1000
         ),
-        active_rag: Any = Depends(resolve_route_rag),
+        active_rag: Any = Depends(resolve_route_rag_soft),
     ):
         """
         Get popular labels by node degree (most connected entities)
@@ -130,7 +178,23 @@ def create_graph_routes(rag: Any | None = None, api_key: Optional[str] = None):
             List[str]: List of popular labels sorted by degree (highest first)
         """
         try:
-            return await active_rag.chunk_entity_relation_graph.get_popular_labels(limit)
+            if active_rag is not None:
+                return await active_rag.chunk_entity_relation_graph.get_popular_labels(
+                    limit
+                )
+            federated = await federated_labels(
+                request,
+                lambda r: r.chunk_entity_relation_graph.get_popular_labels(limit),
+            )
+            if federated is not None:
+                # Cross-KB union loses global degree ranking; cap to limit.
+                return federated[:limit]
+            raise HTTPException(
+                status_code=404,
+                detail="No knowledge base linked to this workspace.",
+            )
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Error getting popular labels: {str(e)}")
             logger.error(traceback.format_exc())
@@ -140,11 +204,12 @@ def create_graph_routes(rag: Any | None = None, api_key: Optional[str] = None):
 
     @router.get("/graph/label/search", dependencies=[Depends(graph_view_permission)])
     async def search_labels(
+        request: Request,
         q: str = Query(..., description="Search query string"),
         limit: int = Query(
             50, description="Maximum number of search results to return", ge=1, le=100
         ),
-        active_rag: Any = Depends(resolve_route_rag),
+        active_rag: Any = Depends(resolve_route_rag_soft),
     ):
         """
         Search labels with fuzzy matching
@@ -157,7 +222,22 @@ def create_graph_routes(rag: Any | None = None, api_key: Optional[str] = None):
             List[str]: List of matching labels sorted by relevance
         """
         try:
-            return await active_rag.chunk_entity_relation_graph.search_labels(q, limit)
+            if active_rag is not None:
+                return await active_rag.chunk_entity_relation_graph.search_labels(
+                    q, limit
+                )
+            federated = await federated_labels(
+                request,
+                lambda r: r.chunk_entity_relation_graph.search_labels(q, limit),
+            )
+            if federated is not None:
+                return federated[:limit]
+            raise HTTPException(
+                status_code=404,
+                detail="No knowledge base linked to this workspace.",
+            )
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Error searching labels with query '{q}': {str(e)}")
             logger.error(traceback.format_exc())
@@ -167,10 +247,11 @@ def create_graph_routes(rag: Any | None = None, api_key: Optional[str] = None):
 
     @router.get("/graphs", dependencies=[Depends(graph_view_permission)])
     async def get_knowledge_graph(
+        request: Request,
         label: str = Query(..., description="Label to get knowledge graph for"),
         max_depth: int = Query(3, description="Maximum depth of graph", ge=1),
         max_nodes: int = Query(1000, description="Maximum nodes to return", ge=1),
-        active_rag: Any = Depends(resolve_route_rag),
+        active_rag: Any = Depends(resolve_route_rag_soft),
     ):
         """
         Retrieve a connected subgraph of nodes where the label includes the specified label.
@@ -192,11 +273,27 @@ def create_graph_routes(rag: Any | None = None, api_key: Optional[str] = None):
                 f"get_knowledge_graph called with label: '{label}' (length: {len(label)}, repr: {repr(label)})"
             )
 
-            return await active_rag.get_knowledge_graph(
-                node_label=label,
-                max_depth=max_depth,
-                max_nodes=max_nodes,
+            if active_rag is not None:
+                return await active_rag.get_knowledge_graph(
+                    node_label=label,
+                    max_depth=max_depth,
+                    max_nodes=max_nodes,
+                )
+            # Default-KB fallback in a workspace whose KB isn't literally
+            # "default": federate the graph across every linked KB (union
+            # with kb-namespaced node/edge ids). This is what fixes the
+            # empty / non-loading graph in non-default workspaces.
+            federated = await federated_get_knowledge_graph(
+                request, label, max_depth, max_nodes
             )
+            if federated is not None:
+                return federated
+            raise HTTPException(
+                status_code=404,
+                detail="No knowledge base linked to this workspace.",
+            )
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Error getting knowledge graph for label '{label}': {str(e)}")
             logger.error(traceback.format_exc())

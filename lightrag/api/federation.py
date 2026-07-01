@@ -307,6 +307,124 @@ async def federated_aquery_llm(
     return _format_federated_response(ok_results)
 
 
+async def federated_get_knowledge_graph(
+    request: Request,
+    node_label: str,
+    max_depth: int,
+    max_nodes: int,
+    *,
+    concurrency_limit: int = 4,
+) -> Any | None:
+    """Fan out ``get_knowledge_graph`` across the workspace's KBs and merge.
+
+    Returns a ``KnowledgeGraph`` (union of every linked KB's subgraph) or
+    ``None`` when federation does not apply (explicit KB, isolation off,
+    no linked KBs) so the graph route can fall back to its single-rag path.
+
+    Node/edge ids are namespaced ``<kb_id>:<id>`` because ids are only
+    unique WITHIN a KB — two isolated KBs can both contain an entity with
+    the same internal id, and without namespacing the merge would collapse
+    or cross-wire them. Edge source/target are rewritten to the namespaced
+    node ids so the graph stays internally consistent. Node/edge click
+    expansion is unaffected: it keys off the entity LABEL, not the id.
+    """
+    decision = _should_federate(request)
+    if decision is None:
+        return None
+    workspace_id, kb_ids = decision
+
+    async def _run(rag):
+        return await rag.get_knowledge_graph(
+            node_label=node_label, max_depth=max_depth, max_nodes=max_nodes
+        )
+
+    ok = await _fan_out(
+        request, workspace_id, kb_ids, _run, concurrency_limit=concurrency_limit
+    )
+
+    from lightrag.types import KnowledgeGraph
+
+    merged = KnowledgeGraph()
+    seen_nodes: set[str] = set()
+    seen_edges: set[str] = set()
+    truncated = False
+
+    for kb_id, kg in ok:
+        if kg is None:
+            continue
+        truncated = truncated or bool(getattr(kg, "is_truncated", False))
+        for node in getattr(kg, "nodes", None) or []:
+            nid = f"{kb_id}:{node.id}"
+            if nid in seen_nodes:
+                continue
+            seen_nodes.add(nid)
+            new_node = node.model_copy(deep=True)
+            new_node.id = nid
+            new_node.properties = {
+                **(node.properties or {}),
+                "knowledge_base_id": kb_id,
+            }
+            merged.nodes.append(new_node)
+        for edge in getattr(kg, "edges", None) or []:
+            eid = f"{kb_id}:{edge.id}"
+            if eid in seen_edges:
+                continue
+            seen_edges.add(eid)
+            new_edge = edge.model_copy(deep=True)
+            new_edge.id = eid
+            new_edge.source = f"{kb_id}:{edge.source}"
+            new_edge.target = f"{kb_id}:{edge.target}"
+            new_edge.properties = {
+                **(edge.properties or {}),
+                "knowledge_base_id": kb_id,
+            }
+            merged.edges.append(new_edge)
+
+    # Enforce the global node cap across the union and drop dangling edges.
+    if max_nodes and len(merged.nodes) > max_nodes:
+        merged.nodes = merged.nodes[:max_nodes]
+        kept = {n.id for n in merged.nodes}
+        merged.edges = [
+            e for e in merged.edges if e.source in kept and e.target in kept
+        ]
+        truncated = True
+
+    merged.is_truncated = truncated
+    return merged
+
+
+async def federated_labels(
+    request: Request,
+    runner,
+    *,
+    concurrency_limit: int = 4,
+) -> list[str] | None:
+    """Fan out a label-returning coroutine across KBs and union the results.
+
+    ``runner(rag) -> list[str]`` (e.g. ``rag.get_graph_labels()`` or a
+    popular/search-label call). Returns the de-duplicated union preserving
+    first-seen order, or ``None`` when federation does not apply.
+    """
+    decision = _should_federate(request)
+    if decision is None:
+        return None
+    workspace_id, kb_ids = decision
+
+    ok = await _fan_out(
+        request, workspace_id, kb_ids, runner, concurrency_limit=concurrency_limit
+    )
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for _kb_id, labels in ok:
+        for label in labels or []:
+            s = str(label)
+            if s not in seen:
+                seen.add(s)
+                out.append(s)
+    return out
+
+
 def _merge_data_shards(
     kb_ids: list[str],
     shards: list[tuple[str, dict[str, Any]]],
