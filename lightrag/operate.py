@@ -10,6 +10,7 @@ from collections import Counter, defaultdict
 
 from lightrag.exceptions import (
     PipelineCancelledException,
+    DocumentCancelledException,
     ChunkTokenLimitExceededError,
 )
 from lightrag.utils import (
@@ -2616,6 +2617,7 @@ async def merge_nodes_and_edges(
     llm_response_cache: BaseKVStorage | None = None,
     entity_chunks_storage: BaseKVStorage | None = None,
     relation_chunks_storage: BaseKVStorage | None = None,
+    doc_status_storage: BaseKVStorage | None = None,
     current_file_number: int = 0,
     total_files: int = 0,
     file_path: str = "unknown_source",
@@ -2646,11 +2648,36 @@ async def merge_nodes_and_edges(
         file_path: File path for logging
     """
 
+    # Per-doc cancellation (single-document stop) checked mid-merge, not
+    # just at the pre-merge boundary, so a large merge can be interrupted
+    # promptly. Throttled read shared across this merge call.
+    _merge_cancel_state = {"ts": None, "cancelled": False}
+
+    async def _doc_cancel_requested() -> bool:
+        if doc_status_storage is None or not doc_id:
+            return False
+        now = time.monotonic()
+        last_ts = _merge_cancel_state["ts"]
+        if last_ts is not None and (now - last_ts) < 3.0:
+            return _merge_cancel_state["cancelled"]
+        _merge_cancel_state["ts"] = now
+        try:
+            record = await doc_status_storage.get_by_id(doc_id)
+        except Exception:
+            return _merge_cancel_state["cancelled"]
+        cancelled = bool((record or {}).get("metadata", {}).get("cancel_requested"))
+        _merge_cancel_state["cancelled"] = cancelled
+        return cancelled
+
     # Check for cancellation at the start of merge
     if pipeline_status is not None and pipeline_status_lock is not None:
         async with pipeline_status_lock:
             if pipeline_status.get("cancellation_requested", False):
                 raise PipelineCancelledException("User cancelled during merge phase")
+    if await _doc_cancel_requested():
+        raise DocumentCancelledException(
+            f"Document {doc_id} cancelled during merge phase"
+        )
 
     # Collect all nodes and edges from all chunks
     all_nodes = defaultdict(list)
@@ -2696,6 +2723,10 @@ async def merge_nodes_and_edges(
                         raise PipelineCancelledException(
                             "User cancelled during entity merge"
                         )
+            if await _doc_cancel_requested():
+                raise DocumentCancelledException(
+                    f"Document {doc_id} cancelled during entity merge"
+                )
 
             workspace = global_config.get("workspace", "")
             namespace = f"{workspace}:GraphDB" if workspace else "GraphDB"
@@ -2811,6 +2842,10 @@ async def merge_nodes_and_edges(
                         raise PipelineCancelledException(
                             "User cancelled during relation merge"
                         )
+            if await _doc_cancel_requested():
+                raise DocumentCancelledException(
+                    f"Document {doc_id} cancelled during relation merge"
+                )
 
             workspace = global_config.get("workspace", "")
             namespace = f"{workspace}:GraphDB" if workspace else "GraphDB"
@@ -3931,6 +3966,29 @@ async def extract_entities(
     chunk_max_async = global_config.get("llm_model_max_async", 4)
     semaphore = asyncio.Semaphore(chunk_max_async)
 
+    # Per-doc cancellation, checked mid-extraction (not just at stage
+    # boundaries) so an operator can stop a chunk-heavy in-flight document
+    # promptly ("流水线无法停止正在处理的文档"). The doc_status read is
+    # throttled to at most once every few seconds so a doc with hundreds of
+    # chunks doesn't hammer the KV/DB backend on every chunk.
+    _doc_cancel_state = {"ts": None, "cancelled": False}
+
+    async def _doc_cancel_requested() -> bool:
+        if doc_status_storage is None or not doc_id:
+            return False
+        now = time.monotonic()
+        last_ts = _doc_cancel_state["ts"]
+        if last_ts is not None and (now - last_ts) < 3.0:
+            return _doc_cancel_state["cancelled"]
+        _doc_cancel_state["ts"] = now
+        try:
+            record = await doc_status_storage.get_by_id(doc_id)
+        except Exception:
+            return _doc_cancel_state["cancelled"]
+        cancelled = bool((record or {}).get("metadata", {}).get("cancel_requested"))
+        _doc_cancel_state["cancelled"] = cancelled
+        return cancelled
+
     async def _process_with_semaphore(chunk):
         async with semaphore:
             # Check for cancellation before processing chunk
@@ -3940,6 +3998,14 @@ async def extract_entities(
                         raise PipelineCancelledException(
                             "User cancelled during chunk processing"
                         )
+
+            # Per-DOC cancel (single document stop). Raise the scoped
+            # DocumentCancelledException so process_document fails ONLY this
+            # doc and leaves sibling docs in the batch running.
+            if await _doc_cancel_requested():
+                raise DocumentCancelledException(
+                    f"Document {doc_id} cancelled during entity extraction"
+                )
 
             try:
                 result = await _process_single_content(chunk)

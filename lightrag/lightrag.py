@@ -4315,6 +4315,7 @@ class LightRAG:
                                     llm_response_cache=self.llm_response_cache,
                                     entity_chunks_storage=self.entity_chunks,
                                     relation_chunks_storage=self.relation_chunks,
+                                    doc_status_storage=self.doc_status,
                                     current_file_number=current_file_number,
                                     total_files=total_files,
                                     file_path=file_path,
