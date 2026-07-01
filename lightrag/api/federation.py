@@ -29,12 +29,46 @@ per-chunk KB tags on every NDJSON line.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
+import os
 from typing import Any, AsyncIterator
 
 from fastapi import Request
 
 from lightrag.utils import logger
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a float env var, falling back to ``default`` on unset/garbage."""
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        logger.warning("Invalid %s=%r; using default %.0f", name, raw, default)
+        return default
+
+
+# Per-shard wall-clock budget for the non-streaming fan-out (retrieval +
+# LLM answer for one KB). A wedged KB (hung embedding / storage / LLM)
+# would otherwise block the whole federated request forever — the reported
+# "提问无法回答，一直在加载" symptom. On timeout the shard is dropped and
+# the remaining KBs still answer.
+_SHARD_TIMEOUT = _env_float("FEDERATION_SHARD_TIMEOUT", 180.0)
+
+# Time budget for a streaming shard's *setup* call (aquery_llm: retrieval +
+# first-response construction, before any token flows). Kept separate from
+# the token-idle timeout below because retrieval must complete promptly
+# while token generation may legitimately run long.
+_STREAM_SETUP_TIMEOUT = _env_float("FEDERATION_STREAM_SETUP_TIMEOUT", 180.0)
+
+# Inactivity timeout between streamed tokens. This is an IDLE timeout, not a
+# total-duration cap: a slow-but-progressing answer is fine, but a stalled
+# generator (dead upstream mid-stream) is abandoned so the HTTP response can
+# close instead of spinning forever.
+_STREAM_IDLE_TIMEOUT = _env_float("FEDERATION_STREAM_IDLE_TIMEOUT", 120.0)
 
 
 def collect_workspace_kb_ids(state: Any, workspace_id: str) -> list[str]:
@@ -200,7 +234,13 @@ async def _fan_out(
     async def _run_one(one_kb_id: str) -> tuple[str, Any]:
         async with semaphore:
             rag = await rag_factory.get(workspace_id, one_kb_id)
-            return one_kb_id, await runner(rag)
+            # Bound each shard: a hung KB must not stall asyncio.gather (and
+            # thus the whole request) indefinitely. TimeoutError is an
+            # Exception, so the gather below drops this shard like any other
+            # per-shard failure — the remaining KBs still return.
+            return one_kb_id, await asyncio.wait_for(
+                runner(rag), timeout=_SHARD_TIMEOUT
+            )
 
     tasks = [_run_one(each) for each in kb_ids]
     settled = await asyncio.gather(*tasks, return_exceptions=True)
@@ -443,11 +483,30 @@ async def federated_stream(
         for index, kb_id in enumerate(kb_ids):
             try:
                 rag = await rag_factory.get(workspace_id, kb_id)
-                # Force streaming on for this shard — the caller's param
-                # already has stream=True but be explicit in case the
-                # caller mutates it between shards.
-                param.stream = True
-                result = await rag.aquery_llm(query, param=param)
+                # Per-shard param COPY. The shards run serially today, but
+                # mutating the caller's shared ``param`` (``stream = True``)
+                # in a loop is a latent aliasing bug — a shallow copy keeps
+                # each shard self-contained and future-proofs any move to
+                # concurrent streaming. QueryParam is a flat dataclass so a
+                # shallow copy is sufficient.
+                shard_param = copy.copy(param)
+                shard_param.stream = True
+                # Bound the SETUP call (retrieval + first-response build).
+                # A wedged KB here is the root of "一直在加载": without a
+                # timeout the whole stream blocks forever on one bad shard.
+                result = await asyncio.wait_for(
+                    rag.aquery_llm(query, param=shard_param),
+                    timeout=_STREAM_SETUP_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Federated stream shard TIMED OUT (setup) workspace=%s kb=%s after %.0fs",
+                    workspace_id,
+                    kb_id,
+                    _STREAM_SETUP_TIMEOUT,
+                )
+                yield f"{json.dumps({'error': f'[{kb_id}] timed out after {_STREAM_SETUP_TIMEOUT:.0f}s'})}\n"
+                continue
             except Exception as exc:
                 logger.warning(
                     "Federated stream shard failed workspace=%s kb=%s: %s",
@@ -508,15 +567,36 @@ async def federated_stream(
             if llm_response.get("is_streaming"):
                 response_stream = llm_response.get("response_iterator")
                 if response_stream:
-                    try:
-                        async for chunk in response_stream:
-                            if chunk:
-                                yield f"{json.dumps({'response': chunk})}\n"
-                    except Exception as exc:
-                        logger.error(
-                            "Federated stream chunk error kb=%s: %s", kb_id, exc
-                        )
-                        yield f"{json.dumps({'error': f'[{kb_id}] {exc}'})}\n"
+                    # Drain with a per-token IDLE timeout instead of
+                    # ``async for``. A stalled generator (upstream died
+                    # mid-stream) would otherwise hold the HTTP response
+                    # open indefinitely. A slow-but-progressing stream is
+                    # unaffected — the timeout resets on every token.
+                    iterator = response_stream.__aiter__()
+                    while True:
+                        try:
+                            chunk = await asyncio.wait_for(
+                                iterator.__anext__(),
+                                timeout=_STREAM_IDLE_TIMEOUT,
+                            )
+                        except StopAsyncIteration:
+                            break
+                        except asyncio.TimeoutError:
+                            logger.error(
+                                "Federated stream IDLE timeout kb=%s after %.0fs",
+                                kb_id,
+                                _STREAM_IDLE_TIMEOUT,
+                            )
+                            yield f"{json.dumps({'error': f'[{kb_id}] stream stalled (idle {_STREAM_IDLE_TIMEOUT:.0f}s)'})}\n"
+                            break
+                        except Exception as exc:
+                            logger.error(
+                                "Federated stream chunk error kb=%s: %s", kb_id, exc
+                            )
+                            yield f"{json.dumps({'error': f'[{kb_id}] {exc}'})}\n"
+                            break
+                        if chunk:
+                            yield f"{json.dumps({'response': chunk})}\n"
             else:
                 # Non-streaming shard (cache hit, or the underlying rag
                 # declined to stream) — emit the whole content as one
@@ -524,5 +604,12 @@ async def federated_stream(
                 content = llm_response.get("content") or ""
                 if content:
                     yield f"{json.dumps({'response': content})}\n"
+
+        # Terminal marker so a client can distinguish "stream finished
+        # cleanly" from "connection dropped mid-stream". Additive to the
+        # NDJSON contract — clients that ignore unknown keys are
+        # unaffected; the real fix for the hang is the per-shard timeouts
+        # above, which guarantee this line (and EOF) are always reached.
+        yield f"{json.dumps({'done': True})}\n"
 
     return _generator()
