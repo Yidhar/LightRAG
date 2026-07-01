@@ -9,6 +9,7 @@ from fastapi.openapi.docs import (
     get_swagger_ui_html,
     get_swagger_ui_oauth2_redirect_html,
 )
+import asyncio
 import os
 import re
 import logging
@@ -466,6 +467,57 @@ def create_app(args):
         await rag_instance.check_and_migrate_data()
 
     @asynccontextmanager
+    async def _warm_kb_runtimes(app: FastAPI) -> None:
+        """Pre-initialize every KB runtime off the request path.
+
+        Fixes "文档页面加载慢": the first federated documents/graph load
+        otherwise pays a per-KB cold-start (Neo4j driver connect + live
+        round-trip + index check + full KV load) SERIALLY inside the
+        request, because rag_factory.get() builds+caches lazily on first
+        access. Warming here means those requests hit the cache instead.
+
+        Runs as a background task — server readiness is NOT gated on it.
+        Bounded concurrency avoids a thundering-herd of Neo4j connects at
+        boot. Per-KB failures are logged, never fatal.
+        """
+        registry = getattr(app.state, "kb_registry", None)
+        factory = getattr(app.state, "rag_factory", None)
+        if registry is None or factory is None:
+            return
+        try:
+            kbs = registry.list_all_kbs()
+        except Exception:
+            logger.exception("KB warm-up: failed to enumerate knowledge bases")
+            return
+        if not kbs:
+            return
+
+        try:
+            limit = max(1, int(os.environ.get("WARM_KB_CONCURRENCY", "4")))
+        except (TypeError, ValueError):
+            limit = 4
+        semaphore = asyncio.Semaphore(limit)
+        warmed = 0
+
+        async def _warm_one(kb_id: str) -> None:
+            nonlocal warmed
+            async with semaphore:
+                try:
+                    # Empty workspace_id skips the linkage gate — the
+                    # factory caches by kb_id (storage namespace), so one
+                    # warm per KB serves every workspace that links it.
+                    await factory.get("", kb_id)
+                    warmed += 1
+                except Exception as exc:
+                    logger.warning("KB warm-up failed for kb=%s: %s", kb_id, exc)
+
+        await asyncio.gather(
+            *(_warm_one(kb.id) for kb in kbs), return_exceptions=True
+        )
+        logger.info(
+            "KB warm-up complete: %d/%d runtimes initialized", warmed, len(kbs)
+        )
+
     async def lifespan(app: FastAPI):
         """Lifespan context manager for startup and shutdown events"""
         # Store background tasks
@@ -496,6 +548,20 @@ def create_app(args):
             # Initialize database connections
             # Note: initialize_storages() now auto-initializes pipeline_status for rag.workspace
             await initialize_rag_runtime(rag)
+
+            # Warm all KB runtimes in the background so the first federated
+            # documents/graph load doesn't cold-start each KB inside the
+            # request path ("文档页面加载慢"). Non-blocking — readiness is
+            # not gated on it. Opt out with WARM_KB_RUNTIMES_ON_STARTUP=0.
+            if (
+                args.enable_kb_isolation
+                and getattr(app.state, "rag_factory", None) is not None
+                and os.environ.get("WARM_KB_RUNTIMES_ON_STARTUP", "true").lower()
+                not in ("0", "false", "no")
+            ):
+                warm_task = asyncio.create_task(_warm_kb_runtimes(app))
+                app.state.background_tasks.add(warm_task)
+                warm_task.add_done_callback(app.state.background_tasks.discard)
 
             ASCIIColors.green("\nServer is ready to accept connections! 🚀\n")
 
