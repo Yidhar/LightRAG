@@ -4252,11 +4252,46 @@ async def get_keywords_from_query(
     if query_param.hl_keywords or query_param.ll_keywords:
         return query_param.hl_keywords, query_param.ll_keywords
 
-    # Extract keywords using extract_keywords_only function which already supports conversation history
+    # extract_keywords_only threads param.conversation_history into the
+    # extraction prompt so anaphoric follow-ups resolve to real keywords.
     hl_keywords, ll_keywords = await extract_keywords_only(
         query, query_param, global_config, hashing_kv
     )
     return hl_keywords, ll_keywords
+
+
+def _render_history_for_keyword_extraction(param: QueryParam) -> str:
+    """Render recent conversation turns for the keyword-extraction prompt.
+
+    Returns "" when there is no history (single-turn queries are
+    unaffected — same prompt, same cache key as before). Otherwise returns
+    a compact ``role: content`` transcript of the most recent turns, capped
+    by ``param.history_turns`` (a "turn" = one user+assistant pair, so the
+    cap is ``2 * history_turns`` messages). This is used ONLY to help the
+    LLM resolve pronouns/ellipsis in the current query; the prompt
+    instructs it not to mine the history for stale keywords.
+    """
+    conversation_history = getattr(param, "conversation_history", None) or []
+    if not conversation_history:
+        return ""
+
+    turns = conversation_history
+    history_turns = getattr(param, "history_turns", None)
+    if isinstance(history_turns, int) and history_turns > 0:
+        turns = conversation_history[-(history_turns * 2):]
+
+    rendered: list[str] = []
+    for msg in turns:
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role", "") or "user").strip()
+        content = str(msg.get("content", "") or "").strip()
+        if content:
+            rendered.append(f"{role}: {content}")
+
+    if not rendered:
+        return ""
+    return "\n".join(rendered) + "\n"
 
 
 async def extract_keywords_only(
@@ -4269,6 +4304,10 @@ async def extract_keywords_only(
     Extract high-level and low-level keywords from the given 'text' using the LLM.
     This method does NOT build the final RAG context or provide a final answer.
     It ONLY extracts keywords (hl_keywords, ll_keywords).
+
+    When ``param.conversation_history`` is present, recent turns are rendered
+    into the prompt so anaphoric follow-ups resolve to real keywords — this
+    is what makes multi-turn ("连续对话") retrieval work.
     """
 
     # 1. Build the examples
@@ -4276,11 +4315,22 @@ async def extract_keywords_only(
 
     language = global_config["addon_params"].get("language", DEFAULT_SUMMARY_LANGUAGE)
 
-    # 2. Handle cache if needed - add cache type for keywords
+    # 1b. Render recent conversation history so anaphoric follow-ups
+    # ("他呢?", "再详细点") resolve to concrete keywords instead of
+    # extracting nothing. Previously conversation_history reached only the
+    # final answer LLM, never retrieval — so multi-turn follow-ups
+    # retrieved no context and could not be answered ("连续对话回答不了").
+    history_context = _render_history_for_keyword_extraction(param)
+
+    # 2. Handle cache if needed - add cache type for keywords.
+    # history_context is part of the key: the same follow-up text under a
+    # different conversation must not collide on a stale keyword cache
+    # entry (e.g. "他呢?" means different things in different threads).
     args_hash = compute_args_hash(
         param.mode,
         text,
         language,
+        history_context,
     )
     cached_result = await handle_cache(
         hashing_kv, args_hash, text, param.mode, cache_type="keywords"
@@ -4302,6 +4352,7 @@ async def extract_keywords_only(
         query=text,
         examples=examples,
         language=language,
+        history_context=history_context,
     )
 
     tokenizer: Tokenizer = global_config["tokenizer"]

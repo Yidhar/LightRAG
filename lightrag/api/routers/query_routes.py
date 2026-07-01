@@ -88,7 +88,7 @@ class QueryRequest(BaseModel):
 
     conversation_history: Optional[List[Dict[str, Any]]] = Field(
         default=None,
-        description="History messages are only sent to LLM for context, not used for retrieval. Format: [{'role': 'user/assistant', 'content': 'message'}].",
+        description="Past turns used both to ground the final answer AND to resolve anaphora/ellipsis during retrieval keyword extraction (multi-turn follow-ups). Format: [{'role': 'user/assistant', 'content': 'message'}].",
     )
 
     user_prompt: Optional[str] = Field(
