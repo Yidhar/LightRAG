@@ -106,6 +106,10 @@ export type Message = {
   thinkingContent?: string
   displayContent?: string
   thinkingTime?: number | null
+  // Unix epoch (ms) when the message was created — used to label when a
+  // question was asked / answered. Optional so history persisted before
+  // this field existed still hydrates cleanly.
+  timestamp?: number | null
 }
 
 export type QueryRequest = {

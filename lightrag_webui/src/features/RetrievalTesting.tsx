@@ -233,16 +233,19 @@ export default function RetrievalTesting() {
 
       // Create messages
       // Save the original input (with prefix if any) in userMessage.content for display
+      const now = Date.now()
       const userMessage: MessageWithError = {
         id: generateUniqueId(), // Use browser-compatible ID generation
         content: inputValue,
-        role: 'user'
+        role: 'user',
+        timestamp: now // when the question was asked (提问时间)
       }
 
       const assistantMessage: MessageWithError = {
         id: generateUniqueId(), // Use browser-compatible ID generation
         content: '',
         role: 'assistant',
+        timestamp: now,            // when the answer started
         mermaidRendered: false,
         latexRendered: false,      // Explicitly initialize to false
         thinkingTime: null,        // Explicitly initialize to null

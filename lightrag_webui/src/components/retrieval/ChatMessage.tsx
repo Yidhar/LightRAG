@@ -21,6 +21,16 @@ import { cn } from '@/lib/utils'
 
 const MarkdownMessageContent = lazy(() => import('@/components/retrieval/MarkdownMessageContent'))
 
+/** Short HH:MM(:SS) label for a message timestamp; full date/time via title. */
+const formatMessageTime = (ts: number): { label: string; full: string } => {
+  try {
+    const d = new Date(ts)
+    return { label: d.toLocaleTimeString(), full: d.toLocaleString() }
+  } catch {
+    return { label: '', full: '' }
+  }
+}
+
 export type MessageWithError = Message & {
   id: string
   isError?: boolean
@@ -278,6 +288,25 @@ export const ChatMessage = ({
         const hasVisibleContent = finalDisplayContent && finalDisplayContent.trim() !== ''
         const isLoadingState = !hasVisibleContent && !isThinking && !thinkingTime
         return isLoadingState && <LoaderIcon className="animate-spin duration-2000" />
+      })()}
+
+      {/* Timestamp: labels when the question was asked / answer produced. */}
+      {typeof message.timestamp === 'number' && message.timestamp > 0 && (() => {
+        const { label, full } = formatMessageTime(message.timestamp)
+        if (!label) return null
+        return (
+          <div
+            title={full}
+            className={cn(
+              'mt-2 text-right text-[11px] tabular-nums',
+              message.role === 'user'
+                ? 'text-primary-foreground/70'
+                : 'text-muted-foreground'
+            )}
+          >
+            {label}
+          </div>
+        )
       })()}
     </div>
   )
