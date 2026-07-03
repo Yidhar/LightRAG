@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, useRef } from 'react'
 import { AsyncSelect } from '@/components/ui/AsyncSelect'
 import { useSettingsStore } from '@/stores/settings'
 import { useGraphStore } from '@/stores/graph'
+import { useKBStore } from '@/stores/kb'
 import { useBackendState } from '@/stores/state'
 import {
   dropdownDisplayLimit,
@@ -81,6 +82,57 @@ const GraphLabels = () => {
     }
     prevPipelineBusy.current = pipelineBusy
   }, [pipelineBusy])
+
+  // Re-sync the graph when the active KB changes. The graph-data-fetch
+  // effect (useLightragGraph) only re-runs on queryLabel / graphDataVersion
+  // changes — NOT on activeKbId — and useGraphStore is a GLOBAL store, so
+  // switching KB otherwise left the previous KB's nodes on the canvas and
+  // its labels in the dropdown until the user clicked refresh manually.
+  // Here we reproduce a manual refresh on KB switch: reset the label to '*',
+  // reload the new KB's popular labels, clear stale fetch state, and bump
+  // graphDataVersion so the graph re-fetches under the new X-KB-Id header.
+  const activeKbId = useKBStore((s) => s.activeKbId)
+  const prevKbRef = useRef<string | null | undefined>(activeKbId)
+  useEffect(() => {
+    const prev = prevKbRef.current
+    prevKbRef.current = activeKbId
+    // Only resync on a genuine KB → KB switch. Skip the initial
+    // null → seeded-KB transition (the normal initial-load path already
+    // fetches for the seeded KB) and any → null transition (workspace
+    // switch clears the scope), so we don't fire a redundant fetch.
+    if (prev == null || activeKbId == null || prev === activeKbId) return
+
+    const resyncForKbSwitch = async () => {
+      SearchHistoryManager.clearHistory()
+      try {
+        const popularLabels = await getPopularLabels(popularLabelsDefaultLimit)
+        await SearchHistoryManager.initializeWithDefaults(
+          popularLabels.length > 0
+            ? popularLabels
+            : ['entity', 'relationship', 'document']
+        )
+      } catch (error) {
+        console.error('KB switch: failed to reload popular labels:', error)
+        await SearchHistoryManager.initializeWithDefaults([
+          'entity',
+          'relationship',
+          'document',
+        ])
+      }
+
+      useSettingsStore.getState().setQueryLabel('*')
+      const graphStore = useGraphStore.getState()
+      graphStore.setTypeColorMap(new Map<string, string>())
+      graphStore.setGraphDataFetchAttempted(false)
+      graphStore.setLastSuccessfulQueryLabel('')
+      graphStore.incrementGraphDataVersion()
+
+      setRefreshTrigger((prev) => prev + 1)
+      setSelectKey((prev) => prev + 1)
+    }
+
+    void resyncForKbSwitch()
+  }, [activeKbId])
 
   // Helper: Reload popular labels from backend
   const reloadPopularLabels = useCallback(async () => {

@@ -6,7 +6,6 @@ import { useTranslation } from 'react-i18next'
 import { appRoutes } from '@/app/routes'
 import { resolveKnowledgeBaseId, resolveWorkspaceId } from '@/app/routeHelpers'
 import { useAuthStore } from '@/stores/state'
-import { useKBStore } from '@/stores/kb'
 import { hasPermission, resolveEffectiveRole } from '@/lib/permissions'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/Alert'
 import Badge from '@/components/ui/Badge'
@@ -50,8 +49,8 @@ export default function GraphPage() {
   // Graph reads can't federate across KBs — each KB has its own graph
   // storage and merging them server-side would be expensive and largely
   // meaningless for visualization. So the picker here is single-select
-  // (no "全部" option); KBTabs auto-seeds the first linked KB.
-  const activeKbId = useKBStore((s) => s.activeKbId)
+  // (no "全部" option); KBTabs auto-seeds the first linked KB. The KB-switch
+  // graph reload is handled reactively inside GraphLabels (see GraphViewer).
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
@@ -95,12 +94,15 @@ export default function GraphPage() {
       {canViewKnowledgeBase ? (
         <div className="min-h-0 flex-1 overflow-hidden">
           <Suspense fallback={<GraphSurfaceLoading />}>
-            {/* Key on ``activeKbId`` so picking a different KB forces a
-                fresh mount — sigma reinitializes, label dropdowns
-                reload, and the cached viewport is thrown away. Without
-                the remount the previous KB's graph data lingers because
-                internal refs hold onto nodes/edges from the old query. */}
-            <GraphViewer key={activeKbId ?? '__unscoped__'} />
+            {/* NOT keyed on activeKbId. A remount here does NOT clear the
+                global useGraphStore (rawGraph/sigmaGraph), so keying was
+                an ineffective attempt to refresh on KB switch — the old
+                KB's nodes lingered until a manual refresh. Instead,
+                GraphLabels reacts to activeKbId changes and reloads the
+                graph (reset label to '*', reload popular labels, bump
+                graphDataVersion → re-fetch under the new X-KB-Id). Keeping
+                GraphViewer mounted lets that effect run. */}
+            <GraphViewer />
           </Suspense>
         </div>
       ) : (
