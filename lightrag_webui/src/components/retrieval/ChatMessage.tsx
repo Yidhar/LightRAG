@@ -99,6 +99,104 @@ export const ChatMessage = ({
   )
   const referenceItems = useMemo(() => message.references || [], [message.references])
 
+  // In "全部知识库" (federated) retrieval the answer is streamed as one
+  // block PER knowledge base ("### Knowledge base: X"), and each block's
+  // LLM uses that KB's OWN local [1][2]… citation numbering. The sources
+  // come back from /query/data merged across every KB with reference_ids
+  // namespaced "<kb_id>:<local_id>". Rendering them as one flat, globally-
+  // numbered list made the panel disagree with the per-block citations.
+  // Group by KB and number locally so each group lines up with its answer
+  // block. Single-KB queries have un-namespaced ids -> one null group ->
+  // the flat rendering below, unchanged.
+  const sourceGroups = useMemo(() => {
+    const parseKb = (refId?: string): { kb: string | null; local: string } => {
+      if (!refId) return { kb: null, local: '' }
+      const i = refId.indexOf(':')
+      if (i <= 0) return { kb: null, local: refId }
+      return { kb: refId.slice(0, i), local: refId.slice(i + 1) }
+    }
+    type Group = {
+      kb: string | null
+      chunks: { chunk: RetrievedChunk; local: string }[]
+      refs: { ref: QueryReference; local: string }[]
+    }
+    const order: (string | null)[] = []
+    const byKb = new Map<string | null, Group>()
+    const ensure = (kb: string | null): Group => {
+      let g = byKb.get(kb)
+      if (!g) {
+        g = { kb, chunks: [], refs: [] }
+        byKb.set(kb, g)
+        order.push(kb)
+      }
+      return g
+    }
+    for (const chunk of textSources) {
+      const { kb, local } = parseKb(chunk.reference_id)
+      ensure(kb).chunks.push({ chunk, local })
+    }
+    for (const ref of referenceItems) {
+      const { kb, local } = parseKb(ref.reference_id)
+      ensure(kb).refs.push({ ref, local })
+    }
+    return order.map((kb) => byKb.get(kb)!)
+  }, [textSources, referenceItems])
+  // Federated iff any source carries a KB namespace prefix.
+  const isFederatedSources = sourceGroups.some((g) => g.kb !== null)
+
+  const renderChunkCard = (chunk: RetrievedChunk, label: string, key: string) => (
+    <div
+      key={key}
+      className="rounded-2xl border border-border/70 bg-background/90 p-3"
+    >
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <span className="rounded-full bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-emerald-700 dark:text-emerald-300">
+          {label}
+        </span>
+        {chunk.file_path && (
+          <button
+            type="button"
+            onClick={() => handleDownloadSource(chunk.file_path!)}
+            disabled={downloadingName !== null}
+            title={t('retrievePanel.chatMessage.downloadSource')}
+            aria-label={t('retrievePanel.chatMessage.downloadSource')}
+            className="motion-standard group inline-flex max-w-full items-center gap-1.5 rounded-md px-1 py-0.5 text-xs text-muted-foreground hover:bg-emerald-500/10 hover:text-emerald-700 disabled:cursor-wait disabled:opacity-60 dark:hover:text-emerald-300"
+          >
+            {downloadingName === chunk.file_path ? (
+              <LoaderIcon className="size-3 shrink-0 animate-spin" />
+            ) : (
+              <DownloadIcon className="size-3 shrink-0 opacity-70 group-hover:opacity-100" />
+            )}
+            <span className="truncate">{chunk.file_path}</span>
+          </button>
+        )}
+      </div>
+      <p className="whitespace-pre-wrap text-sm leading-6 text-foreground/90">
+        {chunk.content}
+      </p>
+    </div>
+  )
+
+  const renderRefChip = (reference: QueryReference, key: string, label?: string) => (
+    <button
+      key={key}
+      type="button"
+      onClick={() => handleDownloadSource(reference.file_path)}
+      disabled={downloadingName !== null || !reference.file_path}
+      title={t('retrievePanel.chatMessage.downloadSource')}
+      aria-label={t('retrievePanel.chatMessage.downloadSource')}
+      className="motion-standard group inline-flex max-w-full items-center gap-1.5 rounded-full border border-border/70 bg-muted/20 px-3 py-1 text-xs text-muted-foreground hover:border-emerald-500/40 hover:bg-emerald-500/10 hover:text-emerald-700 disabled:cursor-wait disabled:opacity-60 dark:hover:text-emerald-300"
+    >
+      {downloadingName === reference.file_path ? (
+        <LoaderIcon className="size-3 shrink-0 animate-spin" />
+      ) : (
+        <DownloadIcon className="size-3 shrink-0 opacity-70 group-hover:opacity-100" />
+      )}
+      {label && <span className="shrink-0 font-semibold text-emerald-700 dark:text-emerald-300">[{label}]</span>}
+      <span className="truncate">{reference.file_path}</span>
+    </button>
+  )
+
   return (
     <div
       className={cn(
@@ -220,63 +318,54 @@ export const ChatMessage = ({
 
               {areSourcesExpanded && (
                 <div className="mt-4 grid gap-3">
-                  {textSources.slice(0, 6).map((chunk, index) => (
-                    <div
-                      key={`${chunk.chunk_id || chunk.reference_id || 'chunk'}-${index}`}
-                      className="rounded-2xl border border-border/70 bg-background/90 p-3"
-                    >
-                      <div className="mb-2 flex flex-wrap items-center gap-2">
-                        <span className="rounded-full bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-emerald-700 dark:text-emerald-300">
-                          {t('retrievePanel.chatMessage.sourceLabel', { index: index + 1 })}
-                        </span>
-                        {chunk.file_path && (
-                          <button
-                            type="button"
-                            onClick={() => handleDownloadSource(chunk.file_path!)}
-                            disabled={downloadingName !== null}
-                            title={t('retrievePanel.chatMessage.downloadSource')}
-                            aria-label={t('retrievePanel.chatMessage.downloadSource')}
-                            className="motion-standard group inline-flex max-w-full items-center gap-1.5 rounded-md px-1 py-0.5 text-xs text-muted-foreground hover:bg-emerald-500/10 hover:text-emerald-700 disabled:cursor-wait disabled:opacity-60 dark:hover:text-emerald-300"
-                          >
-                            {downloadingName === chunk.file_path ? (
-                              <LoaderIcon className="size-3 shrink-0 animate-spin" />
-                            ) : (
-                              <DownloadIcon className="size-3 shrink-0 opacity-70 group-hover:opacity-100" />
+                  {sourceGroups.map((group, groupIndex) => (
+                    <div key={group.kb ?? '__single__'} className="grid gap-3">
+                      {/* Per-KB header so a federated ("全部知识库") answer's
+                          "### Knowledge base: X" block visually lines up with
+                          its own sources. Single-KB queries (kb === null)
+                          render no header — same look as before. */}
+                      {group.kb !== null && (
+                        <div className="flex items-center gap-2 pt-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                          <span className="rounded-full bg-emerald-500/10 px-2.5 py-1 text-emerald-700 dark:text-emerald-300">
+                            {t('retrievePanel.chatMessage.kbGroupLabel', {
+                              defaultValue: '知识库',
+                            })}
+                          </span>
+                          <span className="truncate font-mono normal-case tracking-normal text-foreground/80">
+                            {group.kb}
+                          </span>
+                        </div>
+                      )}
+
+                      {group.chunks.slice(0, 6).map(({ chunk, local }, index) =>
+                        renderChunkCard(
+                          chunk,
+                          // Federated: use the KB-local citation number so it
+                          // matches that block's [n]. Single-KB: running index.
+                          isFederatedSources && local
+                            ? local
+                            : t('retrievePanel.chatMessage.sourceLabel', {
+                              index: index + 1,
+                            }),
+                          `${group.kb ?? 's'}-${chunk.chunk_id || chunk.reference_id || 'chunk'}-${groupIndex}-${index}`
+                        )
+                      )}
+
+                      {group.refs.length > 0 && (
+                        <div className="rounded-2xl border border-dashed border-border/70 bg-background/70 p-3">
+                          <div className="flex flex-wrap gap-2">
+                            {group.refs.slice(0, 8).map(({ ref, local }, refIndex) =>
+                              renderRefChip(
+                                ref,
+                                `${group.kb ?? 'r'}-${ref.reference_id}-${refIndex}`,
+                                isFederatedSources ? local : undefined
+                              )
                             )}
-                            <span className="truncate">{chunk.file_path}</span>
-                          </button>
-                        )}
-                      </div>
-                      <p className="whitespace-pre-wrap text-sm leading-6 text-foreground/90">
-                        {chunk.content}
-                      </p>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ))}
-
-                  {referenceItems.length > 0 && (
-                    <div className="rounded-2xl border border-dashed border-border/70 bg-background/70 p-3">
-                      <div className="flex flex-wrap gap-2">
-                        {referenceItems.slice(0, 8).map((reference) => (
-                          <button
-                            key={reference.reference_id}
-                            type="button"
-                            onClick={() => handleDownloadSource(reference.file_path)}
-                            disabled={downloadingName !== null || !reference.file_path}
-                            title={t('retrievePanel.chatMessage.downloadSource')}
-                            aria-label={t('retrievePanel.chatMessage.downloadSource')}
-                            className="motion-standard group inline-flex max-w-full items-center gap-1.5 rounded-full border border-border/70 bg-muted/20 px-3 py-1 text-xs text-muted-foreground hover:border-emerald-500/40 hover:bg-emerald-500/10 hover:text-emerald-700 disabled:cursor-wait disabled:opacity-60 dark:hover:text-emerald-300"
-                          >
-                            {downloadingName === reference.file_path ? (
-                              <LoaderIcon className="size-3 shrink-0 animate-spin" />
-                            ) : (
-                              <DownloadIcon className="size-3 shrink-0 opacity-70 group-hover:opacity-100" />
-                            )}
-                            <span className="truncate">{reference.file_path}</span>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
                 </div>
               )}
             </div>
