@@ -466,7 +466,6 @@ def create_app(args):
         await rag_instance.initialize_storages()
         await rag_instance.check_and_migrate_data()
 
-    @asynccontextmanager
     async def _warm_kb_runtimes(app: FastAPI) -> None:
         """Pre-initialize every KB runtime off the request path.
 
@@ -518,6 +517,7 @@ def create_app(args):
             "KB warm-up complete: %d/%d runtimes initialized", warmed, len(kbs)
         )
 
+    @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Lifespan context manager for startup and shutdown events"""
         # Store background tasks
