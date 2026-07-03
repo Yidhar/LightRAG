@@ -1854,8 +1854,23 @@ type InFlightPaginatedDocumentRequest = {
   subscriberCount: number
 }
 
-const getPaginatedDocumentsRequestKey = (request: DocumentsRequest): string =>
-  JSON.stringify(request)
+const getPaginatedDocumentsRequestKey = (request: DocumentsRequest): string => {
+  // CRITICAL: the dedup key MUST include the active workspace/KB scope.
+  // That scope lives in the X-Workspace-Id / X-KB-Id headers (injected by
+  // the request interceptor from useKBStore), NOT in the request body. Keying
+  // on the body alone meant a paginated for (workspace B, kb B) shared a key
+  // with a still-in-flight request for (workspace A, kb A) that had the same
+  // page/filter — so on a workspace/KB switch the new request DEDUP-subscribed
+  // to the old, wrong-scope request and blocked until it finished (observed as
+  // a ~20s+ idle gap before the documents load). Scoping the key makes the
+  // switch fire a fresh request immediately.
+  const { activeWorkspaceId, activeKbId } = useKBStore.getState()
+  return JSON.stringify({
+    request,
+    ws: activeWorkspaceId ?? null,
+    kb: activeKbId ?? null,
+  })
+}
 
 // Deduplicate in-flight paginated document requests with identical parameters.
 // This prevents duplicate backend calls caused by overlapping timers/effects or
