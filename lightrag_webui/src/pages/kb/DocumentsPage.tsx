@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { FileStackIcon, SparklesIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -70,9 +70,12 @@ export default function DocumentsPage() {
   const handleKbsResolved = useCallback((count: number) => setKbCount(count), [])
   // Reset resolution state when the workspace changes so we show a loading
   // state (not the previous workspace's docs) until KBTabs re-resolves.
-  const lastWorkspaceRef = useRef(currentWorkspaceId)
-  if (lastWorkspaceRef.current !== currentWorkspaceId) {
-    lastWorkspaceRef.current = currentWorkspaceId
+  // "Store previous prop in state" pattern (setState during render is the
+  // documented reset-on-prop-change idiom; reading a ref during render is
+  // not allowed under React 19's rules).
+  const [lastWorkspace, setLastWorkspace] = useState(currentWorkspaceId)
+  if (lastWorkspace !== currentWorkspaceId) {
+    setLastWorkspace(currentWorkspaceId)
     if (kbCount !== null) setKbCount(null)
   }
   const kbResolved = kbCount !== null
