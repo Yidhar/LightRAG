@@ -92,15 +92,23 @@ const GraphLabels = () => {
   // reload the new KB's popular labels, clear stale fetch state, and bump
   // graphDataVersion so the graph re-fetches under the new X-KB-Id header.
   const activeKbId = useKBStore((s) => s.activeKbId)
-  const prevKbRef = useRef<string | null | undefined>(activeKbId)
+  // Track the last kb id we actually RESYNCED to — NOT merely the previous
+  // value. A workspace switch drops the scope to null before KBTabs reseeds
+  // (oldKb → null → newKb), so a plain "previous value" guard sees prev==null
+  // when newKb arrives and wrongly treats it as an initial seed, skipping the
+  // resync — that was the "graph doesn't refresh on workspace switch" bug.
+  // Comparing against the last SYNCED kb id makes the transient null
+  // pass-through invisible, so the real oldKb → newKb change still fires.
+  const syncedKbRef = useRef<string | null>(useKBStore.getState().activeKbId)
   useEffect(() => {
-    const prev = prevKbRef.current
-    prevKbRef.current = activeKbId
-    // Only resync on a genuine KB → KB switch. Skip the initial
-    // null → seeded-KB transition (the normal initial-load path already
-    // fetches for the seeded KB) and any → null transition (workspace
-    // switch clears the scope), so we don't fire a redundant fetch.
-    if (prev == null || activeKbId == null || prev === activeKbId) return
+    // Ignore transient null clears; wait for the new non-null kb id.
+    if (activeKbId == null) return
+    if (syncedKbRef.current === activeKbId) return
+    const isInitialSeed = syncedKbRef.current == null
+    syncedKbRef.current = activeKbId
+    // First non-null seed on mount: the useLightragGraph initial-load path
+    // already fetches once, so don't double-fetch here.
+    if (isInitialSeed) return
 
     const resyncForKbSwitch = async () => {
       SearchHistoryManager.clearHistory()
