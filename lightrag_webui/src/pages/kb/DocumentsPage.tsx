@@ -143,8 +143,17 @@ export default function DocumentsPage() {
                 it mounts once, keyed on the real KB id, so switching KB
                 still forces a fresh single fetch with the new X-KB-Id. */}
             {showManager ? (
+              // Key includes the WORKSPACE, not just the KB scope. In
+              // all-KBs mode the KB part is the constant '__all_kbs__', so
+              // without the workspace in the key a workspace switch left the
+              // manager mounted and its mount-fetch effect never re-fired
+              // (its deps don't include the workspace) — the new workspace's
+              // documents then only loaded on the next 30s polling tick,
+              // which is the ~25s delay users saw. Appending the workspace
+              // forces a remount (fresh single fetch) on every workspace or
+              // KB switch, in both single-KB and all-KBs modes.
               <DocumentManager
-                key={allKbsMode ? '__all_kbs__' : activeKbId}
+                key={`${allKbsMode ? '__all_kbs__' : activeKbId}:${currentWorkspaceId}`}
                 allKbsMode={allKbsMode}
               />
             ) : showEmptyState ? (
