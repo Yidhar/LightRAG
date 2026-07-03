@@ -119,6 +119,14 @@ export default function KBTabs({
       const response = await listKnowledgeBases(workspaceId)
       setKnowledgeBases(response.items)
       const firstKbId = response.items[0]?.id ?? null
+      // Read the active KB FRESH from the store rather than closing over the
+      // subscribed ``activeKbId``. Keeping it out of ``load``'s deps is what
+      // stops the redundant-fetch churn: ``load`` calls ``setActiveKb`` →
+      // ``activeKbId`` changes → (if it were a dep) ``load`` is recreated →
+      // the ``[load]`` effect re-fires → ANOTHER ``listKnowledgeBases``.
+      // That guaranteed ≥2 kb round-trips per mount and piled onto the
+      // request queue (the "kb" storm seen in the network trace).
+      const currentActiveKb = useKBStore.getState().activeKbId
       if (response.items.length > 0) {
         if (allKbsSelected) {
           // Parent owns the selection ("全部知识库"): do NOT auto-seed
@@ -127,13 +135,13 @@ export default function KBTabs({
           // federates across every KB in the workspace. Without this, the
           // picker would render "全部" while queries silently scoped to
           // firstKb — the exact bug we hit on RetrievalPage.
-          if (activeKbId) {
+          if (currentActiveKb) {
             setActiveKb(null)
             writeKbQuery(null)
           }
         } else if (
-          !activeKbId ||
-          !response.items.some((kb) => kb.id === activeKbId)
+          !currentActiveKb ||
+          !response.items.some((kb) => kb.id === currentActiveKb)
         ) {
           // If nothing is selected yet, or the selection doesn't exist in
           // this workspace (stale URL ``?kb=`` / workspace switch / deleted
@@ -149,7 +157,7 @@ export default function KBTabs({
         // No KBs linked to this workspace at all — clear the selection so
         // downstream callers (DocumentManager interceptor header injector)
         // don't keep sending a stale id.
-        if (activeKbId) {
+        if (currentActiveKb) {
           setActiveKb(null)
           writeKbQuery(null)
         }
@@ -164,7 +172,7 @@ export default function KBTabs({
     } finally {
       setLoading(false)
     }
-  }, [workspaceId, activeKbId, allKbsSelected, setActiveKb, writeKbQuery])
+  }, [workspaceId, allKbsSelected, setActiveKb, writeKbQuery])
 
   useEffect(() => {
     void load()
