@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { BookOpenTextIcon, PlusIcon } from 'lucide-react'
@@ -30,6 +30,14 @@ interface KBTabsProps {
   allKbsSelected?: boolean
   /** Fired when the sentinel option is picked — parent owns the flag. */
   onPickAll?: () => void
+  /**
+   * Fired after each KB-list load completes, with the number of KBs linked
+   * to the workspace. Lets the parent gate a heavy child (DocumentManager)
+   * on "KB list resolved" so it doesn't mount+fetch against the transient
+   * ``default`` sentinel before the real KB is seeded (the double-fetch
+   * waterfall), while still distinguishing "loading" from "empty workspace".
+   */
+  onResolved?: (kbCount: number) => void
 }
 
 // Sentinel value used in the Select for the aggregate option. Kept out of
@@ -53,6 +61,7 @@ export default function KBTabs({
   allowAllOption = false,
   allKbsSelected = false,
   onPickAll,
+  onResolved,
 }: KBTabsProps) {
   const { t } = useTranslation()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -93,6 +102,15 @@ export default function KBTabs({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Keep the latest onResolved in a ref so it is NOT a dependency of
+  // ``load`` — otherwise an inline arrow from the parent would change
+  // ``load``'s identity every render and re-trigger the load effect in a
+  // loop.
+  const onResolvedRef = useRef(onResolved)
+  useEffect(() => {
+    onResolvedRef.current = onResolved
+  }, [onResolved])
 
   const load = useCallback(async () => {
     try {
@@ -136,9 +154,13 @@ export default function KBTabs({
           writeKbQuery(null)
         }
       }
+      // Signal the parent that the KB list is resolved (with its count)
+      // so it can distinguish "still loading" from "empty workspace".
+      onResolvedRef.current?.(response.items.length)
     } catch {
       setKnowledgeBases([])
       setLoadError(true)
+      onResolvedRef.current?.(0)
     } finally {
       setLoading(false)
     }

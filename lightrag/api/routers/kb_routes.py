@@ -4,6 +4,7 @@ Knowledge-base metadata management routes for WS4 / Platform V2.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -14,6 +15,7 @@ from lightrag.api.dependencies import compose_runtime_workspace, get_request_con
 from lightrag.api.kb_registry import KnowledgeBaseRegistry
 from lightrag.api.models.kb import KnowledgeBase
 from lightrag.api.permissions import Action, require_permission
+from lightrag.utils import logger
 
 router = APIRouter(tags=["knowledge-bases"])
 
@@ -142,6 +144,43 @@ async def _evict_kb_runtime_if_present(
         await rag_factory.evict(workspace_id, kb_id)
 
 
+def _warm_kb_runtime_background(
+    request: Request,
+    *,
+    workspace_id: str,
+    kb_id: str,
+) -> None:
+    """Fire-and-forget: build+cache the KB runtime OFF the request path.
+
+    The startup warm only covers KBs that existed at boot. A KB created (or
+    just edited — update evicts the runtime) after startup would otherwise
+    cold-start (Neo4j connect + full storage init) inside the NEXT
+    documents/graph/query request, adding seconds of latency to "entering
+    the KB". Warming here moves that cost out of the user's request. Errors
+    are logged, never surfaced — this is best-effort.
+    """
+    state = request.app.state
+    if not getattr(state, "enable_kb_isolation", False):
+        return
+    rag_factory = getattr(state, "rag_factory", None)
+    if rag_factory is None:
+        return
+
+    async def _warm() -> None:
+        try:
+            await rag_factory.get(workspace_id, kb_id)
+        except Exception as exc:  # pragma: no cover — best-effort
+            logger.warning(
+                "Post-mutation KB warm failed for kb=%s: %s", kb_id, exc
+            )
+
+    task = asyncio.create_task(_warm())
+    tasks = getattr(state, "background_tasks", None)
+    if isinstance(tasks, set):
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
+
 def _cleanup_doc_manager_cache(
     request: Request,
     *,
@@ -232,6 +271,13 @@ def create_kb_routes(api_key: Optional[str] = None) -> APIRouter:
             )
             raise HTTPException(status_code=status_code, detail=detail) from exc
 
+        # Warm the new KB's runtime off the request path so the first
+        # documents/graph/query request after creation doesn't pay the
+        # Neo4j-connect + storage-init cold-start ("进入知识库加载缓慢").
+        _warm_kb_runtime_background(
+            request, workspace_id=kb.workspace_id, kb_id=kb.id
+        )
+
         await emit_audit_event(
             request,
             action="workspace:update",
@@ -310,6 +356,12 @@ def create_kb_routes(api_key: Optional[str] = None) -> APIRouter:
             request,
             workspace_id=resolved_workspace_id,
             kb_id=resolved_kb_id,
+        )
+        # Re-warm after eviction so the next open of this KB doesn't
+        # cold-start inside the request (config_override changes rebuild
+        # the runtime).
+        _warm_kb_runtime_background(
+            request, workspace_id=resolved_workspace_id, kb_id=resolved_kb_id
         )
 
         await emit_audit_event(

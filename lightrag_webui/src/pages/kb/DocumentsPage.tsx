@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState } from 'react'
+import { lazy, Suspense, useCallback, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { FileStackIcon, SparklesIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -54,10 +54,30 @@ export default function DocumentsPage() {
   )
 
   const canViewKnowledgeBase = hasPermission(effectiveRole, 'kb:view')
-  const activeKbId = useKBStore((s) => s.activeKbId) ?? defaultKnowledgeBaseId
+  // Raw store value: null until KBTabs seeds the first linked KB. Keep it
+  // separate from the defaulted id so we can tell "not resolved yet" from
+  // "resolved to a concrete KB".
+  const rawActiveKbId = useKBStore((s) => s.activeKbId)
+  const activeKbId = rawActiveKbId ?? defaultKnowledgeBaseId
   // When true, the documents surface aggregates across every KB in the
   // current workspace — KBTabs paints "全部知识库" as the active option.
   const [allKbsMode, setAllKbsMode] = useState(false)
+  // KB-list resolution state, driven by KBTabs.onResolved. Gates the
+  // DocumentManager mount so it does NOT fetch against the transient
+  // ``default`` sentinel and then remount+refetch when the real KB is
+  // seeded — the double-fetch waterfall that made navigation slow.
+  const [kbCount, setKbCount] = useState<number | null>(null)
+  const handleKbsResolved = useCallback((count: number) => setKbCount(count), [])
+  // Reset resolution state when the workspace changes so we show a loading
+  // state (not the previous workspace's docs) until KBTabs re-resolves.
+  const lastWorkspaceRef = useRef(currentWorkspaceId)
+  if (lastWorkspaceRef.current !== currentWorkspaceId) {
+    lastWorkspaceRef.current = currentWorkspaceId
+    if (kbCount !== null) setKbCount(null)
+  }
+  const kbResolved = kbCount !== null
+  const showManager = allKbsMode || (kbResolved && rawActiveKbId != null)
+  const showEmptyState = !allKbsMode && kbResolved && kbCount === 0
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
@@ -96,6 +116,7 @@ export default function DocumentsPage() {
           allKbsSelected={allKbsMode}
           onPickAll={() => setAllKbsMode(true)}
           onChange={() => setAllKbsMode(false)}
+          onResolved={handleKbsResolved}
         />
       )}
 
@@ -111,15 +132,29 @@ export default function DocumentsPage() {
       {canViewKnowledgeBase ? (
         <div className="min-h-0 flex-1 overflow-hidden">
           <Suspense fallback={<DocumentsSurfaceLoading />}>
-            {/* Key the manager on activeKbId so switching tabs forces a
-                fresh mount (and a fresh fetch with the new X-KB-Id
-                header injected by the axios interceptor). In allKbsMode
-                we key on the sentinel so the remount resets state when
-                flipping into / out of the aggregated view. */}
-            <DocumentManager
-              key={allKbsMode ? '__all_kbs__' : activeKbId}
-              allKbsMode={allKbsMode}
-            />
+            {/* Only mount the manager once the KB is resolved (or in
+                allKbsMode). Mounting under the transient ``default``
+                sentinel fired a throwaway /documents/paginated and then
+                remounted+refetched when KBTabs seeded the real KB — the
+                double round-trip that made entering a KB take 10s+. Now
+                it mounts once, keyed on the real KB id, so switching KB
+                still forces a fresh single fetch with the new X-KB-Id. */}
+            {showManager ? (
+              <DocumentManager
+                key={allKbsMode ? '__all_kbs__' : activeKbId}
+                allKbsMode={allKbsMode}
+              />
+            ) : showEmptyState ? (
+              <div className="flex h-full items-center justify-center px-6 py-10">
+                <p className="max-w-md text-center text-sm text-muted-foreground">
+                  {t('platformShell.documents.noKbHint', {
+                    defaultValue: '当前工作区还没有知识库。请在上方"新建知识库"后再上传文档。',
+                  })}
+                </p>
+              </div>
+            ) : (
+              <DocumentsSurfaceLoading />
+            )}
           </Suspense>
         </div>
       ) : (
