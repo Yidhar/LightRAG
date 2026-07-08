@@ -5759,6 +5759,24 @@ def create_document_routes(
         source_kb_id: str
         target_kb_id: str
 
+    class CopyDocRequest(BaseModel):
+        target_kb_id: str = Field(
+            min_length=1,
+            description="KB id within the same workspace to copy the document into.",
+        )
+
+    class CopyDocResponse(BaseModel):
+        status: Literal["copied"] = Field(
+            description=(
+                "``copied``: document content was re-enqueued under the target KB; "
+                "the source KB copy is left untouched."
+            )
+        )
+        message: str
+        doc_id: str
+        source_kb_id: str
+        target_kb_id: str
+
     @router.post(
         "/{doc_id}/move",
         response_model=MoveDocResponse,
@@ -5927,6 +5945,132 @@ def create_document_routes(
             message=(
                 f"Document '{doc_id}' enqueued in KB '{target_kb}'. "
                 f"Delete from source KB '{source_kb}' scheduled in the background."
+            ),
+            doc_id=doc_id,
+            source_kb_id=source_kb,
+            target_kb_id=target_kb,
+        )
+
+    @router.post(
+        "/{doc_id}/copy",
+        response_model=CopyDocResponse,
+        dependencies=[Depends(document_upload_permission)],
+        summary="Copy a document into another KB inside the same workspace.",
+    )
+    async def copy_document(
+        doc_id: str,
+        payload: CopyDocRequest,
+        request: Request,
+        active_rag: LightRAG = Depends(resolve_route_rag),
+    ) -> "CopyDocResponse":  # noqa: F821 — forward ref in same function
+        """Copy = same as move, but the SOURCE copy is kept.
+
+        Reads the source document's content + file_path and re-enqueues it in
+        the target KB (which re-runs extraction, since KB storage namespaces
+        are per-KB). Gated on KB_UPLOAD_DOCUMENT (it adds to the target and
+        removes nothing) rather than KB_DELETE_DOCUMENT.
+        """
+        rag_factory = getattr(request.app.state, "rag_factory", None)
+        if rag_factory is None:
+            raise HTTPException(
+                status_code=501,
+                detail=(
+                    "Copying documents between KBs requires ENABLE_KB_ISOLATION=true "
+                    "and a per-KB rag factory."
+                ),
+            )
+
+        context = get_request_context(request)
+        source_workspace = context.workspace_id or getattr(
+            request.app.state, "default_workspace_id", "default"
+        )
+        source_kb = context.kb_id or getattr(
+            request.app.state, "default_kb_id", "default"
+        )
+        target_kb = payload.target_kb_id.strip()
+
+        if not target_kb:
+            raise HTTPException(
+                status_code=400, detail="target_kb_id must not be empty"
+            )
+        if target_kb == source_kb:
+            raise HTTPException(
+                status_code=400,
+                detail="Source and target knowledge bases are the same.",
+            )
+
+        registry = getattr(request.app.state, "kb_registry", None)
+        if registry is not None and registry.get_kb(source_workspace, target_kb) is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Target knowledge base '{target_kb}' is not linked to "
+                    f"workspace '{source_workspace}'. Link it first via "
+                    f"POST /workspaces/{source_workspace}/kb/link."
+                ),
+            )
+
+        source_rag = _resolve_active_rag(active_rag)
+
+        source_content_record = await source_rag.full_docs.get_by_id(doc_id)
+        if source_content_record is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Document '{doc_id}' not found in workspace "
+                f"'{source_workspace}' / KB '{source_kb}'.",
+            )
+        content = source_content_record.get("content") or ""
+        if not content:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Document '{doc_id}' has empty content — cannot copy.",
+            )
+
+        source_status_record = await source_rag.doc_status.get_by_id(doc_id)
+        file_path = (
+            (source_status_record or {}).get("file_path")
+            or source_content_record.get("file_path")
+            or ""
+        )
+
+        # Enqueue in target KB (keep the source). ``ainsert`` derives an
+        # MD5-based doc_id from the content; forwarding the original id keeps
+        # citations/logs aligned between the source and target copies.
+        target_rag = await rag_factory.get(source_workspace, target_kb)
+        try:
+            await target_rag.ainsert(
+                content,
+                ids=[doc_id],
+                file_paths=[file_path] if file_path else None,
+            )
+        except Exception as exc:
+            logger.error(
+                "copy_document: insert into target KB %s failed: %s", target_kb, exc
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to enqueue document in target KB '{target_kb}': {exc}",
+            )
+
+        await emit_audit_event(
+            request,
+            action="doc:copy",
+            resource_type="document",
+            resource_id=doc_id,
+            outcome="success",
+            status_code=200,
+            metadata={
+                "source_workspace_id": source_workspace,
+                "source_kb_id": source_kb,
+                "target_kb_id": target_kb,
+            },
+        )
+
+        return CopyDocResponse(
+            status="copied",
+            message=(
+                f"Document '{doc_id}' copied into KB '{target_kb}'. "
+                f"The source KB '{source_kb}' copy is unchanged."
             ),
             doc_id=doc_id,
             source_kb_id=source_kb,

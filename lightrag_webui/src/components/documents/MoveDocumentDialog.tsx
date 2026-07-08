@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
 import {
+  copyDocument,
   listKnowledgeBases,
   moveDocument,
   type KnowledgeBaseRecord,
@@ -29,14 +30,19 @@ import {
 interface MoveDocumentDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  /** The document being moved. Used for labels + pre-move display. */
+  /** The document being moved/copied. Used for labels + pre-op display. */
   docId: string | null
   docLabel?: string | null
   /** Current workspace id — used to fetch the candidate KB list. */
   workspaceId: string
-  /** Current KB id — excluded from the selector (you can't move to self). */
+  /** Current KB id — excluded from the selector (you can't move/copy to self). */
   currentKbId: string
-  /** Called once the backend confirms the move; caller typically refreshes the list. */
+  /**
+   * ``move`` (default): re-ingest in target + background delete from source.
+   * ``copy``: re-ingest in target, leave the source copy intact.
+   */
+  mode?: 'move' | 'copy'
+  /** Called once the backend confirms; caller typically refreshes the list. */
   onMoved?: () => void
 }
 
@@ -59,9 +65,11 @@ export default function MoveDocumentDialog({
   docLabel,
   workspaceId,
   currentKbId,
+  mode = 'move',
   onMoved,
 }: MoveDocumentDialogProps) {
   const { t } = useTranslation()
+  const isCopy = mode === 'copy'
   const [kbs, setKbs] = useState<KnowledgeBaseRecord[]>([])
   const [loadingKbs, setLoadingKbs] = useState(false)
   const [targetKbId, setTargetKbId] = useState<string>('')
@@ -89,11 +97,13 @@ export default function MoveDocumentDialog({
     }
   }, [open, workspaceId, currentKbId])
 
-  const handleMove = async () => {
+  const handleSubmit = async () => {
     if (!docId || !targetKbId) return
     try {
       setSubmitting(true)
-      const response = await moveDocument(docId, targetKbId)
+      const response = isCopy
+        ? await copyDocument(docId, targetKbId)
+        : await moveDocument(docId, targetKbId)
       toast.success(response.message)
       onOpenChange(false)
       if (onMoved) onMoved()
@@ -115,24 +125,37 @@ export default function MoveDocumentDialog({
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>
-            {t('documentPanel.moveDocument.title', {
-              defaultValue: '移动到其他知识库',
-            })}
+            {isCopy
+              ? t('documentPanel.copyDocument.title', {
+                defaultValue: '复制到其他知识库',
+              })
+              : t('documentPanel.moveDocument.title', {
+                defaultValue: '移动到其他知识库',
+              })}
           </DialogTitle>
           <DialogDescription>
-            {t('documentPanel.moveDocument.description', {
-              defaultValue:
-                '目标知识库会重新抽取文档的实体与关系；源知识库中的内容会在后台清理。',
-            })}
+            {isCopy
+              ? t('documentPanel.copyDocument.description', {
+                defaultValue:
+                  '目标知识库会重新抽取文档的实体与关系；源知识库中的内容保持不变。',
+              })
+              : t('documentPanel.moveDocument.description', {
+                defaultValue:
+                  '目标知识库会重新抽取文档的实体与关系；源知识库中的内容会在后台清理。',
+              })}
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-3">
           <div className="rounded-xl border border-border/60 bg-muted/10 px-3 py-2 text-sm">
             <div className="text-xs uppercase tracking-[0.12em] text-muted-foreground">
-              {t('documentPanel.moveDocument.movingLabel', {
-                defaultValue: '待移动文档',
-              })}
+              {isCopy
+                ? t('documentPanel.copyDocument.movingLabel', {
+                  defaultValue: '待复制文档',
+                })
+                : t('documentPanel.moveDocument.movingLabel', {
+                  defaultValue: '待移动文档',
+                })}
             </div>
             <div className="mt-1 flex items-center gap-2 truncate font-medium text-foreground">
               <BookOpenTextIcon
@@ -199,14 +222,16 @@ export default function MoveDocumentDialog({
             {t('common.cancel', { defaultValue: '取消' })}
           </Button>
           <Button
-            onClick={handleMove}
+            onClick={handleSubmit}
             disabled={!targetKbId || submitting || kbs.length === 0}
           >
             {submitting
-              ? t('documentPanel.moveDocument.moving', { defaultValue: '移动中…' })
-              : t('documentPanel.moveDocument.confirm', {
-                defaultValue: '确认移动',
-              })}
+              ? isCopy
+                ? t('documentPanel.copyDocument.copying', { defaultValue: '复制中…' })
+                : t('documentPanel.moveDocument.moving', { defaultValue: '移动中…' })
+              : isCopy
+                ? t('documentPanel.copyDocument.confirm', { defaultValue: '确认复制' })
+                : t('documentPanel.moveDocument.confirm', { defaultValue: '确认移动' })}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -28,6 +28,7 @@ import {
   rebuildDocumentMultimodal,
   cancelPipeline,
   cancelDocument,
+  downloadSourceFile,
   DocActionResponse,
   getDocumentsPaginatedWithTimeout,
   DocsStatusesResponse,
@@ -42,7 +43,7 @@ import { useAuthStore, useBackendState } from '@/stores/state'
 import { resolveKnowledgeBaseId, resolveWorkspaceId } from '@/app/routeHelpers'
 import { hasPermission, resolveEffectiveRole } from '@/lib/permissions'
 
-import { RefreshCwIcon, ActivityIcon, ArrowUpIcon, ArrowDownIcon, RotateCcwIcon, CheckSquareIcon, XIcon, AlertTriangle, Info, ImageIcon, SparklesIcon, CircleStopIcon, FolderInputIcon } from 'lucide-react'
+import { RefreshCwIcon, ActivityIcon, ArrowUpIcon, ArrowDownIcon, RotateCcwIcon, CheckSquareIcon, XIcon, AlertTriangle, Info, ImageIcon, SparklesIcon, CircleStopIcon, FolderInputIcon, CopyIcon, DownloadIcon, LoaderIcon } from 'lucide-react'
 import PipelineStatusDialog from '@/components/documents/PipelineStatusDialog'
 
 type StatusFilter = DocStatus | 'all';
@@ -329,6 +330,32 @@ export default function DocumentManager({ allKbsMode = false }: DocumentManagerP
   const activeKbIdForMove =
     useKBStore((s) => s.activeKbId) ?? defaultKnowledgeBaseId
   const [moveTarget, setMoveTarget] = useState<DocStatusResponse | null>(null)
+  // Same dialog serves move and copy; the mode swaps the endpoint + labels.
+  const [moveMode, setMoveMode] = useState<'move' | 'copy'>('move')
+  // Which doc's original file is currently downloading (scopes the spinner
+  // to the clicked row and blocks concurrent duplicate saves).
+  const [downloadingDocId, setDownloadingDocId] = useState<string | null>(null)
+
+  const handleDownloadOriginal = useCallback(
+    async (doc: DocStatusResponse) => {
+      const name = doc.file_path
+      if (!name || downloadingDocId) return
+      setDownloadingDocId(doc.id)
+      try {
+        await downloadSourceFile(name)
+      } catch (err) {
+        toast.error(
+          t('documentPanel.documentManager.downloadFailed', {
+            defaultValue: '下载原始文档失败：{{error}}',
+            error: errorMessage(err),
+          })
+        )
+      } finally {
+        setDownloadingDocId(null)
+      }
+    },
+    [downloadingDocId, t]
+  )
   // Selection is always available inside the documents surface. Destructive
   // actions (rebuild multimodal, delete, clear) remain independently gated by
   // their own ``disabled={!can...}`` props, so allowing a read-only role to
@@ -1866,8 +1893,12 @@ export default function DocumentManager({ allKbsMode = false }: DocumentManagerP
 
       <MoveDocumentDialog
         open={moveTarget !== null}
+        mode={moveMode}
         onOpenChange={(next) => {
-          if (!next) setMoveTarget(null)
+          if (!next) {
+            setMoveTarget(null)
+            setMoveMode('move')
+          }
         }}
         docId={moveTarget?.id ?? null}
         docLabel={moveTarget?.file_path || moveTarget?.id}
@@ -1875,11 +1906,11 @@ export default function DocumentManager({ allKbsMode = false }: DocumentManagerP
         currentKbId={activeKbIdForMove}
         onMoved={() => {
           setMoveTarget(null)
-          // The move endpoint enqueues in target + schedules source
-          // delete; refreshing the current (source) list here makes
-          // the row disappear as soon as the deletion background task
-          // flushes. If the user switches to the target KB, the
-          // doc shows up as PENDING there without extra work.
+          setMoveMode('move')
+          // Move enqueues in target + schedules a source delete, so the
+          // source row disappears once the delete flushes. Copy leaves the
+          // source untouched (the row stays). Either way refresh the current
+          // (source) list; the target KB gets the doc as PENDING on its own.
           void fetchDocuments()
         }}
       />
@@ -2119,7 +2150,49 @@ export default function DocumentManager({ allKbsMode = false }: DocumentManagerP
                                 <XIcon className="h-3.5 w-3.5" />
                               </Button>
                             )}
-                            {canDeleteDocuments && (
+                            {doc.file_path && (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                side="bottom"
+                                tooltip={t(
+                                  'documentPanel.documentManager.downloadDocumentTooltip',
+                                  { defaultValue: '下载原始文档' }
+                                )}
+                                disabled={downloadingDocId !== null}
+                                className="ml-1 h-6 w-6 shrink-0 rounded-full text-muted-foreground hover:bg-emerald-500/10 hover:text-emerald-600 disabled:cursor-wait disabled:opacity-60 dark:hover:text-emerald-300"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  void handleDownloadOriginal(doc)
+                                }}
+                              >
+                                {downloadingDocId === doc.id ? (
+                                  <LoaderIcon className="h-3.5 w-3.5 animate-spin" />
+                                ) : (
+                                  <DownloadIcon className="h-3.5 w-3.5" />
+                                )}
+                              </Button>
+                            )}
+                            {canUploadDocuments && !allKbsMode && (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                side="bottom"
+                                tooltip={t(
+                                  'documentPanel.documentManager.copyDocumentTooltip',
+                                  { defaultValue: '复制到其他知识库' }
+                                )}
+                                className="ml-1 h-6 w-6 shrink-0 rounded-full text-muted-foreground hover:bg-emerald-500/10 hover:text-emerald-600 dark:hover:text-emerald-300"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  setMoveMode('copy')
+                                  setMoveTarget(doc)
+                                }}
+                              >
+                                <CopyIcon className="h-3.5 w-3.5" />
+                              </Button>
+                            )}
+                            {canDeleteDocuments && !allKbsMode && (
                               <Button
                                 variant="ghost"
                                 size="icon"
@@ -2131,6 +2204,7 @@ export default function DocumentManager({ allKbsMode = false }: DocumentManagerP
                                 className="ml-1 h-6 w-6 shrink-0 rounded-full text-muted-foreground hover:bg-emerald-500/10 hover:text-emerald-600 dark:hover:text-emerald-300"
                                 onClick={(e) => {
                                   e.stopPropagation()
+                                  setMoveMode('move')
                                   setMoveTarget(doc)
                                 }}
                               >

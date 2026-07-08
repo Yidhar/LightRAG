@@ -1650,6 +1650,28 @@ export const moveDocument = async (
   return response.data
 }
 
+export type CopyDocumentResponse = {
+  status: 'copied'
+  message: string
+  doc_id: string
+  source_kb_id: string
+  target_kb_id: string
+}
+
+// Copy = re-ingest the document into the target KB while leaving the source
+// KB copy intact (unlike move, which schedules a background delete from the
+// source). Backend gates this on KB_UPLOAD_DOCUMENT.
+export const copyDocument = async (
+  docId: string,
+  targetKbId: string
+): Promise<CopyDocumentResponse> => {
+  const response = await axiosInstance.post(
+    `/documents/${encodeURIComponent(docId)}/copy`,
+    { target_kb_id: targetKbId }
+  )
+  return response.data
+}
+
 export const batchUploadDocuments = async (
   files: File[],
   onUploadProgress?: (fileName: string, percentCompleted: number) => void
