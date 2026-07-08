@@ -150,6 +150,16 @@ class ChunkTokenLimitExceededError(ValueError):
         self.chunk_preview = truncated_preview
 
 
+class ContextLengthExceededError(ValueError):
+    """Raised when the answer LLM rejects a request for exceeding its context
+    token limit even after all conversation history has been dropped.
+
+    The message is user-facing (rendered verbatim in the chat) and tells the
+    operator to clear the conversation / narrow retrieval, since trimming
+    history further cannot help — the retrieved context + query alone overflow.
+    """
+
+
 class DataMigrationError(Exception):
     """Raised when data migration from legacy collection/table fails."""
 

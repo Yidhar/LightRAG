@@ -12,6 +12,7 @@ from lightrag.exceptions import (
     PipelineCancelledException,
     DocumentCancelledException,
     ChunkTokenLimitExceededError,
+    ContextLengthExceededError,
 )
 from lightrag.utils import (
     logger,
@@ -4128,17 +4129,33 @@ async def _llm_answer_with_history_fallback(
                 **kwargs,
             )
         except Exception as exc:
-            if not history or not _looks_like_context_length_error(exc):
-                raise
-            drop = 2 if len(history) >= 2 else 1
-            history = history[drop:]
-            logger.warning(
-                "Answer LLM hit a context-length limit; dropped %d oldest "
-                "history message(s), retrying with %d remaining. (%s)",
-                drop,
-                len(history),
-                exc,
-            )
+            is_ctx_error = _looks_like_context_length_error(exc)
+            if history and is_ctx_error:
+                drop = 2 if len(history) >= 2 else 1
+                history = history[drop:]
+                logger.warning(
+                    "Answer LLM hit a context-length limit; dropped %d oldest "
+                    "history message(s), retrying with %d remaining. (%s)",
+                    drop,
+                    len(history),
+                    exc,
+                )
+                continue
+            if is_ctx_error:
+                # History is already empty and it STILL overflows — the
+                # retrieved context + query alone exceeds the model's token
+                # limit, so trimming history can't help. Surface a clear,
+                # actionable message (the frontend renders it verbatim) so the
+                # user knows to reset rather than seeing a raw provider error.
+                logger.warning(
+                    "Answer LLM context-length limit persists with no history "
+                    "to drop; surfacing clear-conversation hint. (%s)",
+                    exc,
+                )
+                raise ContextLengthExceededError(
+                    PROMPTS["context_overflow_response"]
+                ) from exc
+            raise
 
 
 async def kg_query(
