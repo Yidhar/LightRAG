@@ -4065,6 +4065,82 @@ async def extract_entities(
     return chunk_results
 
 
+# Substrings that identify an LLM "input/context too long" error across the
+# common providers (OpenAI, Azure, Anthropic, DashScope/Qwen, vLLM, etc.).
+# Matched case-insensitively against str(exc) and its ``body``.
+_CONTEXT_LENGTH_ERROR_MARKERS = (
+    "context length",
+    "context_length_exceeded",
+    "maximum context",
+    "context window",
+    "reduce the length",
+    "reduce your prompt",
+    "too many tokens",
+    "input is too long",
+    "prompt is too long",
+    "string too long",
+    "exceeds the maximum",
+    "maximum allowed tokens",
+    "range of input length",
+)
+
+
+def _looks_like_context_length_error(exc: Exception) -> bool:
+    """Best-effort detection of an LLM context/token-limit rejection."""
+    parts = [str(exc)]
+    body = getattr(exc, "body", None)
+    if body is not None:
+        parts.append(str(body))
+    haystack = " ".join(parts).lower()
+    return any(marker in haystack for marker in _CONTEXT_LENGTH_ERROR_MARKERS)
+
+
+async def _llm_answer_with_history_fallback(
+    use_model_func,
+    user_query: str,
+    *,
+    system_prompt: str,
+    history_messages: list | None,
+    **kwargs,
+):
+    """Call the answer LLM, dropping the OLDEST conversation turns and
+    retrying whenever the model rejects the request for exceeding its
+    context-token limit ("从远到近的丢弃重试").
+
+    History is oldest-first ([user, assistant, user, assistant, ...]); on a
+    context-length error we drop the two oldest messages (one turn) and retry,
+    keeping the most-recent turns closest to the current query. If the history
+    empties and it still overflows, the retrieved context itself is too large
+    (not fixable by trimming history) — the error propagates unchanged.
+
+    Works for streaming and non-streaming: the OpenAI-style binding awaits the
+    provider ``create()`` (which is where the context-length 400 is raised)
+    BEFORE returning the stream iterator, so the error surfaces at this await
+    in both cases.
+    """
+    history = list(history_messages or [])
+    while True:
+        try:
+            return await use_model_func(
+                user_query,
+                system_prompt=system_prompt,
+                history_messages=history,
+                **kwargs,
+            )
+        except Exception as exc:
+            if not history or not _looks_like_context_length_error(exc):
+                raise
+            drop = 2 if len(history) >= 2 else 1
+            history = history[drop:]
+            logger.warning(
+                "Answer LLM hit a context-length limit; dropped %d oldest "
+                "history message(s), retrying with %d remaining. (%s)",
+                drop,
+                len(history),
+                exc,
+            )
+
+
 async def kg_query(
     query: str,
     knowledge_graph_inst: BaseGraphStorage,
@@ -4235,7 +4311,8 @@ async def kg_query(
         )
         response = cached_response
     else:
-        response = await use_model_func(
+        response = await _llm_answer_with_history_fallback(
+            use_model_func,
             user_query,
             system_prompt=sys_prompt,
             history_messages=query_param.conversation_history,
@@ -6488,7 +6565,8 @@ async def naive_query(
         )
         response = cached_response
     else:
-        response = await use_model_func(
+        response = await _llm_answer_with_history_fallback(
+            use_model_func,
             user_query,
             system_prompt=sys_prompt,
             history_messages=query_param.conversation_history,

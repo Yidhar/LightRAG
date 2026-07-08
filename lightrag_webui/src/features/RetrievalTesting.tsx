@@ -371,11 +371,21 @@ export default function RetrievalTesting() {
       // Determine the effective mode
       const effectiveMode = modeOverride || state.querySettings.mode
 
-      // Determine effective history turns with bypass override
+      // Multi-turn conversation: send the most recent turns as context so
+      // follow-ups keep the thread. Default to MAX_HISTORY_TURNS (20) when the
+      // user hasn't configured a value, and always cap at 20 so the request
+      // stays bounded — the backend additionally drops the oldest turns and
+      // retries if the model still rejects it for exceeding its token limit.
+      const MAX_HISTORY_TURNS = 20
       const configuredHistoryTurns = state.querySettings.history_turns || 0
-      const effectiveHistoryTurns = (effectiveMode === 'bypass' && configuredHistoryTurns === 0)
-        ? 3
-        : configuredHistoryTurns
+      const effectiveHistoryTurns = (() => {
+        if (configuredHistoryTurns > 0) {
+          return Math.min(configuredHistoryTurns, MAX_HISTORY_TURNS)
+        }
+        // Unset (0): bypass mode uses a small default; other modes get the
+        // full 20-turn window.
+        return effectiveMode === 'bypass' ? 3 : MAX_HISTORY_TURNS
+      })()
 
       const queryParams = {
         ...state.querySettings,
